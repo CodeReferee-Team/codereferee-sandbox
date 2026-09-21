@@ -14,3 +14,9 @@ Chaos v1은 `fixture-api`를 제어된 테스트 대상으로 사용합니다.
 kubectl apply -f k8s/fixture.yaml
 kubectl -n codereferee-sandbox rollout status deployment/fixture-api
 ```
+
+정상 상태의 Pod·HTTP probe·로그를 수집하려면 다음을 실행합니다.
+
+```bash
+python scripts/collect_baseline.py
+```
