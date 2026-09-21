@@ -20,3 +20,9 @@ kubectl -n codereferee-sandbox rollout status deployment/fixture-api
 ```bash
 python scripts/collect_baseline.py
 ```
+
+Pod Kill과 복구 관측을 실행하려면 다음을 실행합니다.
+
+```bash
+python scripts/run_pod_kill_experiment.py --baseline-probes 5
+```

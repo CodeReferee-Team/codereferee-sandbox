@@ -76,9 +76,13 @@ Pod Kill과 복구 관측을 수행한다.
   "httpStatus": 200,
   "browserLoaded": false,
   "pageTitle": null,
-  "runCommand": ["kubectl", "delete", "pod", "fixture-api-abcde"]
+  "runCommand": ["kubectl", "delete", "pod", "fixture-api-abcde"],
+  "probeTransport": "kubectl_port_forward"
 }
 ```
+
+`probeTransport`은 HTTP 관측 경로를 나타낸다. Chaos v1의 HTTP 오류율과
+지연시간은 외부 Ingress가 아니라 로컬 `kubectl port-forward` 기준 측정값이다.
 
 ### Chaos v1 확장 필드
 
@@ -94,6 +98,17 @@ AI Core는 후속 작업에서 두 필드를 모델과 evidence 변환 과정에
 {
   "schemaVersion": "chaos-v1",
   "requestId": "optional-correlation-id",
+  "baseline": {
+    "pod": {
+      "name": "fixture-api-abcde",
+      "ready": true,
+      "restart_count": 0
+    },
+    "metrics": {
+      "availability": 1.0,
+      "p95_latency_ms": 20
+    }
+  },
   "metrics": {
     "availability": 0.82,
     "p95_latency_ms": 420,
