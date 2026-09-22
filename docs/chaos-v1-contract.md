@@ -75,11 +75,15 @@ Pod Kill과 복구 관측을 수행한다.
   "serverUrl": "http://fixture-api.codereferee-sandbox.svc.cluster.local",
   "httpStatus": 200,
   "browserLoaded": false,
+  "serviceCheckAttempted": true,
+  "browserCheckAttempted": false,
   "pageTitle": null,
   "runCommand": ["kubectl", "delete", "pod", "fixture-api-abcde"],
   "probeTransport": "kubectl_port_forward"
 }
 ```
+
+`serviceCheckAttempted`와 `browserCheckAttempted`는 각각 HTTP 서비스 검사와 브라우저 검사를 실제로 수행했는지 나타낸다. Chaos v1은 HTTP probe만 수행하므로 전자는 `true`, 후자는 `false`다. `browserLoaded: false`는 브라우저 검사를 실패했다는 뜻이 아니라, 브라우저 검사를 실행하지 않았다는 뜻이다.
 
 `probeTransport`은 HTTP 관측 경로를 나타낸다. Chaos v1의 HTTP 오류율과
 지연시간은 외부 Ingress가 아니라 로컬 `kubectl port-forward` 기준 측정값이다.
