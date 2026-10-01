@@ -11,11 +11,13 @@ import json
 import re
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from collect_baseline import kubectl_environment
-from run_pod_kill_experiment import collect_probes, metrics_from_probes, probe_once, start_port_forward, stop_process, wait_for_service
+from run_pod_kill_experiment import (collect_probes, get_target_configuration, get_ready_pod, metrics_from_probes,
+                                     probe_once, start_port_forward, stop_process, wait_for_service)
 
 
 ROLE = "litmus-agent-chaos-operator-litmus-admin"
@@ -29,6 +31,9 @@ def main() -> int:
     if missing:
         raise SystemExit(f"target file missing: {', '.join(missing)}")
     name = "codereferee-pod-delete-" + safe_name(target.get("name") or target["deployment"]) + f"-{int(time.time())}"
+    source_pod = get_ready_pod(target["namespace"], target["labelSelector"], target.get("service") or target["deployment"])
+    target_configuration = get_target_configuration(target["namespace"], target["deployment"])
+    started_at = now_utc()
     forward = None
     baseline: dict[str, Any] | None = None
     try:
@@ -42,8 +47,18 @@ def main() -> int:
     finally:
         if forward:
             stop_process(forward)
-    output = {"schemaVersion": "litmus-v1", "scenario": "pod_delete", "target": target,
-              "chaosEngine": name, "chaosResult": result}
+    replacement_pod = get_ready_pod(target["namespace"], target["labelSelector"], target.get("service") or target["deployment"])
+    output = {"schemaVersion": "chaos-v1", "scenario": "pod_delete", "observationStatus": "observed",
+              "target": target, "replicas": target_configuration["replicas"], "chaosEngine": name, "chaosResult": result,
+              "chaos_observation": {"type": "pod_kill", "kill_method": "litmus_pod_delete", "started_at": started_at,
+                                    "recovered_at": now_utc(), "target_pod_uid": source_pod.get("uid"),
+                                    "replacement_pod_uid": replacement_pod.get("uid"),
+                                    "target_configuration": target_configuration,
+                                    "observation_window": {"baseline_probe_count": args.baseline_probes,
+                                      "recovery_timeout_seconds": args.timeout_seconds,
+                                      "error_rate_denominator": "all HTTP GET / probes collected during baseline and Litmus execution"},
+                                    "abort_condition": {"triggered": result.get("verdict") == "Stopped",
+                                      "reason": result.get("verdict") if result.get("verdict") != "Pass" else None}}}
     if baseline is not None:
         probes = [*baseline["probes"], *recovery_probes]
         output["baseline"] = {"metrics": metrics_from_probes(baseline["probes"])}
@@ -174,6 +189,10 @@ def wait_for_result(namespace: str, engine: str, timeout: int, local_port: int |
 
 def safe_name(value: str) -> str:
     return re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")[:40]
+
+
+def now_utc() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 if __name__ == "__main__":
