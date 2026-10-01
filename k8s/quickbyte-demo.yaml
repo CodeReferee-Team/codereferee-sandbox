@@ -1,0 +1,194 @@
+# POC only: deploys the agreed QuickByte_Demo repository as a real Chaos target.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: codereferee-quickbyte
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: quickbyte-db
+  namespace: codereferee-quickbyte
+type: Opaque
+stringData:
+  username: quickbite
+  password: quickbite
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quickbyte-postgres
+  namespace: codereferee-quickbyte
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: quickbyte-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: quickbyte-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          env:
+            - name: POSTGRES_DB
+              value: quickbite
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: quickbyte-db
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: quickbyte-db
+                  key: password
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U quickbite -d quickbite"]
+            initialDelaySeconds: 3
+            periodSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: quickbyte-postgres
+  namespace: codereferee-quickbyte
+spec:
+  selector:
+    app.kubernetes.io/name: quickbyte-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quickbyte-redis
+  namespace: codereferee-quickbyte
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: quickbyte-redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: quickbyte-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:8-alpine
+          args: ["redis-server", "--appendonly", "yes"]
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 2
+            periodSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: quickbyte-redis
+  namespace: codereferee-quickbyte
+spec:
+  selector:
+    app.kubernetes.io/name: quickbyte-redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quickbyte-api
+  namespace: codereferee-quickbyte
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: quickbyte-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: quickbyte-api
+    spec:
+      containers:
+        - name: api
+          image: codereferee/quickbyte-demo:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DB_URL
+              value: jdbc:postgresql://quickbyte-postgres:5432/quickbite
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: quickbyte-db
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: quickbyte-db
+                  key: password
+            - name: REDIS_HOST
+              value: quickbyte-redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: JWT_ISSUER
+              value: quickbyte-chaos-poc
+            - name: JWT_SECRET
+              value: quickbyte-chaos-poc-secret-change-before-production
+            - name: BOOTSTRAP_ADMIN_EMAIL
+              value: admin@quickbyte.local
+            - name: BOOTSTRAP_ADMIN_PASSWORD
+              value: quickbyte-admin-local
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 12
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: quickbyte-api
+  namespace: codereferee-quickbyte
+spec:
+  selector:
+    app.kubernetes.io/name: quickbyte-api
+  ports:
+    - port: 8080
+      targetPort: 8080
