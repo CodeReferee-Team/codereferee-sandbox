@@ -38,6 +38,8 @@ def main() -> int:
     try:
         repository = workspace / "repository"
         clone(args.repository_url, args.branch, repository)
+        if args.patch_file:
+            apply_patch(repository, args.patch_file)
         commit_sha = run(["git", "rev-parse", "HEAD"], cwd=repository).stdout.strip()
         image = f"codereferee/{request}:{commit_sha[:12]}"
         dockerfile = repository / profile.get("dockerfile", "Dockerfile")
@@ -75,6 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--branch")
     parser.add_argument("--request-id", required=True)
     parser.add_argument("--profile", required=True, help="Name of a checked-in Sandbox deployment profile.")
+    parser.add_argument("--patch-file", type=Path)
     parser.add_argument("--rollout-timeout-seconds", type=int, default=240)
     return parser.parse_args()
 
@@ -105,6 +108,18 @@ def clone(url: str, branch: str | None, destination: Path) -> None:
         command.extend(["--branch", branch])
     command.extend([url, str(destination)])
     run(command)
+
+
+def apply_patch(repository: Path, patch_file: Path) -> None:
+    if not patch_file.is_file():
+        raise RuntimeError("Patch file was not found.")
+    if patch_file.stat().st_size > 1_000_000:
+        raise RuntimeError("Patch exceeds the 1 MiB Sandbox limit.")
+    patch = patch_file.read_text(encoding="utf-8")
+    if any(value in patch for value in (".github/workflows/", ".git/", "../")):
+        raise RuntimeError("Patch changes a protected path.")
+    run(["git", "apply", "--check", str(patch_file)], cwd=repository)
+    run(["git", "apply", str(patch_file)], cwd=repository)
 
 
 def apply(manifest: str) -> None:
