@@ -1,0 +1,12 @@
+{
+  "dockerfile": "Dockerfile",
+  "buildContext": ".",
+  "manifestTemplate": "k8s/quickbyte-demo.yaml",
+  "target": {
+    "name": "quickbyte-api",
+    "deployment": "quickbyte-api",
+    "service": "quickbyte-api",
+    "servicePort": 8080,
+    "labelSelector": "app.kubernetes.io/name=quickbyte-api"
+  }
+}
