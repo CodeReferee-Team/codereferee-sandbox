@@ -49,6 +49,7 @@ class RepositoryValidationRequest(BaseModel):
     chaos_mode: str | None = Field(default=None, alias="chaosMode")
     chaos_target: ChaosTarget | None = Field(default=None, alias="chaosTarget")
     deployment_profile: str | None = Field(default=None, alias="deploymentProfile")
+    patch_diff: str | None = Field(default=None, alias="patchDiff")
 
 
 @app.get("/health")
@@ -158,12 +159,23 @@ def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="deploymentProfile requires chaosMode=litmus_pod_delete.")
     if not request.request_id:
         raise HTTPException(status_code=422, detail="deploymentProfile requires requestId.")
-    completed = subprocess.run(
-        [sys.executable, str(DEPLOY_SCRIPT), "--repository-url", request.repository_url,
-         "--request-id", request.request_id, "--profile", request.deployment_profile,
-         *(["--branch", request.branch] if request.branch else [])],
-        cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=600,
-    )
+    command = [sys.executable, str(DEPLOY_SCRIPT), "--repository-url", request.repository_url,
+               "--request-id", request.request_id, "--profile", request.deployment_profile,
+               *(["--branch", request.branch] if request.branch else [])]
+    patch_path: Path | None = None
+    if request.patch_diff is not None:
+        if len(request.patch_diff.encode("utf-8")) > 1_000_000:
+            raise HTTPException(status_code=422, detail="patchDiff exceeds the 1 MiB Sandbox limit.")
+        runtime = PROJECT_ROOT / ".runtime"
+        runtime.mkdir(exist_ok=True)
+        patch_path = runtime / f"patch-{request.request_id}.diff"
+        patch_path.write_text(request.patch_diff, encoding="utf-8")
+        command.extend(["--patch-file", str(patch_path)])
+    try:
+        completed = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=600)
+    finally:
+        if patch_path:
+            patch_path.unlink(missing_ok=True)
     if completed.returncode:
         raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "Repository deployment failed.")
     try:
