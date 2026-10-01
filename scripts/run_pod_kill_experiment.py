@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from http.client import RemoteDisconnected
 import json
+import os
 import subprocess
 import sys
 import time
@@ -15,7 +16,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
-from collect_baseline import LABEL_SELECTOR, SERVICE, get_ready_pod, percentile
+from collect_baseline import LABEL_SELECTOR, SERVICE, get_ready_pod, kubectl_environment, percentile
 
 
 NAMESPACE = "codereferee-sandbox"
@@ -26,6 +27,7 @@ def main() -> int:
     args = parse_args()
     started_at = time.monotonic()
     original_pod = get_ready_pod(args.namespace)
+    target_configuration = get_target_configuration(args.namespace)
     forward = start_port_forward(args.namespace, args.local_port)
     try:
         wait_for_service(forward, args.local_port, args.request_timeout_seconds)
@@ -59,6 +61,7 @@ def main() -> int:
     metrics["recovery_seconds"] = observation["recovery_seconds"]
     result = {
         "exitCode": 0 if recovered else 1,
+        "observationStatus": "observed",
         "stdout": "Fixture recovered after Pod Kill." if recovered else "Fixture did not recover before the deadline.",
         "stderr": "" if recovered else observation["failure_reason"],
         "timedOut": not recovered,
@@ -76,20 +79,40 @@ def main() -> int:
         },
         "metrics": metrics,
         "probeTransport": "kubectl_port_forward",
+        "replicas": target_configuration["replicas"],
         "chaos_observation": {
             "type": "pod_kill",
             "target_kind": "Pod",
             "target_name": original_pod["name"],
+            "target_pod_uid": original_pod["uid"],
             "namespace": args.namespace,
+            "replicas": target_configuration["replicas"],
+            "target_configuration": target_configuration,
+            "kill_method": "kubectl_delete_pod",
+            "delete_wait": False,
+            "graceful_termination": True,
             "started_at": fault_started_at,
             "replacement_pod_created": observation["replacement_pod_created"],
             "replacement_pod_name": observation["replacement_pod_name"],
+            "replacement_pod_uid": observation["replacement_pod_uid"],
             "replacement_restart_count": observation["replacement_restart_count"],
             "recovered": observation["recovered"],
             "recovered_at": observation["recovered_at"],
             "recovery_seconds": observation["recovery_seconds"],
             "kubernetes_events": observation["events"],
             "replacement_logs": observation["logs"],
+            "observation_window": {
+                "baseline_probe_count": args.baseline_probes,
+                "recovery_timeout_seconds": args.recovery_timeout_seconds,
+                "probe_interval_seconds": args.probe_interval_seconds,
+                "request_timeout_seconds": args.request_timeout_seconds,
+                "total_probe_count": len(all_probes),
+                "failure_probe_count": len(all_probes) - successes_from_probes(all_probes),
+            },
+            "abort_condition": {
+                "triggered": not recovered,
+                "reason": "recovery_timeout" if not recovered else None,
+            },
         },
         "source": {
             "real_execution_observed": True,
@@ -121,6 +144,7 @@ def start_port_forward(namespace: str, local_port: int) -> subprocess.Popen[str]
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=kubectl_environment(),
     )
 
 
@@ -159,6 +183,7 @@ def observe_recovery(
             return {
                 "replacement_pod_created": True,
                 "replacement_pod_name": replacement["name"],
+                "replacement_pod_uid": replacement["uid"],
                 "replacement_restart_count": replacement["restart_count"],
                 "recovered": True,
                 "recovered_at": now_utc(),
@@ -174,6 +199,7 @@ def observe_recovery(
     return {
         "replacement_pod_created": False,
         "replacement_pod_name": None,
+        "replacement_pod_uid": None,
         "replacement_restart_count": None,
         "recovered": False,
         "recovered_at": None,
@@ -197,6 +223,7 @@ def find_replacement_pod(namespace: str, original_pod_name: str) -> dict[str, An
             statuses = pod.get("status", {}).get("containerStatuses", [])
             return {
                 "name": pod["metadata"]["name"],
+                "uid": pod["metadata"].get("uid"),
                 "restart_count": sum(status.get("restartCount", 0) for status in statuses),
             }
     return None
@@ -261,15 +288,49 @@ def verify_replacement_service(namespace: str, local_port: int, timeout_seconds:
 
 
 def metrics_from_probes(probes: list[dict[str, Any]]) -> dict[str, Any]:
-    successes = sum(probe["success"] for probe in probes)
+    successes = successes_from_probes(probes)
     availability = successes / len(probes) if probes else 0.0
     return {
         "availability": availability,
         "p95_latency_ms": percentile([probe["latency_ms"] for probe in probes], 95),
         "error_rate": 1 - availability,
+        "probe_count": len(probes),
+        "success_count": successes,
+        "failure_count": len(probes) - successes,
+        "error_rate_denominator": "all HTTP GET / probes collected during baseline, recovery, and replacement verification; readiness wait probes are excluded",
         "cpu_usage_percent": None,
         "memory_usage_mb": None,
         "restart_count": 0,
+    }
+
+
+def successes_from_probes(probes: list[dict[str, Any]]) -> int:
+    return sum(probe["success"] for probe in probes)
+
+
+def get_target_configuration(namespace: str) -> dict[str, Any]:
+    deployment = json.loads(kubectl(namespace, "get", "deployment", SERVICE, "-o", "json").stdout)
+    template_spec = deployment.get("spec", {}).get("template", {}).get("spec", {})
+    containers = template_spec.get("containers", [])
+    container = containers[0] if containers else {}
+    return {
+        "replicas": deployment.get("spec", {}).get("replicas", 1),
+        "readiness_probe": normalize_probe(container.get("readinessProbe")),
+        "liveness_probe": normalize_probe(container.get("livenessProbe")),
+        "termination_grace_period_seconds": template_spec.get("terminationGracePeriodSeconds", 30),
+    }
+
+
+def normalize_probe(probe: object) -> dict[str, Any] | None:
+    if not isinstance(probe, dict):
+        return None
+    return {
+        "type": "tcp_socket" if "tcpSocket" in probe else "http_get" if "httpGet" in probe else "exec" if "exec" in probe else "unknown",
+        "initial_delay_seconds": probe.get("initialDelaySeconds"),
+        "period_seconds": probe.get("periodSeconds"),
+        "timeout_seconds": probe.get("timeoutSeconds"),
+        "failure_threshold": probe.get("failureThreshold"),
+        "success_threshold": probe.get("successThreshold"),
     }
 
 
@@ -279,6 +340,7 @@ def kubectl(namespace: str, *args: str) -> subprocess.CompletedProcess[str]:
         check=True,
         capture_output=True,
         text=True,
+        env=kubectl_environment(),
     )
 
 

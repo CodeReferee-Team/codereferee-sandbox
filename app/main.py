@@ -62,7 +62,7 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         # does not start a headless browser.  Make that distinction explicit
         # so AI Core does not infer a failed browser smoke check from
         # browserLoaded=false.
-        result["serviceCheckAttempted"] = True
+        result["serviceCheckAttempted"] = result.get("observationStatus") == "observed"
         result["browserCheckAttempted"] = False
         result["requestId"] = request.request_id
         result["repositoryUrl"] = request.repository_url
@@ -84,7 +84,7 @@ def parse_experiment_result(completed: subprocess.CompletedProcess[str]) -> dict
         result = json.loads(completed.stdout)
     except json.JSONDecodeError:
         return {
-            "exitCode": completed.returncode or 1,
+            "exitCode": None,
             "stdout": completed.stdout.strip(),
             "stderr": completed.stderr.strip() or "Sandbox experiment returned invalid JSON.",
             "timedOut": False,
@@ -96,6 +96,8 @@ def parse_experiment_result(completed: subprocess.CompletedProcess[str]) -> dict
             "pageTitle": None,
             "runCommand": [sys.executable, str(EXPERIMENT_SCRIPT)],
             "schemaVersion": "chaos-v1",
+            "observationStatus": "infrastructure_error",
+            "infraError": "sandbox_process_failed",
         }
     if completed.returncode != 0 and not result.get("stderr"):
         result["stderr"] = completed.stderr.strip() or "Chaos v1 experiment failed."
@@ -120,6 +122,8 @@ def infrastructure_error(
         "pageTitle": None,
         "runCommand": [sys.executable, str(EXPERIMENT_SCRIPT)],
         "schemaVersion": "chaos-v1",
+        "observationStatus": "infrastructure_error",
+        "infraError": "sandbox_execution_timeout" if timed_out else "sandbox_execution_failed",
         "requestId": request.request_id,
         "repositoryUrl": request.repository_url,
         "branch": request.branch,
