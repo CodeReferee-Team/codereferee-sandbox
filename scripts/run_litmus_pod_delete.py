@@ -14,34 +14,51 @@ import time
 from pathlib import Path
 from typing import Any
 
+from collect_baseline import kubectl_environment
+
 
 ROLE = "litmus-agent-chaos-operator-litmus-admin"
 
 
 def main() -> int:
     args = parse_args()
-    target = json.loads(args.target_file.read_text(encoding="utf-8")).get("target", {})
+    target = load_target(args)
     required = ("namespace", "deployment", "labelSelector")
     missing = [name for name in required if not target.get(name)]
     if missing:
         raise SystemExit(f"target file missing: {', '.join(missing)}")
-    name = "codereferee-pod-delete-" + safe_name(target.get("name") or target["deployment"])
+    name = "codereferee-pod-delete-" + safe_name(target.get("name") or target["deployment"]) + f"-{int(time.time())}"
     apply(target["namespace"], name, target["deployment"], target["labelSelector"])
     result = wait_for_result(target["namespace"], name, args.timeout_seconds)
     output = {"schemaVersion": "litmus-v1", "scenario": "pod_delete", "target": target,
               "chaosEngine": name, "chaosResult": result}
-    print(json.dumps(output, ensure_ascii=False, indent=2))
+    rendered = json.dumps(output, ensure_ascii=False, indent=2)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
     return 0 if result.get("verdict") == "Pass" else 1
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run generic Litmus Pod Delete.")
-    parser.add_argument("--target-file", type=Path, required=True)
+    parser.add_argument("--target-file", type=Path)
+    parser.add_argument("--namespace")
+    parser.add_argument("--deployment")
+    parser.add_argument("--label-selector")
     parser.add_argument("--timeout-seconds", type=int, default=180)
+    parser.add_argument("--output", type=Path, help="Optional JSON evidence output path.")
     return parser.parse_args()
 
 
+def load_target(args: argparse.Namespace) -> dict[str, Any]:
+    if args.target_file:
+        return json.loads(args.target_file.read_text(encoding="utf-8")).get("target", {})
+    return {"namespace": args.namespace, "deployment": args.deployment, "labelSelector": args.label_selector}
+
+
 def apply(namespace: str, engine: str, deployment: str, selector: str) -> None:
+    copy_experiment(namespace)
     manifest = f'''apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -87,15 +104,33 @@ spec:
             - name: FORCE
               value: "true"
 '''
-    completed = subprocess.run(["kubectl", "apply", "-f", "-"], input=manifest, text=True, capture_output=True)
+    completed = subprocess.run(["kubectl", "apply", "-f", "-"], input=manifest, text=True, capture_output=True,
+                               env=kubectl_environment())
     if completed.returncode:
         raise SystemExit(completed.stderr.strip() or completed.stdout.strip())
+
+
+def copy_experiment(namespace: str) -> None:
+    """Copy the official chart's namespaced Pod Delete definition to the target."""
+    source = subprocess.run(["kubectl", "get", "chaosexperiment", "pod-delete", "-n", "litmus", "-o", "json"],
+                            text=True, capture_output=True, env=kubectl_environment(), check=True)
+    experiment = json.loads(source.stdout)
+    experiment.pop("status", None)
+    metadata = experiment["metadata"]
+    for field in ("creationTimestamp", "generation", "resourceVersion", "uid", "managedFields", "annotations"):
+        metadata.pop(field, None)
+    metadata["namespace"] = namespace
+    copied = subprocess.run(["kubectl", "apply", "-f", "-"], input=json.dumps(experiment), text=True,
+                            capture_output=True, env=kubectl_environment())
+    if copied.returncode:
+        raise SystemExit(copied.stderr.strip() or copied.stdout.strip())
 
 
 def wait_for_result(namespace: str, engine: str, timeout: int) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        result = subprocess.run(["kubectl", "get", "chaosresult", "-n", namespace, "-o", "json"], text=True, capture_output=True)
+        result = subprocess.run(["kubectl", "get", "chaosresult", "-n", namespace, "-o", "json"], text=True,
+                                capture_output=True, env=kubectl_environment())
         if result.returncode == 0:
             for item in json.loads(result.stdout).get("items", []):
                 if item.get("metadata", {}).get("name", "").startswith(engine + "-"):
