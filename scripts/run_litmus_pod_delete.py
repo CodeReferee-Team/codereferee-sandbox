@@ -41,6 +41,7 @@ def main() -> int:
             forward = start_port_forward(target["namespace"], target["service"], int(target["servicePort"]), args.local_port)
             wait_for_service(forward, args.local_port, args.request_timeout_seconds)
             baseline = collect_probes(args.local_port, args.baseline_probes, args.request_timeout_seconds)
+        fault_started_monotonic = time.monotonic()
         apply(target["namespace"], name, target["deployment"], target["labelSelector"])
         result, recovery_probes = wait_for_result(target["namespace"], name, args.timeout_seconds, args.local_port if forward else None,
                                                    args.request_timeout_seconds)
@@ -51,7 +52,8 @@ def main() -> int:
     output = {"schemaVersion": "chaos-v1", "scenario": "pod_delete", "observationStatus": "observed",
               "target": target, "replicas": target_configuration["replicas"], "chaosEngine": name, "chaosResult": result,
               "chaos_observation": {"type": "pod_kill", "kill_method": "litmus_pod_delete", "started_at": started_at,
-                                    "recovered_at": now_utc(), "target_pod_uid": source_pod.get("uid"),
+                                    "recovered_at": now_utc(), "recovery_seconds": round(time.monotonic() - fault_started_monotonic, 2),
+                                    "target_pod_uid": source_pod.get("uid"),
                                     "replacement_pod_uid": replacement_pod.get("uid"),
                                     "target_configuration": target_configuration,
                                     "observation_window": {"baseline_probe_count": args.baseline_probes,
