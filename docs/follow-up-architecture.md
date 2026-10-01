@@ -31,3 +31,15 @@ Private repository access must use a short-lived GitHub App installation token
 or equivalent ephemeral credential delivered over the private Backend-to-
 Sandbox path. Do not put tokens in repository URLs, logs, artifacts, Git, or
 Kubernetes manifests. The token must be discarded after clone.
+
+## Container Kill on local Docker Desktop
+
+Litmus `container-kill` was attempted against the local Docker Desktop
+`kubeadm` cluster and returned `CHAOS_INJECT_ERROR`: its helper could not use
+the cluster's containerd CRI v1 runtime socket. This is a local cluster/runtime
+compatibility issue, not a QuickByte application failure.
+
+Keep Pod Delete as the supported local baseline. Re-test Container Kill on a
+kind-compatible or managed Kubernetes cluster after confirming the Litmus
+runtime socket configuration. Report this condition as infrastructure/cluster
+capability unsupported, never as a repository failure.
