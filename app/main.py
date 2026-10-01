@@ -1,4 +1,4 @@
-"""HTTP adapter for the controlled Chaos v1 fixture experiment."""
+"""HTTP adapter for fixture and deployed-repository Chaos v1 experiments."""
 
 from __future__ import annotations
 
@@ -15,10 +15,24 @@ from pydantic import BaseModel, ConfigDict, Field
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT_SCRIPT = PROJECT_ROOT / "scripts" / "run_pod_kill_experiment.py"
-EXPERIMENT_TIMEOUT_SECONDS = 120
+LITMUS_SCRIPT = PROJECT_ROOT / "scripts" / "run_litmus_pod_delete.py"
+EXPERIMENT_TIMEOUT_SECONDS = 300
 experiment_lock = threading.Lock()
 
 app = FastAPI(title="CodeReferee Sandbox", version="0.1.0")
+
+
+class ChaosTarget(BaseModel):
+    """A pre-deployed, request-scoped Kubernetes workload to observe."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    namespace: str
+    deployment: str
+    service: str
+    service_port: int = Field(alias="servicePort")
+    label_selector: str = Field(alias="labelSelector")
+    name: str | None = None
 
 
 class RepositoryValidationRequest(BaseModel):
@@ -30,6 +44,8 @@ class RepositoryValidationRequest(BaseModel):
     branch: str | None = None
     commit_sha: str | None = Field(default=None, alias="commitSha")
     request_id: str | None = Field(default=None, alias="requestId")
+    chaos_mode: str | None = Field(default=None, alias="chaosMode")
+    chaos_target: ChaosTarget | None = Field(default=None, alias="chaosTarget")
 
 
 @app.get("/health")
@@ -39,19 +55,15 @@ def health() -> dict[str, str]:
 
 @app.post("/repositories/validate")
 def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
-    """Run the controlled Chaos v1 experiment.
-
-    The request keeps the AI Core repository fields for API compatibility. Chaos v1
-    intentionally executes the local fixture service rather than the requested
-    repository; see docs/chaos-v1-contract.md for the scope.
-    """
+    """Run fixture Chaos, or explicit Litmus Pod Delete for a deployed target."""
 
     if not experiment_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A Chaos v1 experiment is already running.")
 
     try:
+        command = experiment_command(request)
         completed = subprocess.run(
-            [sys.executable, str(EXPERIMENT_SCRIPT)],
+            command,
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
@@ -102,6 +114,27 @@ def parse_experiment_result(completed: subprocess.CompletedProcess[str]) -> dict
     if completed.returncode != 0 and not result.get("stderr"):
         result["stderr"] = completed.stderr.strip() or "Chaos v1 experiment failed."
     return result
+
+
+def experiment_command(request: RepositoryValidationRequest) -> list[str]:
+    if request.chaos_mode in (None, "fixture") and request.chaos_target is None:
+        return [sys.executable, str(EXPERIMENT_SCRIPT)]
+    if request.chaos_mode != "litmus_pod_delete" or request.chaos_target is None:
+        raise HTTPException(
+            status_code=422,
+            detail="litmus_pod_delete requires chaosTarget; fixture mode does not accept a target.",
+        )
+    target = request.chaos_target
+    return [
+        sys.executable, str(LITMUS_SCRIPT),
+        "--namespace", target.namespace,
+        "--deployment", target.deployment,
+        "--service", target.service,
+        "--service-port", str(target.service_port),
+        "--label-selector", target.label_selector,
+        "--baseline-probes", "20",
+        "--timeout-seconds", "240",
+    ]
 
 
 def infrastructure_error(
