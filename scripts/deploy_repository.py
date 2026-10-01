@@ -16,6 +16,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from collect_baseline import kubectl_environment
 
 
@@ -26,7 +28,6 @@ RUNTIME_ROOT = ROOT / ".runtime"
 
 def main() -> int:
     args = parse_args()
-    profile = load_profile(args.profile)
     request = safe_name(args.request_id or "local")
     namespace = f"codereferee-{request}"[:63].rstrip("-")
     RUNTIME_ROOT.mkdir(exist_ok=True)
@@ -40,6 +41,8 @@ def main() -> int:
         clone(args.repository_url, args.branch, repository)
         if args.patch_file:
             apply_patch(repository, args.patch_file)
+        profile_name = args.profile or repository_profile_name(repository)
+        profile = load_profile(profile_name)
         commit_sha = run(["git", "rev-parse", "HEAD"], cwd=repository).stdout.strip()
         image = f"codereferee/{request}:{commit_sha[:12]}"
         dockerfile = repository / profile.get("dockerfile", "Dockerfile")
@@ -60,7 +63,7 @@ def main() -> int:
             "repository": {"url": args.repository_url, "branch": args.branch, "commitSha": commit_sha},
             "target": target,
             "image": image,
-            "deploymentProfile": args.profile,
+            "deploymentProfile": profile_name,
         }, ensure_ascii=False))
         return 0
     except Exception:
@@ -76,7 +79,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repository-url", required=True)
     parser.add_argument("--branch")
     parser.add_argument("--request-id", required=True)
-    parser.add_argument("--profile", required=True, help="Name of a checked-in Sandbox deployment profile.")
+    parser.add_argument("--profile", help="Optional checked-in Sandbox deployment profile override.")
     parser.add_argument("--patch-file", type=Path)
     parser.add_argument("--rollout-timeout-seconds", type=int, default=240)
     return parser.parse_args()
@@ -93,6 +96,17 @@ def load_profile(name: str) -> dict[str, Any]:
         if key not in profile:
             raise RuntimeError(f"Deployment profile is missing {key}.")
     return profile
+
+
+def repository_profile_name(repository: Path) -> str:
+    path = repository / ".codereferee" / "validation.yaml"
+    if not path.is_file():
+        raise RuntimeError("No deployment profile supplied and .codereferee/validation.yaml is missing.")
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    name = data.get("deploymentProfile") if isinstance(data, dict) else None
+    if not isinstance(name, str):
+        raise RuntimeError("validation.yaml requires deploymentProfile.")
+    return name
 
 
 def safe_name(value: str) -> str:
