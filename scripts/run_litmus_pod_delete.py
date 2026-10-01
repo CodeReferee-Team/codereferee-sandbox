@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from collect_baseline import kubectl_environment
+from run_pod_kill_experiment import collect_probes, metrics_from_probes, probe_once, start_port_forward, stop_process, wait_for_service
 
 
 ROLE = "litmus-agent-chaos-operator-litmus-admin"
@@ -28,10 +29,25 @@ def main() -> int:
     if missing:
         raise SystemExit(f"target file missing: {', '.join(missing)}")
     name = "codereferee-pod-delete-" + safe_name(target.get("name") or target["deployment"]) + f"-{int(time.time())}"
-    apply(target["namespace"], name, target["deployment"], target["labelSelector"])
-    result = wait_for_result(target["namespace"], name, args.timeout_seconds)
+    forward = None
+    baseline: dict[str, Any] | None = None
+    try:
+        if target.get("service") and target.get("servicePort"):
+            forward = start_port_forward(target["namespace"], target["service"], int(target["servicePort"]), args.local_port)
+            wait_for_service(forward, args.local_port, args.request_timeout_seconds)
+            baseline = collect_probes(args.local_port, args.baseline_probes, args.request_timeout_seconds)
+        apply(target["namespace"], name, target["deployment"], target["labelSelector"])
+        result, recovery_probes = wait_for_result(target["namespace"], name, args.timeout_seconds, args.local_port if forward else None,
+                                                   args.request_timeout_seconds)
+    finally:
+        if forward:
+            stop_process(forward)
     output = {"schemaVersion": "litmus-v1", "scenario": "pod_delete", "target": target,
               "chaosEngine": name, "chaosResult": result}
+    if baseline is not None:
+        probes = [*baseline["probes"], *recovery_probes]
+        output["baseline"] = {"metrics": metrics_from_probes(baseline["probes"])}
+        output["metrics"] = metrics_from_probes(probes)
     rendered = json.dumps(output, ensure_ascii=False, indent=2)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -46,6 +62,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--namespace")
     parser.add_argument("--deployment")
     parser.add_argument("--label-selector")
+    parser.add_argument("--service")
+    parser.add_argument("--service-port", type=int)
+    parser.add_argument("--baseline-probes", type=int, default=20)
+    parser.add_argument("--request-timeout-seconds", type=float, default=2.0)
+    parser.add_argument("--local-port", type=int, default=18080)
     parser.add_argument("--timeout-seconds", type=int, default=180)
     parser.add_argument("--output", type=Path, help="Optional JSON evidence output path.")
     return parser.parse_args()
@@ -54,7 +75,8 @@ def parse_args() -> argparse.Namespace:
 def load_target(args: argparse.Namespace) -> dict[str, Any]:
     if args.target_file:
         return json.loads(args.target_file.read_text(encoding="utf-8")).get("target", {})
-    return {"namespace": args.namespace, "deployment": args.deployment, "labelSelector": args.label_selector}
+    return {"namespace": args.namespace, "deployment": args.deployment, "labelSelector": args.label_selector,
+            "service": args.service, "servicePort": args.service_port}
 
 
 def apply(namespace: str, engine: str, deployment: str, selector: str) -> None:
@@ -126,9 +148,13 @@ def copy_experiment(namespace: str) -> None:
         raise SystemExit(copied.stderr.strip() or copied.stdout.strip())
 
 
-def wait_for_result(namespace: str, engine: str, timeout: int) -> dict[str, Any]:
+def wait_for_result(namespace: str, engine: str, timeout: int, local_port: int | None,
+                    request_timeout_seconds: float) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     deadline = time.monotonic() + timeout
+    probes: list[dict[str, Any]] = []
     while time.monotonic() < deadline:
+        if local_port:
+            probes.append(probe_once(local_port, request_timeout_seconds))
         result = subprocess.run(["kubectl", "get", "chaosresult", "-n", namespace, "-o", "json"], text=True,
                                 capture_output=True, env=kubectl_environment())
         if result.returncode == 0:
@@ -137,8 +163,11 @@ def wait_for_result(namespace: str, engine: str, timeout: int) -> dict[str, Any]
                     status = item.get("status", {})
                     verdict = status.get("experimentStatus", {}).get("verdict")
                     if verdict in {"Pass", "Fail", "Stopped"}:
-                        return {"name": item["metadata"]["name"], "verdict": verdict,
-                                "phase": status.get("experimentStatus", {}).get("phase"), "raw": status}
+                        return (
+                            {"name": item["metadata"]["name"], "verdict": verdict,
+                             "phase": status.get("experimentStatus", {}).get("phase"), "raw": status},
+                            probes,
+                        )
         time.sleep(2)
     raise SystemExit(f"Timed out waiting for Litmus result from {engine}")
 
