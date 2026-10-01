@@ -137,7 +137,9 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
     if request.chaos_mode in (None, "fixture") and request.chaos_target is None:
         return [sys.executable, str(EXPERIMENT_SCRIPT)]
     target = deployed_target or request.chaos_target
-    if request.chaos_mode != "litmus_pod_delete" or target is None:
+    scenario_by_mode = {"litmus_pod_delete": "pod_delete", "litmus_container_kill": "container_kill"}
+    scenario = scenario_by_mode.get(request.chaos_mode or "")
+    if scenario is None or target is None:
         raise HTTPException(
             status_code=422,
             detail="litmus_pod_delete requires chaosTarget; fixture mode does not accept a target.",
@@ -149,6 +151,7 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
         "--service", target.service,
         "--service-port", str(target.service_port),
         "--label-selector", target.label_selector,
+        "--scenario", scenario,
         "--baseline-probes", "20",
         "--timeout-seconds", "240",
     ]

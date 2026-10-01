@@ -30,7 +30,7 @@ def main() -> int:
     missing = [name for name in required if not target.get(name)]
     if missing:
         raise SystemExit(f"target file missing: {', '.join(missing)}")
-    name = "codereferee-pod-delete-" + safe_name(target.get("name") or target["deployment"]) + f"-{int(time.time())}"
+    name = "codereferee-" + args.scenario.replace("_", "-") + "-" + safe_name(target.get("name") or target["deployment"]) + f"-{int(time.time())}"
     source_pod = get_ready_pod(target["namespace"], target["labelSelector"], target.get("service") or target["deployment"])
     target_configuration = get_target_configuration(target["namespace"], target["deployment"])
     started_at = now_utc()
@@ -42,16 +42,16 @@ def main() -> int:
             wait_for_service(forward, args.local_port, args.request_timeout_seconds)
             baseline = collect_probes(args.local_port, args.baseline_probes, args.request_timeout_seconds)
         fault_started_monotonic = time.monotonic()
-        apply(target["namespace"], name, target["deployment"], target["labelSelector"])
+        apply(target["namespace"], name, target["deployment"], target["labelSelector"], args.scenario, args.target_container)
         result, recovery_probes = wait_for_result(target["namespace"], name, args.timeout_seconds, args.local_port if forward else None,
                                                    args.request_timeout_seconds)
     finally:
         if forward:
             stop_process(forward)
     replacement_pod = get_ready_pod(target["namespace"], target["labelSelector"], target.get("service") or target["deployment"])
-    output = {"schemaVersion": "chaos-v1", "scenario": "pod_delete", "observationStatus": "observed",
+    output = {"schemaVersion": "chaos-v1", "scenario": args.scenario, "observationStatus": "observed",
               "target": target, "replicas": target_configuration["replicas"], "chaosEngine": name, "chaosResult": result,
-              "chaos_observation": {"type": "pod_kill", "kill_method": "litmus_pod_delete", "started_at": started_at,
+              "chaos_observation": {"type": args.scenario, "kill_method": f"litmus_{args.scenario}", "started_at": started_at,
                                     "recovered_at": now_utc(), "recovery_seconds": round(time.monotonic() - fault_started_monotonic, 2),
                                     "target_pod_uid": source_pod.get("uid"),
                                     "replacement_pod_uid": replacement_pod.get("uid"),
@@ -86,6 +86,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local-port", type=int, default=18080)
     parser.add_argument("--timeout-seconds", type=int, default=180)
     parser.add_argument("--output", type=Path, help="Optional JSON evidence output path.")
+    parser.add_argument("--scenario", choices=("pod_delete", "container_kill"), default="pod_delete")
+    parser.add_argument("--target-container", default="api")
     return parser.parse_args()
 
 
@@ -96,8 +98,9 @@ def load_target(args: argparse.Namespace) -> dict[str, Any]:
             "service": args.service, "servicePort": args.service_port}
 
 
-def apply(namespace: str, engine: str, deployment: str, selector: str) -> None:
-    copy_experiment(namespace)
+def apply(namespace: str, engine: str, deployment: str, selector: str, scenario: str, target_container: str) -> None:
+    experiment = scenario.replace("_", "-")
+    copy_experiment(namespace, experiment)
     manifest = f'''apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -132,7 +135,7 @@ spec:
   engineState: active
   chaosServiceAccount: litmus-admin
   experiments:
-    - name: pod-delete
+    - name: {experiment}
       spec:
         components:
           env:
@@ -142,6 +145,8 @@ spec:
               value: "5"
             - name: FORCE
               value: "true"
+            - name: TARGET_CONTAINER
+              value: "{target_container}"
 '''
     completed = subprocess.run(["kubectl", "apply", "-f", "-"], input=manifest, text=True, capture_output=True,
                                env=kubectl_environment())
@@ -149,9 +154,9 @@ spec:
         raise SystemExit(completed.stderr.strip() or completed.stdout.strip())
 
 
-def copy_experiment(namespace: str) -> None:
+def copy_experiment(namespace: str, experiment_name: str) -> None:
     """Copy the official chart's namespaced Pod Delete definition to the target."""
-    source = subprocess.run(["kubectl", "get", "chaosexperiment", "pod-delete", "-n", "litmus", "-o", "json"],
+    source = subprocess.run(["kubectl", "get", "chaosexperiment", experiment_name, "-n", "litmus", "-o", "json"],
                             text=True, capture_output=True, env=kubectl_environment(), check=True)
     experiment = json.loads(source.stdout)
     experiment.pop("status", None)
