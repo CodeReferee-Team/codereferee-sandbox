@@ -25,6 +25,7 @@ SERVICE_PORT = 5678
 
 def main() -> int:
     args = parse_args()
+    target_metadata = resolve_target(args)
     started_at = time.monotonic()
     original_pod = get_ready_pod(args.namespace, args.label_selector, args.service)
     target_configuration = get_target_configuration(args.namespace, args.deployment)
@@ -83,11 +84,13 @@ def main() -> int:
         "metrics": metrics,
         "probeTransport": "kubectl_port_forward",
         "target": {
+            "name": target_metadata["name"],
             "deployment": args.deployment,
             "service": args.service,
             "service_port": args.service_port,
             "label_selector": args.label_selector,
         },
+        "repository": target_metadata["repository"],
         "replicas": target_configuration["replicas"],
         "chaos_observation": {
             "type": "pod_kill",
@@ -135,11 +138,16 @@ def main() -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a Kubernetes Pod Kill experiment.")
-    parser.add_argument("--namespace", default=NAMESPACE)
-    parser.add_argument("--deployment", default=SERVICE)
-    parser.add_argument("--service", default=SERVICE)
-    parser.add_argument("--service-port", type=int, default=SERVICE_PORT)
-    parser.add_argument("--label-selector", default=LABEL_SELECTOR)
+    parser.add_argument(
+        "--target-file",
+        type=Path,
+        help="Optional repository target JSON. CLI target flags take precedence over this file.",
+    )
+    parser.add_argument("--namespace")
+    parser.add_argument("--deployment")
+    parser.add_argument("--service")
+    parser.add_argument("--service-port", type=int)
+    parser.add_argument("--label-selector")
     parser.add_argument("--baseline-probes", type=int, default=5)
     parser.add_argument("--recovery-timeout-seconds", type=float, default=90.0)
     parser.add_argument("--probe-interval-seconds", type=float, default=0.5)
@@ -150,6 +158,36 @@ def parse_args() -> argparse.Namespace:
     if args.baseline_probes < 1:
         parser.error("--baseline-probes must be at least 1")
     return args
+
+
+def resolve_target(args: argparse.Namespace) -> dict[str, Any]:
+    """Resolve a generic deployed repository target without hard-coding a repo.
+
+    The target file describes an already deployed workload. It deliberately does
+    not execute arbitrary repository configuration; the deployment stage remains
+    a separate, policy-controlled concern.
+    """
+    target: dict[str, Any] = {}
+    if args.target_file:
+        try:
+            target = json.loads(args.target_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"Unable to read --target-file {args.target_file}: {exc}") from exc
+
+    target_values = target.get("target", {})
+    args.namespace = args.namespace or target_values.get("namespace") or NAMESPACE
+    args.deployment = args.deployment or target_values.get("deployment") or SERVICE
+    args.service = args.service or target_values.get("service") or SERVICE
+    args.service_port = args.service_port or target_values.get("servicePort") or SERVICE_PORT
+    args.label_selector = args.label_selector or target_values.get("labelSelector") or LABEL_SELECTOR
+
+    if not all((args.namespace, args.deployment, args.service, args.service_port, args.label_selector)):
+        raise SystemExit("A Chaos target requires namespace, deployment, service, servicePort, and labelSelector.")
+
+    return {
+        "name": target_values.get("name") or args.deployment,
+        "repository": target.get("repository") or None,
+    }
 
 
 def start_port_forward(namespace: str, service: str, service_port: int, local_port: int) -> subprocess.Popen[str]:
@@ -171,7 +209,7 @@ def wait_for_service(process: subprocess.Popen[str], local_port: int, timeout_se
         if probe_once(local_port, 0.2)["success"]:
             return
         time.sleep(0.1)
-    raise TimeoutError(f"Timed out waiting for fixture service port-forward on {local_port}")
+    raise TimeoutError(f"Timed out waiting for service port-forward on {local_port}")
 
 
 def collect_probes(local_port: int, count: int, timeout_seconds: float) -> dict[str, Any]:
@@ -223,7 +261,7 @@ def observe_recovery(
         "last_http_status": probes[-1]["status_code"] if probes else None,
         "events": relevant_events(namespace, fault_started_at),
         "logs": "",
-        "failure_reason": f"Fixture did not recover within {recovery_timeout_seconds} seconds.",
+        "failure_reason": f"Target service did not recover within {recovery_timeout_seconds} seconds.",
     }
 
 
