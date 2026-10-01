@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -16,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT_SCRIPT = PROJECT_ROOT / "scripts" / "run_pod_kill_experiment.py"
 LITMUS_SCRIPT = PROJECT_ROOT / "scripts" / "run_litmus_pod_delete.py"
+DEPLOY_SCRIPT = PROJECT_ROOT / "scripts" / "deploy_repository.py"
 EXPERIMENT_TIMEOUT_SECONDS = 300
 experiment_lock = threading.Lock()
 
@@ -46,6 +48,7 @@ class RepositoryValidationRequest(BaseModel):
     request_id: str | None = Field(default=None, alias="requestId")
     chaos_mode: str | None = Field(default=None, alias="chaosMode")
     chaos_target: ChaosTarget | None = Field(default=None, alias="chaosTarget")
+    deployment_profile: str | None = Field(default=None, alias="deploymentProfile")
 
 
 @app.get("/health")
@@ -55,13 +58,18 @@ def health() -> dict[str, str]:
 
 @app.post("/repositories/validate")
 def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
-    """Run fixture Chaos, or explicit Litmus Pod Delete for a deployed target."""
+    """Run fixture Chaos, a pre-deployed target, or a profile-driven repository deployment."""
 
     if not experiment_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A Chaos v1 experiment is already running.")
 
     try:
-        command = experiment_command(request)
+        deployed: dict[str, Any] | None = None
+        deployed_target: ChaosTarget | None = None
+        if request.deployment_profile:
+            deployed = deploy_repository(request)
+            deployed_target = ChaosTarget.model_validate(deployed["target"])
+        command = experiment_command(request, deployed_target)
         completed = subprocess.run(
             command,
             cwd=PROJECT_ROOT,
@@ -79,8 +87,14 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         result["requestId"] = request.request_id
         result["repositoryUrl"] = request.repository_url
         result["branch"] = request.branch
-        result["commitSha"] = request.commit_sha
+        result["commitSha"] = (deployed or {}).get("repository", {}).get("commitSha") or request.commit_sha
+        if deployed:
+            result["deployment"] = deployed
         return result
+    except HTTPException:
+        raise
+    except (RuntimeError, KeyError, json.JSONDecodeError) as exc:
+        return infrastructure_error(str(exc), request, timed_out=False)
     except subprocess.TimeoutExpired as exc:
         return infrastructure_error(
             f"Chaos v1 experiment exceeded {EXPERIMENT_TIMEOUT_SECONDS} seconds: {exc}",
@@ -88,6 +102,8 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
             timed_out=True,
         )
     finally:
+        if 'deployed_target' in locals() and deployed_target is not None:
+            cleanup_namespace(deployed_target.namespace)
         experiment_lock.release()
 
 
@@ -116,15 +132,15 @@ def parse_experiment_result(completed: subprocess.CompletedProcess[str]) -> dict
     return result
 
 
-def experiment_command(request: RepositoryValidationRequest) -> list[str]:
+def experiment_command(request: RepositoryValidationRequest, deployed_target: ChaosTarget | None = None) -> list[str]:
     if request.chaos_mode in (None, "fixture") and request.chaos_target is None:
         return [sys.executable, str(EXPERIMENT_SCRIPT)]
-    if request.chaos_mode != "litmus_pod_delete" or request.chaos_target is None:
+    target = deployed_target or request.chaos_target
+    if request.chaos_mode != "litmus_pod_delete" or target is None:
         raise HTTPException(
             status_code=422,
             detail="litmus_pod_delete requires chaosTarget; fixture mode does not accept a target.",
         )
-    target = request.chaos_target
     return [
         sys.executable, str(LITMUS_SCRIPT),
         "--namespace", target.namespace,
@@ -135,6 +151,34 @@ def experiment_command(request: RepositoryValidationRequest) -> list[str]:
         "--baseline-probes", "20",
         "--timeout-seconds", "240",
     ]
+
+
+def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
+    if request.chaos_mode != "litmus_pod_delete":
+        raise HTTPException(status_code=422, detail="deploymentProfile requires chaosMode=litmus_pod_delete.")
+    if not request.request_id:
+        raise HTTPException(status_code=422, detail="deploymentProfile requires requestId.")
+    completed = subprocess.run(
+        [sys.executable, str(DEPLOY_SCRIPT), "--repository-url", request.repository_url,
+         "--request-id", request.request_id, "--profile", request.deployment_profile,
+         *(["--branch", request.branch] if request.branch else [])],
+        cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=600,
+    )
+    if completed.returncode:
+        raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "Repository deployment failed.")
+    try:
+        return json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Repository deployment returned invalid JSON.") from exc
+
+
+def cleanup_namespace(namespace: str) -> None:
+    """Best-effort cleanup; evidence has already been returned or recorded."""
+    environment = os.environ.copy()
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        environment.pop(key, None)
+    subprocess.run(["kubectl", "delete", "namespace", namespace, "--ignore-not-found=true", "--wait=false"],
+                   cwd=PROJECT_ROOT, capture_output=True, text=True, env=environment)
 
 
 def infrastructure_error(

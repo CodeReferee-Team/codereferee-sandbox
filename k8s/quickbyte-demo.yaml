@@ -1,24 +1,24 @@
-# POC only: deploys the agreed QuickByte_Demo repository as a real Chaos target.
+# Sandbox deployment template. ${NAMESPACE} and ${IMAGE} are rendered per request.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: codereferee-quickbyte
+  name: ${NAMESPACE}
 ---
 apiVersion: v1
 kind: Secret
 metadata:
   name: quickbyte-db
-  namespace: codereferee-quickbyte
+  namespace: ${NAMESPACE}
 type: Opaque
 stringData:
   username: quickbite
-  password: quickbite
+  password: ${DB_PASSWORD}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: quickbyte-postgres
-  namespace: codereferee-quickbyte
+  namespace: ${NAMESPACE}
 spec:
   replicas: 1
   selector:
@@ -57,7 +57,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: quickbyte-postgres
-  namespace: codereferee-quickbyte
+  namespace: ${NAMESPACE}
 spec:
   selector:
     app.kubernetes.io/name: quickbyte-postgres
@@ -69,7 +69,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: quickbyte-redis
-  namespace: codereferee-quickbyte
+  namespace: ${NAMESPACE}
 spec:
   replicas: 1
   selector:
@@ -96,7 +96,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: quickbyte-redis
-  namespace: codereferee-quickbyte
+  namespace: ${NAMESPACE}
 spec:
   selector:
     app.kubernetes.io/name: quickbyte-redis
@@ -108,7 +108,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: quickbyte-api
-  namespace: codereferee-quickbyte
+  namespace: ${NAMESPACE}
 spec:
   replicas: 1
   selector:
@@ -121,7 +121,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: codereferee/quickbyte-demo:local
+          image: ${IMAGE}
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
@@ -145,11 +145,11 @@ spec:
             - name: JWT_ISSUER
               value: quickbyte-chaos-poc
             - name: JWT_SECRET
-              value: quickbyte-chaos-poc-secret-change-before-production
+              value: ${BOOTSTRAP_PASSWORD}
             - name: BOOTSTRAP_ADMIN_EMAIL
               value: admin@quickbyte.local
             - name: BOOTSTRAP_ADMIN_PASSWORD
-              value: quickbyte-admin-local
+              value: ${BOOTSTRAP_PASSWORD}
           readinessProbe:
             httpGet:
               path: /actuator/health/readiness
@@ -185,7 +185,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: quickbyte-api
-  namespace: codereferee-quickbyte
+  namespace: ${NAMESPACE}
 spec:
   selector:
     app.kubernetes.io/name: quickbyte-api
