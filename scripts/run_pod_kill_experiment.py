@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the Chaos v1 Pod Kill experiment against the controlled fixture service."""
+"""Run a Kubernetes Pod Kill experiment against a configured HTTP service target."""
 
 from __future__ import annotations
 
@@ -26,9 +26,9 @@ SERVICE_PORT = 5678
 def main() -> int:
     args = parse_args()
     started_at = time.monotonic()
-    original_pod = get_ready_pod(args.namespace)
-    target_configuration = get_target_configuration(args.namespace)
-    forward = start_port_forward(args.namespace, args.local_port)
+    original_pod = get_ready_pod(args.namespace, args.label_selector, args.service)
+    target_configuration = get_target_configuration(args.namespace, args.deployment)
+    forward = start_port_forward(args.namespace, args.service, args.service_port, args.local_port)
     try:
         wait_for_service(forward, args.local_port, args.request_timeout_seconds)
         baseline = collect_probes(args.local_port, args.baseline_probes, args.request_timeout_seconds)
@@ -37,6 +37,7 @@ def main() -> int:
         observation = observe_recovery(
             args.namespace,
             original_pod["name"],
+            args.label_selector,
             args.local_port,
             args.recovery_timeout_seconds,
             args.probe_interval_seconds,
@@ -46,7 +47,7 @@ def main() -> int:
         if observation["recovered"]:
             stop_process(forward)
             replacement_probe = verify_replacement_service(
-                args.namespace, args.local_port, args.request_timeout_seconds
+                args.namespace, args.service, args.service_port, args.local_port, args.request_timeout_seconds
             )
             observation["probes"].append(replacement_probe)
             observation["last_http_status"] = replacement_probe["status_code"]
@@ -62,12 +63,14 @@ def main() -> int:
     result = {
         "exitCode": 0 if recovered else 1,
         "observationStatus": "observed",
-        "stdout": "Fixture recovered after Pod Kill." if recovered else "Fixture did not recover before the deadline.",
+        "stdout": f"{args.service} recovered after Pod Kill."
+        if recovered
+        else f"{args.service} did not recover before the deadline.",
         "stderr": "" if recovered else observation["failure_reason"],
         "timedOut": not recovered,
         "durationMillis": duration_millis,
         "serverStarted": recovered,
-        "serverUrl": f"http://fixture-api.{args.namespace}.svc.cluster.local:{SERVICE_PORT}",
+        "serverUrl": f"http://{args.service}.{args.namespace}.svc.cluster.local:{args.service_port}",
         "httpStatus": observation["last_http_status"],
         "browserLoaded": False,
         "pageTitle": None,
@@ -79,6 +82,12 @@ def main() -> int:
         },
         "metrics": metrics,
         "probeTransport": "kubectl_port_forward",
+        "target": {
+            "deployment": args.deployment,
+            "service": args.service,
+            "service_port": args.service_port,
+            "label_selector": args.label_selector,
+        },
         "replicas": target_configuration["replicas"],
         "chaos_observation": {
             "type": "pod_kill",
@@ -116,7 +125,8 @@ def main() -> int:
         },
         "source": {
             "real_execution_observed": True,
-            "fixture": SERVICE,
+            "fixture": args.service == SERVICE,
+            "target": args.service,
         },
     }
     write_result(result, args.output)
@@ -124,8 +134,12 @@ def main() -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Chaos v1 Pod Kill experiment.")
+    parser = argparse.ArgumentParser(description="Run a Kubernetes Pod Kill experiment.")
     parser.add_argument("--namespace", default=NAMESPACE)
+    parser.add_argument("--deployment", default=SERVICE)
+    parser.add_argument("--service", default=SERVICE)
+    parser.add_argument("--service-port", type=int, default=SERVICE_PORT)
+    parser.add_argument("--label-selector", default=LABEL_SELECTOR)
     parser.add_argument("--baseline-probes", type=int, default=5)
     parser.add_argument("--recovery-timeout-seconds", type=float, default=90.0)
     parser.add_argument("--probe-interval-seconds", type=float, default=0.5)
@@ -138,9 +152,9 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def start_port_forward(namespace: str, local_port: int) -> subprocess.Popen[str]:
+def start_port_forward(namespace: str, service: str, service_port: int, local_port: int) -> subprocess.Popen[str]:
     return subprocess.Popen(
-        ["kubectl", "-n", namespace, "port-forward", f"service/{SERVICE}", f"{local_port}:{SERVICE_PORT}"],
+        ["kubectl", "-n", namespace, "port-forward", f"service/{service}", f"{local_port}:{service_port}"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -167,6 +181,7 @@ def collect_probes(local_port: int, count: int, timeout_seconds: float) -> dict[
 def observe_recovery(
     namespace: str,
     original_pod_name: str,
+    label_selector: str,
     local_port: int,
     recovery_timeout_seconds: float,
     probe_interval_seconds: float,
@@ -178,7 +193,7 @@ def observe_recovery(
     probes: list[dict[str, Any]] = []
     while time.monotonic() < deadline:
         probes.append(probe_once(local_port, request_timeout_seconds))
-        replacement = find_replacement_pod(namespace, original_pod_name)
+        replacement = find_replacement_pod(namespace, original_pod_name, label_selector)
         if replacement is not None:
             return {
                 "replacement_pod_created": True,
@@ -212,8 +227,10 @@ def observe_recovery(
     }
 
 
-def find_replacement_pod(namespace: str, original_pod_name: str) -> dict[str, Any] | None:
-    response = kubectl(namespace, "get", "pods", "-l", LABEL_SELECTOR, "-o", "json")
+def find_replacement_pod(
+    namespace: str, original_pod_name: str, label_selector: str
+) -> dict[str, Any] | None:
+    response = kubectl(namespace, "get", "pods", "-l", label_selector, "-o", "json")
     for pod in json.loads(response.stdout).get("items", []):
         if pod.get("metadata", {}).get("name") == original_pod_name:
             continue
@@ -278,8 +295,10 @@ def probe_once(local_port: int, timeout_seconds: float) -> dict[str, Any]:
     }
 
 
-def verify_replacement_service(namespace: str, local_port: int, timeout_seconds: float) -> dict[str, Any]:
-    process = start_port_forward(namespace, local_port)
+def verify_replacement_service(
+    namespace: str, service: str, service_port: int, local_port: int, timeout_seconds: float
+) -> dict[str, Any]:
+    process = start_port_forward(namespace, service, service_port, local_port)
     try:
         wait_for_service(process, local_port, timeout_seconds)
         return probe_once(local_port, timeout_seconds)
@@ -308,8 +327,8 @@ def successes_from_probes(probes: list[dict[str, Any]]) -> int:
     return sum(probe["success"] for probe in probes)
 
 
-def get_target_configuration(namespace: str) -> dict[str, Any]:
-    deployment = json.loads(kubectl(namespace, "get", "deployment", SERVICE, "-o", "json").stdout)
+def get_target_configuration(namespace: str, deployment_name: str) -> dict[str, Any]:
+    deployment = json.loads(kubectl(namespace, "get", "deployment", deployment_name, "-o", "json").stdout)
     template_spec = deployment.get("spec", {}).get("template", {}).get("spec", {})
     containers = template_spec.get("containers", [])
     container = containers[0] if containers else {}
@@ -317,6 +336,7 @@ def get_target_configuration(namespace: str) -> dict[str, Any]:
         "replicas": deployment.get("spec", {}).get("replicas", 1),
         "readiness_probe": normalize_probe(container.get("readinessProbe")),
         "liveness_probe": normalize_probe(container.get("livenessProbe")),
+        "startup_probe": normalize_probe(container.get("startupProbe")),
         "termination_grace_period_seconds": template_spec.get("terminationGracePeriodSeconds", 30),
     }
 

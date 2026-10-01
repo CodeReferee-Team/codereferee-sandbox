@@ -16,3 +16,8 @@ logs.
 This is real execution evidence, not an automatically approved fine-tuning
 dataset. AI team members can use it for rule evaluation, explanation quality
 evaluation, and reviewed dataset construction.
+
+For a real HTTP service target, use the same Pod Kill runner with its
+deployment, service, port, and label selector. For example, the QuickByte POC
+uses `codereferee-quickbyte`, `quickbyte-api`, port `8080`, and
+`app.kubernetes.io/name=quickbyte-api`.

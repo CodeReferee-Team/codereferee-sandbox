@@ -73,12 +73,16 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def get_ready_pod(namespace: str) -> dict[str, Any]:
-    response = kubectl(namespace, "get", "pods", "-l", LABEL_SELECTOR, "-o", "json")
+def get_ready_pod(
+    namespace: str,
+    label_selector: str = LABEL_SELECTOR,
+    service: str = SERVICE,
+) -> dict[str, Any]:
+    response = kubectl(namespace, "get", "pods", "-l", label_selector, "-o", "json")
     pods = json.loads(response.stdout).get("items", [])
     ready_pods = [pod for pod in pods if is_ready(pod)]
     if not ready_pods:
-        raise RuntimeError(f"No Ready {SERVICE} Pod found in namespace {namespace}")
+        raise RuntimeError(f"No Ready {service} Pod found in namespace {namespace}")
 
     pod = ready_pods[0]
     statuses = pod.get("status", {}).get("containerStatuses", [])
@@ -92,15 +96,22 @@ def get_ready_pod(namespace: str) -> dict[str, Any]:
     }
 
 
-def probe_service(namespace: str, probes: int, timeout_seconds: float, local_port: int) -> dict[str, Any]:
+def probe_service(
+    namespace: str,
+    probes: int,
+    timeout_seconds: float,
+    local_port: int,
+    service: str = SERVICE,
+    service_port: int = 5678,
+) -> dict[str, Any]:
     process = subprocess.Popen(
         [
             "kubectl",
             "-n",
             namespace,
             "port-forward",
-            f"service/{SERVICE}",
-            f"{local_port}:5678",
+            f"service/{service}",
+            f"{local_port}:{service_port}",
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
