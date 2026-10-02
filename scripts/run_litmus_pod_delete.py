@@ -55,6 +55,7 @@ def main() -> int:
     output = {"schemaVersion": "chaos-v1", "scenario": args.scenario, "observationStatus": "observed",
               "target": target, "replicas": target_configuration["replicas"], "chaosEngine": name, "chaosResult": result,
               "chaos_observation": {"type": args.scenario, "kill_method": f"litmus_{args.scenario}", "started_at": started_at,
+                                    "recovered": result.get("verdict") == "Pass",
                                     "recovered_at": now_utc(), "recovery_seconds": round(time.monotonic() - fault_started_monotonic, 2),
                                     "target_pod_uid": source_pod.get("uid"),
                                     "replacement_pod_uid": replacement_pod.get("uid"),
@@ -63,7 +64,8 @@ def main() -> int:
                                       "recovery_timeout_seconds": args.timeout_seconds,
                                       "error_rate_denominator": "all HTTP GET / probes collected during baseline and Litmus execution"},
                                     "abort_condition": {"triggered": result.get("verdict") == "Stopped",
-                                      "reason": result.get("verdict") if result.get("verdict") != "Pass" else None}}}
+                                      "reason": result.get("verdict") if result.get("verdict") != "Pass" else None}},
+              "source": {"real_execution_observed": True, "target": target.get("deployment")}}
     if baseline is not None:
         probes = [*baseline["probes"], *recovery_probes]
         output["baseline"] = {"metrics": metrics_from_probes(baseline["probes"])}
