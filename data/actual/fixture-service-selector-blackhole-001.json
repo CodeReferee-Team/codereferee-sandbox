@@ -1,6 +1,6 @@
 {
   "schemaVersion": "chaos-v1",
-  "scenario": "deployment_scale_down",
+  "scenario": "service_selector_blackhole",
   "observationStatus": "observed",
   "target": {
     "namespace": "codereferee-sandbox",
@@ -13,7 +13,7 @@
   "baseline": {
     "metrics": {
       "availability": 1.0,
-      "p95_latency_ms": 61.86,
+      "p95_latency_ms": 44.05,
       "error_rate": 0.0,
       "probe_count": 5,
       "success_count": 5,
@@ -25,25 +25,25 @@
     }
   },
   "metrics": {
-    "availability": 0.6666666666666666,
-    "p95_latency_ms": 2011.05,
-    "error_rate": 0.33333333333333337,
-    "probe_count": 15,
-    "success_count": 10,
-    "failure_count": 5,
-    "error_rate_denominator": "all HTTP GET / probes collected during baseline, scale-down, and recovery; readiness wait probes are excluded",
+    "availability": 0.5,
+    "p95_latency_ms": 34.88,
+    "error_rate": 0.5,
+    "probe_count": 16,
+    "success_count": 8,
+    "failure_count": 8,
+    "error_rate_denominator": "HTTP baseline/recovery probes plus explicit Service-without-endpoints observations during the routing fault",
     "cpu_usage_percent": null,
     "memory_usage_mb": null,
     "restart_count": 0
   },
   "chaos_observation": {
-    "type": "deployment_scale_down",
-    "kill_method": "kubectl_scale",
-    "started_at": "2026-10-02T05:14:45.363521Z",
-    "recovered_at": "2026-10-02T05:15:04.275795Z",
-    "recovery_seconds": 17.07,
-    "target_pod_uid": "e1a6518e-c453-433d-8c3a-b8776a8ea4a5",
-    "replacement_pod_uid": "6d1b4098-faa2-4239-83fd-8bfa410969fa",
+    "type": "service_selector_blackhole",
+    "kill_method": "kubectl_patch_service_selector",
+    "started_at": "2026-10-02T05:15:15.358451Z",
+    "recovered_at": "2026-10-02T05:15:27.568764Z",
+    "recovery_seconds": 10.77,
+    "target_pod_uid": "6d1b4098-faa2-4239-83fd-8bfa410969fa",
+    "replacement_pod_uid": null,
     "target_configuration": {
       "replicas": 1,
       "readiness_probe": {
@@ -65,16 +65,18 @@
       "startup_probe": null,
       "termination_grace_period_seconds": 30
     },
-    "scale_operation": {
-      "from_replicas": 1,
-      "to_replicas": 0,
-      "restored_replicas": 1
+    "routing_operation": {
+      "original_selector": {
+        "app.kubernetes.io/name": "fixture-api"
+      },
+      "blackhole_selector": {
+        "app.kubernetes.io/name": "codereferee-blackhole"
+      }
     },
     "observation_window": {
       "baseline_probe_count": 5,
       "fault_seconds": 8,
-      "recovery_timeout_seconds": 180,
-      "error_rate_denominator": "all HTTP GET / probes collected during baseline, scale-down, and recovery; readiness wait probes are excluded"
+      "error_rate_denominator": "HTTP baseline/recovery probes plus explicit Service-without-endpoints observations during the routing fault"
     },
     "abort_condition": {
       "triggered": false,
