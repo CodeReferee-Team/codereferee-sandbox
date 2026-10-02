@@ -53,7 +53,7 @@ def main() -> int:
         template = ROOT / profile["manifestTemplate"]
         if not template.is_file():
             raise RuntimeError(f"Deployment template was not found: {template}")
-        rendered = render_template(template, namespace, image)
+        rendered = render_template(template, namespace, image, profile)
         namespace_may_exist = True
         apply(rendered)
         target = dict(profile["target"])
@@ -140,11 +140,15 @@ def apply(manifest: str) -> None:
     run(["kubectl", "apply", "-f", "-"], input_text=manifest)
 
 
-def render_template(template: Path, namespace: str, image: str) -> str:
+def render_template(template: Path, namespace: str, image: str, profile: dict[str, Any]) -> str:
     """Render only Sandbox-owned placeholders; never reuse a repository secret."""
+    api_replicas = profile.get("apiReplicas", 1)
+    if not isinstance(api_replicas, int) or api_replicas < 1:
+        raise RuntimeError("Profile apiReplicas must be a positive integer.")
     values = {
         "${NAMESPACE}": namespace,
         "${IMAGE}": image,
+        "${API_REPLICAS}": str(api_replicas),
         "${DB_PASSWORD}": secrets.token_hex(24),
         "${BOOTSTRAP_PASSWORD}": secrets.token_hex(24),
     }
