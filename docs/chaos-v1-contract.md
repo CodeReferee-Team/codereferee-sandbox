@@ -67,6 +67,7 @@ Pod Kill과 복구 관측을 수행한다.
 ```json
 {
   "exitCode": 0,
+  "observationStatus": "observed",
   "stdout": "fixture recovered after pod deletion",
   "stderr": "",
   "timedOut": false,
@@ -82,6 +83,15 @@ Pod Kill과 복구 관측을 수행한다.
   "probeTransport": "kubectl_port_forward"
 }
 ```
+
+`observationStatus`는 실행 결과를 신뢰할 수 있는지와 실패 책임을 구분한다.
+
+| 값 | 의미 | `exitCode` | Backend 해석 |
+| --- | --- | --- | --- |
+| `observed` | 실험이 수행되어 관측 결과를 확보함 | `0` 또는 `1` | `PASSED` 또는 `FAILED` |
+| `infrastructure_error` | Sandbox, Kubernetes, `kubectl`, port-forward 문제로 관측 불가 | `null` | `ERROR` |
+
+`observed`와 `timedOut: true`는 복구 관측 시간이 초과되어 `exitCode: 1`인 검증 실패를 뜻한다. `infrastructure_error`와 `timedOut: true`는 Sandbox 실행 자체의 시간 초과를 뜻한다. HTTP 4xx는 요청 오류에만 사용하며, 구조화된 결과를 만들 수 없는 예상 밖의 API 오류만 HTTP 5xx로 반환한다.
 
 `serviceCheckAttempted`와 `browserCheckAttempted`는 각각 HTTP 서비스 검사와 브라우저 검사를 실제로 수행했는지 나타낸다. Chaos v1은 HTTP probe만 수행하므로 전자는 `true`, 후자는 `false`다. `browserLoaded: false`는 브라우저 검사를 실패했다는 뜻이 아니라, 브라우저 검사를 실행하지 않았다는 뜻이다.
 
@@ -101,6 +111,8 @@ AI Core는 후속 작업에서 두 필드를 모델과 evidence 변환 과정에
 ```json
 {
   "schemaVersion": "chaos-v1",
+  "observationStatus": "observed",
+  "replicas": 1,
   "requestId": "optional-correlation-id",
   "baseline": {
     "pod": {
@@ -126,10 +138,14 @@ AI Core는 후속 작업에서 두 필드를 모델과 evidence 변환 과정에
     "type": "pod_kill",
     "target_kind": "Pod",
     "target_name": "fixture-api-abcde",
+    "target_pod_uid": "pod-uid",
     "namespace": "codereferee-sandbox",
+    "replicas": 1,
+    "kill_method": "kubectl_delete_pod",
     "started_at": "2026-09-22T05:00:00Z",
     "replacement_pod_created": true,
     "replacement_pod_name": "fixture-api-fghij",
+    "replacement_pod_uid": "replacement-pod-uid",
     "recovered": true
   },
   "source": {

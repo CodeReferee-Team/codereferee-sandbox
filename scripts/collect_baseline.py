@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import subprocess
 import sys
@@ -19,6 +20,19 @@ from urllib.request import urlopen
 NAMESPACE = "codereferee-sandbox"
 SERVICE = "fixture-api"
 LABEL_SELECTOR = "app.kubernetes.io/name=fixture-api"
+
+
+def kubectl_environment() -> dict[str, str]:
+    """Run local Docker Desktop kubectl without a global HTTP proxy.
+
+    Some developer environments set HTTP(S)_PROXY to a local debugging proxy.
+    Kubernetes API traffic for Docker Desktop is local control-plane traffic and
+    must not be routed through that proxy.
+    """
+    environment = os.environ.copy()
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        environment.pop(key, None)
+    return environment
 
 
 def main() -> int:
@@ -59,17 +73,22 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def get_ready_pod(namespace: str) -> dict[str, Any]:
-    response = kubectl(namespace, "get", "pods", "-l", LABEL_SELECTOR, "-o", "json")
+def get_ready_pod(
+    namespace: str,
+    label_selector: str = LABEL_SELECTOR,
+    service: str = SERVICE,
+) -> dict[str, Any]:
+    response = kubectl(namespace, "get", "pods", "-l", label_selector, "-o", "json")
     pods = json.loads(response.stdout).get("items", [])
     ready_pods = [pod for pod in pods if is_ready(pod)]
     if not ready_pods:
-        raise RuntimeError(f"No Ready {SERVICE} Pod found in namespace {namespace}")
+        raise RuntimeError(f"No Ready {service} Pod found in namespace {namespace}")
 
     pod = ready_pods[0]
     statuses = pod.get("status", {}).get("containerStatuses", [])
     return {
         "name": pod["metadata"]["name"],
+        "uid": pod["metadata"].get("uid"),
         "phase": pod.get("status", {}).get("phase"),
         "ready": True,
         "restart_count": sum(status.get("restartCount", 0) for status in statuses),
@@ -77,19 +96,27 @@ def get_ready_pod(namespace: str) -> dict[str, Any]:
     }
 
 
-def probe_service(namespace: str, probes: int, timeout_seconds: float, local_port: int) -> dict[str, Any]:
+def probe_service(
+    namespace: str,
+    probes: int,
+    timeout_seconds: float,
+    local_port: int,
+    service: str = SERVICE,
+    service_port: int = 5678,
+) -> dict[str, Any]:
     process = subprocess.Popen(
         [
             "kubectl",
             "-n",
             namespace,
             "port-forward",
-            f"service/{SERVICE}",
-            f"{local_port}:5678",
+            f"service/{service}",
+            f"{local_port}:{service_port}",
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=kubectl_environment(),
     )
     try:
         wait_for_port_forward(process, local_port, timeout_seconds)
@@ -162,6 +189,7 @@ def kubectl(namespace: str, *args: str) -> subprocess.CompletedProcess[str]:
         check=True,
         capture_output=True,
         text=True,
+        env=kubectl_environment(),
     )
 
 
