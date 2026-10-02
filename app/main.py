@@ -19,6 +19,7 @@ EXPERIMENT_SCRIPT = PROJECT_ROOT / "scripts" / "run_pod_kill_experiment.py"
 LITMUS_SCRIPT = PROJECT_ROOT / "scripts" / "run_litmus_pod_delete.py"
 SCALE_SCRIPT = PROJECT_ROOT / "scripts" / "run_deployment_scale_experiment.py"
 SERVICE_SELECTOR_SCRIPT = PROJECT_ROOT / "scripts" / "run_service_selector_experiment.py"
+ROLLOUT_RESTART_SCRIPT = PROJECT_ROOT / "scripts" / "run_rollout_restart_experiment.py"
 DEPLOY_SCRIPT = PROJECT_ROOT / "scripts" / "deploy_repository.py"
 EXPERIMENT_TIMEOUT_SECONDS = 300
 experiment_lock = threading.Lock()
@@ -157,6 +158,15 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
             "--service-port", str(target.service_port),
             "--label-selector", target.label_selector,
         ]
+    if request.chaos_mode == "rollout_restart" and target is not None:
+        return [
+            sys.executable, str(ROLLOUT_RESTART_SCRIPT),
+            "--namespace", target.namespace,
+            "--deployment", target.deployment,
+            "--service", target.service,
+            "--service-port", str(target.service_port),
+            "--label-selector", target.label_selector,
+        ]
     scenario_by_mode = {"litmus_pod_delete": "pod_delete", "litmus_container_kill": "container_kill"}
     scenario = scenario_by_mode.get(request.chaos_mode or "")
     if scenario is None or target is None:
@@ -178,7 +188,7 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
 
 
 def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
-    if request.chaos_mode not in {"litmus_pod_delete", "deployment_scale_down", "service_selector_blackhole"}:
+    if request.chaos_mode not in {"litmus_pod_delete", "deployment_scale_down", "service_selector_blackhole", "rollout_restart"}:
         raise HTTPException(status_code=422, detail="deploymentProfile requires a supported chaosMode.")
     if not request.request_id:
         raise HTTPException(status_code=422, detail="deploymentProfile requires requestId.")
