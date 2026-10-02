@@ -39,7 +39,10 @@ def main() -> int:
     try:
         if target.get("service") and target.get("servicePort"):
             forward = start_port_forward(target["namespace"], target["service"], int(target["servicePort"]), args.local_port)
-            wait_for_service(forward, args.local_port, args.request_timeout_seconds)
+            # A single HTTP probe should fail quickly, but kubectl port-forward
+            # itself can take several seconds to attach on Docker Desktop.
+            # Do not classify that startup race as an application failure.
+            wait_for_service(forward, args.local_port, max(20.0, args.request_timeout_seconds))
             baseline = collect_probes(args.local_port, args.baseline_probes, args.request_timeout_seconds)
         fault_started_monotonic = time.monotonic()
         apply(target["namespace"], name, target["deployment"], target["labelSelector"], args.scenario, args.target_container)
