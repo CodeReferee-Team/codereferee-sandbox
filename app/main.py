@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT_SCRIPT = PROJECT_ROOT / "scripts" / "run_pod_kill_experiment.py"
 LITMUS_SCRIPT = PROJECT_ROOT / "scripts" / "run_litmus_pod_delete.py"
+SCALE_SCRIPT = PROJECT_ROOT / "scripts" / "run_deployment_scale_experiment.py"
 DEPLOY_SCRIPT = PROJECT_ROOT / "scripts" / "deploy_repository.py"
 EXPERIMENT_TIMEOUT_SECONDS = 300
 experiment_lock = threading.Lock()
@@ -137,6 +138,15 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
     if request.chaos_mode in (None, "fixture") and request.chaos_target is None:
         return [sys.executable, str(EXPERIMENT_SCRIPT)]
     target = deployed_target or request.chaos_target
+    if request.chaos_mode == "deployment_scale_down" and target is not None:
+        return [
+            sys.executable, str(SCALE_SCRIPT),
+            "--namespace", target.namespace,
+            "--deployment", target.deployment,
+            "--service", target.service,
+            "--service-port", str(target.service_port),
+            "--label-selector", target.label_selector,
+        ]
     scenario_by_mode = {"litmus_pod_delete": "pod_delete", "litmus_container_kill": "container_kill"}
     scenario = scenario_by_mode.get(request.chaos_mode or "")
     if scenario is None or target is None:
@@ -158,8 +168,8 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
 
 
 def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
-    if request.chaos_mode != "litmus_pod_delete":
-        raise HTTPException(status_code=422, detail="deploymentProfile requires chaosMode=litmus_pod_delete.")
+    if request.chaos_mode not in {"litmus_pod_delete", "deployment_scale_down"}:
+        raise HTTPException(status_code=422, detail="deploymentProfile requires a supported chaosMode.")
     if not request.request_id:
         raise HTTPException(status_code=422, detail="deploymentProfile requires requestId.")
     command = [sys.executable, str(DEPLOY_SCRIPT), "--repository-url", request.repository_url,
