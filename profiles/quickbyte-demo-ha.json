@@ -2,7 +2,7 @@
   "dockerfile": "Dockerfile",
   "buildContext": ".",
   "manifestTemplate": "k8s/quickbyte-demo.yaml",
-  "apiReplicas": 1,
+  "apiReplicas": 2,
   "target": {
     "name": "quickbyte-api",
     "deployment": "quickbyte-api",

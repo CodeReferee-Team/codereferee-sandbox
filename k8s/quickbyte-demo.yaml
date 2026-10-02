@@ -110,7 +110,7 @@ metadata:
   name: quickbyte-api
   namespace: ${NAMESPACE}
 spec:
-  replicas: 1
+  replicas: ${API_REPLICAS}
   selector:
     matchLabels:
       app.kubernetes.io/name: quickbyte-api
