@@ -15,12 +15,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from collect_baseline import kubectl_environment
+from collect_baseline import kubectl_command, kubectl_environment
 from run_pod_kill_experiment import (collect_probes, get_target_configuration, get_ready_pod, metrics_from_probes,
                                      probe_once, start_port_forward, stop_process, wait_for_service)
 
 
-ROLE = "litmus-agent-chaos-operator-litmus-admin"
+# The Sandbox bootstrap installs only the permissions declared by the Pod
+# Delete and Container Kill faults.  A namespaced RoleBinding limits them to
+# each request-scoped target namespace.
+ROLE = "codereferee-litmus-runner"
 
 
 def main() -> int:
@@ -153,7 +156,7 @@ spec:
             - name: TARGET_CONTAINER
               value: "{target_container}"
 '''
-    completed = subprocess.run(["kubectl", "apply", "-f", "-"], input=manifest, text=True, capture_output=True,
+    completed = subprocess.run(kubectl_command("apply", "-f", "-"), input=manifest, text=True, capture_output=True,
                                env=kubectl_environment())
     if completed.returncode:
         raise SystemExit(completed.stderr.strip() or completed.stdout.strip())
@@ -161,7 +164,7 @@ spec:
 
 def copy_experiment(namespace: str, experiment_name: str) -> None:
     """Copy the official chart's namespaced Pod Delete definition to the target."""
-    source = subprocess.run(["kubectl", "get", "chaosexperiment", experiment_name, "-n", "litmus", "-o", "json"],
+    source = subprocess.run(kubectl_command("get", "chaosexperiment", experiment_name, "-n", "litmus", "-o", "json"),
                             text=True, capture_output=True, env=kubectl_environment(), check=True)
     experiment = json.loads(source.stdout)
     experiment.pop("status", None)
@@ -169,7 +172,7 @@ def copy_experiment(namespace: str, experiment_name: str) -> None:
     for field in ("creationTimestamp", "generation", "resourceVersion", "uid", "managedFields", "annotations"):
         metadata.pop(field, None)
     metadata["namespace"] = namespace
-    copied = subprocess.run(["kubectl", "apply", "-f", "-"], input=json.dumps(experiment), text=True,
+    copied = subprocess.run(kubectl_command("apply", "-f", "-"), input=json.dumps(experiment), text=True,
                             capture_output=True, env=kubectl_environment())
     if copied.returncode:
         raise SystemExit(copied.stderr.strip() or copied.stdout.strip())
@@ -182,7 +185,7 @@ def wait_for_result(namespace: str, engine: str, timeout: int, local_port: int |
     while time.monotonic() < deadline:
         if local_port:
             probes.append(probe_once(local_port, request_timeout_seconds))
-        result = subprocess.run(["kubectl", "get", "chaosresult", "-n", namespace, "-o", "json"], text=True,
+        result = subprocess.run(kubectl_command("get", "chaosresult", "-n", namespace, "-o", "json"), text=True,
                                 capture_output=True, env=kubectl_environment())
         if result.returncode == 0:
             for item in json.loads(result.stdout).get("items", []):

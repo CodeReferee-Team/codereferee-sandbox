@@ -18,7 +18,7 @@ from typing import Any
 
 import yaml
 
-from collect_baseline import kubectl_environment
+from collect_baseline import kubectl_command, kubectl_environment, load_image_into_cluster
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +50,7 @@ def main() -> int:
             raise RuntimeError(f"Required Dockerfile was not found: {profile.get('dockerfile', 'Dockerfile')}")
         build_context = repository / profile.get("buildContext", ".")
         run(["docker", "build", "--tag", image, "--file", str(dockerfile), str(build_context)])
+        load_image_into_cluster(image)
         template = ROOT / profile["manifestTemplate"]
         if not template.is_file():
             raise RuntimeError(f"Deployment template was not found: {template}")
@@ -137,7 +138,7 @@ def apply_patch(repository: Path, patch_file: Path) -> None:
 
 
 def apply(manifest: str) -> None:
-    run(["kubectl", "apply", "-f", "-"], input_text=manifest)
+    run(kubectl_command("apply", "-f", "-"), input_text=manifest)
 
 
 def render_template(template: Path, namespace: str, image: str, profile: dict[str, Any]) -> str:
@@ -159,11 +160,11 @@ def render_template(template: Path, namespace: str, image: str, profile: dict[st
 
 
 def wait_rollout(namespace: str, deployment: str, timeout: int) -> None:
-    run(["kubectl", "rollout", "status", f"deployment/{deployment}", "-n", namespace, f"--timeout={timeout}s"])
+    run(kubectl_command("rollout", "status", f"deployment/{deployment}", "-n", namespace, f"--timeout={timeout}s"))
 
 
 def delete_namespace(namespace: str) -> None:
-    subprocess.run(["kubectl", "delete", "namespace", namespace, "--ignore-not-found=true", "--wait=false"],
+    subprocess.run(kubectl_command("delete", "namespace", namespace, "--ignore-not-found=true", "--wait=false"),
                    text=True, capture_output=True, env=kubectl_environment())
 
 

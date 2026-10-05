@@ -27,6 +27,18 @@ experiment_lock = threading.Lock()
 app = FastAPI(title="CodeReferee Sandbox", version="0.1.0")
 
 
+def kubectl_command(*args: str) -> list[str]:
+    """Use the request runtime's explicit cluster context when configured."""
+    context = os.getenv("CODEREFEREE_KUBECTL_CONTEXT")
+    if not context and os.getenv("CODEREFEREE_CLUSTER_PROVIDER", "existing").lower() == "kind":
+        context = f"kind-{os.getenv('CODEREFEREE_KIND_CLUSTER_NAME', 'codereferee')}"
+    command = ["kubectl"]
+    if context:
+        command.extend(["--context", context])
+    command.extend(args)
+    return command
+
+
 class ChaosTarget(BaseModel):
     """A pre-deployed, request-scoped Kubernetes workload to observe."""
 
@@ -222,7 +234,7 @@ def cleanup_namespace(namespace: str) -> None:
     environment = os.environ.copy()
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         environment.pop(key, None)
-    subprocess.run(["kubectl", "delete", "namespace", namespace, "--ignore-not-found=true", "--wait=false"],
+    subprocess.run(kubectl_command("delete", "namespace", namespace, "--ignore-not-found=true", "--wait=false"),
                    cwd=PROJECT_ROOT, capture_output=True, text=True, env=environment)
 
 
