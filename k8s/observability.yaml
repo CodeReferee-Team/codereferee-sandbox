@@ -1,0 +1,288 @@
+# CodeReferee 샌드박스 관측 스택.
+#
+# 설계 근거 (2026-10-05 결정):
+# - 저장소는 샌드박스 안에 두지 않는다. 카오스로 강제 종료될 수 있고 비용 때문에
+#   인스턴스를 껐다 켜기 때문이다. 여기 뜨는 Prometheus는 agent 모드라 디스크가 없고,
+#   수집한 샘플을 생성 즉시 remote_write로 밖으로 내보낸다. 죽어도 잃을 데이터가 없다.
+# - kubelet 내장 cAdvisor는 housekeeping 주기가 10초라 1초로 긁어도 같은 값만 나온다.
+#   스파이크를 보려면 독립 cAdvisor를 1초 주기로 띄워야 한다.
+# - 카오스 실험은 app.kubernetes.io/name 라벨로 대상을 고르므로, 이 네임스페이스는
+#   실험 대상 라벨을 쓰지 않아 흔들리지 않는다.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: codereferee-observability
+  labels:
+    app.kubernetes.io/part-of: codereferee
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: codereferee-agent
+  namespace: codereferee-observability
+---
+# 샌드박스는 제출된 코드를 실행하는 곳이라 권한을 남겨둘 자리가 아니다. 두 scrape_config
+# 모두 kubernetes_sd 를 이 네임스페이스로 한정하므로 클러스터 범위 권한이 필요 없고,
+# kubelet 을 직접 긁지 않으므로 nodes/metrics 도 필요 없다. pods 조회만 남긴다.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: codereferee-agent
+  namespace: codereferee-observability
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: codereferee-agent
+  namespace: codereferee-observability
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: codereferee-agent
+subjects:
+  - kind: ServiceAccount
+    name: codereferee-agent
+    namespace: codereferee-observability
+---
+# 컨테이너 단위 CPU/메모리/네트워크. housekeeping 1초가 핵심이다.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cadvisor
+  namespace: codereferee-observability
+  labels:
+    codereferee.io/component: cadvisor
+spec:
+  selector:
+    matchLabels:
+      codereferee.io/component: cadvisor
+  template:
+    metadata:
+      labels:
+        codereferee.io/component: cadvisor
+    spec:
+      # cAdvisor는 API 서버와 통신하지 않는다. 토큰을 자동 마운트하면 쿠버네티스가
+      # /var/run/secrets 아래에 마운트를 만들려 하는데, read-only로 올린 호스트
+      # /var/run 안쪽이라 mountpoint 생성이 실패하고 컨테이너가 기동하지 못한다.
+      automountServiceAccountToken: false
+      containers:
+        - name: cadvisor
+          image: gcr.io/cadvisor/cadvisor:v0.49.1
+          args:
+            - --housekeeping_interval=1s
+            # 기본값(true)은 한가한 컨테이너의 수집 주기를 max_housekeeping_interval(1분)까지
+            # 늘린다. 카오스 직전까지 조용하던 컨테이너가 바로 스파이크를 내므로, 늘어난 주기에
+            # 걸리면 그 스파이크를 통째로 놓친다. 1초를 고정한다.
+            - --allow_dynamic_housekeeping=false
+            - --max_housekeeping_interval=1s
+            # 기본값 1분이면 pod-delete 이후 새로 뜬 컨테이너를 1분간 발견하지 못한다.
+            # 복구 구간이 바로 우리가 봐야 하는 구간이다.
+            - --global_housekeeping_interval=1s
+            # containerd 런타임(kind/k3s)이므로 docker_only를 켜지 않는다.
+            - --containerd=/run/containerd/containerd.sock
+            # 수집 범위를 좁혀야 remote_write 비용이 통제된다.
+            - --disable_metrics=advtcp,cpu_topology,cpuset,hugetlb,memory_numa,process,referenced_memory,resctrl,sched,tcp,udp
+            # 기본값은 컨테이너의 모든 label을 시계열 label로 복사한다. 이미지 maintainer까지
+            # 따라붙어 샘플 크기가 몇 배가 되므로, 식별에 필요한 셋만 남긴다.
+            - --store_container_labels=false
+            - --whitelisted_container_labels=io.kubernetes.pod.namespace,io.kubernetes.pod.name,io.kubernetes.container.name
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 300m, memory: 256Mi}
+          volumeMounts:
+            - {name: rootfs, mountPath: /rootfs, readOnly: true}
+            - {name: sys, mountPath: /sys, readOnly: true}
+            # containerd 소켓만 있으면 된다. docker 런타임 경로는 올리지 않는다.
+            - {name: containerd, mountPath: /run/containerd, readOnly: true}
+      volumes:
+        - {name: rootfs, hostPath: {path: /}}
+        - {name: sys, hostPath: {path: /sys}}
+        - {name: containerd, hostPath: {path: /run/containerd}}
+---
+# 노드 단위 CPU/메모리/디스크/네트워크. scrape 시점에 /proc을 읽으므로 1초 scrape면 1초 해상도다.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: codereferee-observability
+  labels:
+    codereferee.io/component: node-exporter
+spec:
+  selector:
+    matchLabels:
+      codereferee.io/component: node-exporter
+  template:
+    metadata:
+      labels:
+        codereferee.io/component: node-exporter
+    spec:
+      # cAdvisor 와 같은 이유로 토큰을 받지 않는다. /proc 과 /sys 만 읽는다.
+      automountServiceAccountToken: false
+      hostPID: true
+      hostNetwork: true
+      containers:
+        - name: node-exporter
+          image: quay.io/prometheus/node-exporter:v1.8.2
+          args:
+            - --path.rootfs=/host
+            - --collector.disable-defaults
+            - --collector.cpu
+            - --collector.meminfo
+            - --collector.diskstats
+            - --collector.netdev
+            - --collector.loadavg
+          ports:
+            - name: http
+              containerPort: 9100
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 128Mi}
+          volumeMounts:
+            - {name: host, mountPath: /host, readOnly: true}
+      volumes:
+        - {name: host, hostPath: {path: /}}
+---
+# Prometheus agent 모드. 저장도 질의도 하지 않고 수집해서 즉시 내보내기만 한다.
+#
+# ${...} 자리는 설치 시점에 치환한다. quickbyte-demo.yaml과 같은 방식이다.
+#   REMOTE_WRITE_URL : 수신 측 주소. 로컬은 host.docker.internal:9090
+#   REQUEST_ID       : 이 실행을 식별하는 값. 모든 시계열에 라벨로 박힌다
+#   CLUSTER_NAME     : 어느 클러스터에서 나온 샘플인지
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: codereferee-agent
+  namespace: codereferee-observability
+data:
+  prometheus.yml: |
+    global:
+      # 스파이크를 보려면 1초여야 한다. cAdvisor도 같은 주기로 돌고 있다.
+      scrape_interval: 1s
+      scrape_timeout: 1s
+      external_labels:
+        # 이 라벨이 없으면 수신 측에서 여러 검증 실행의 샘플이 섞여 구분되지 않는다.
+        codereferee_request_id: "${REQUEST_ID}"
+        codereferee_cluster: "${CLUSTER_NAME}"
+
+    remote_write:
+      - url: "${REMOTE_WRITE_URL}"
+        # 샌드박스가 곧 사라지므로 오래 쌓아두지 않고 빨리 비운다.
+        queue_config:
+          capacity: 10000
+          max_shards: 10
+          batch_send_deadline: 1s
+
+    scrape_configs:
+      - job_name: cadvisor
+        # cAdvisor는 컨테이너별 housekeeping 고루틴에서 측정한 시각을 샘플에 직접 박아 보낸다.
+        # 그 시각은 scrape 간에 단조증가하지 않아서, 그대로 믿으면 Prometheus가 상당수를
+        # out-of-order 로 거부한다(실측: 40초 구간에 24개만 남고 평균 간격 1.56초).
+        # scrape 자체는 up 시계열 기준 정확히 1.000초 간격이므로, 수집 시각을 쓰면
+        # 정확히 1초 격자가 된다. 대신 값이 최대 housekeeping 1주기만큼 늦게 찍히므로
+        # 위의 --allow_dynamic_housekeeping=false 와 짝으로만 성립한다. 주기가 늘어나면
+        # 같은 값이 매 scrape 반복 기록되어 스파이크가 조용히 평탄해진다.
+        honor_timestamps: false
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [codereferee-observability]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_codereferee_io_component]
+            action: keep
+            regex: cadvisor
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: node
+        metric_relabel_configs:
+          # 보낼 지표를 좁혀야 remote_write 비용이 통제된다.
+          - source_labels: [__name__]
+            action: keep
+            regex: container_(cpu_usage_seconds_total|memory_working_set_bytes|memory_usage_bytes|network_(receive|transmit)_bytes_total|fs_(reads|writes)_bytes_total)
+          # 독립 cAdvisor는 kubelet의 /metrics/cadvisor 와 달리 pod/container/namespace label 을
+          # 만들어 주지 않고 container_label_io_kubernetes_* 로 내보낸다. 표준 이름으로 환원한다.
+          - source_labels: [container_label_io_kubernetes_pod_namespace]
+            target_label: namespace
+          - source_labels: [container_label_io_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [container_label_io_kubernetes_container_name]
+            target_label: container
+          - regex: container_label_io_kubernetes_(pod_namespace|pod_name|container_name)
+            action: labeldrop
+          # 컨테이너 이름이 없는 집계 시계열(cgroup 상위 노드, pause 컨테이너)은 버린다.
+          - source_labels: [container]
+            action: drop
+            regex: ^$
+          # cgroup 경로와 컨테이너 해시는 한 샘플당 수백 바이트인데 식별에 보탬이 없다.
+          - regex: (id|name|image)
+            action: labeldrop
+
+      - job_name: node-exporter
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [codereferee-observability]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_codereferee_io_component]
+            action: keep
+            regex: node-exporter
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: node
+        metric_relabel_configs:
+          - source_labels: [__name__]
+            action: keep
+            regex: node_(cpu_seconds_total|memory_(MemAvailable|MemTotal)_bytes|load1|disk_(read|written)_bytes_total|network_(receive|transmit)_bytes_total)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codereferee-agent
+  namespace: codereferee-observability
+  labels:
+    codereferee.io/component: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      codereferee.io/component: agent
+  template:
+    metadata:
+      labels:
+        codereferee.io/component: agent
+      annotations:
+        # ConfigMap 을 다시 apply 해도 이미 돌고 있는 파드는 예전 설정을 계속 쓴다. 마운트
+        # 반영이 늦고, Prometheus 는 SIGHUP 없이 리로드하지 않는다. 설정 해시를 파드 템플릿에
+        # 박아두면 apply 자체가 롤아웃을 일으켜서, requestId 나 수신 주소를 바꾼 재설치가
+        # 조용히 예전 설정으로 도는 일이 없다.
+        codereferee.io/config-hash: "${CONFIG_HASH}"
+    spec:
+      serviceAccountName: codereferee-agent
+      containers:
+        - name: prometheus
+          image: quay.io/prometheus/prometheus:v3.1.0
+          args:
+            # agent 모드에는 TSDB도 질의 API도 없다. 수집과 전송만 한다.
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --agent
+            - --storage.agent.path=/tmp/agent
+            - --web.listen-address=:9090
+          ports:
+            - name: http
+              containerPort: 9090
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus}
+            - {name: wal, mountPath: /tmp/agent}
+      volumes:
+        - name: config
+          configMap: {name: codereferee-agent}
+        # 전송 실패 시 잠깐 버티는 WAL. 디스크가 아니라 메모리라 샌드박스가 사라져도 남는 게 없다.
+        - name: wal
+          emptyDir: {medium: Memory, sizeLimit: 256Mi}
