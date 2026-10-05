@@ -145,6 +145,8 @@ def parse_experiment_result(completed: subprocess.CompletedProcess[str]) -> dict
         }
     if completed.returncode != 0 and not result.get("stderr"):
         result["stderr"] = completed.stderr.strip() or "Chaos v1 experiment failed."
+    result.setdefault("exitCode", completed.returncode)
+    result.setdefault("timedOut", False)
     return result
 
 
