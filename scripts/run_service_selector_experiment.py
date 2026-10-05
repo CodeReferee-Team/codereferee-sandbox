@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from collect_baseline import kubectl_environment
+from collect_baseline import kubectl_command, kubectl_environment
 from run_pod_kill_experiment import (
     collect_probes,
     get_ready_pod,
@@ -147,7 +147,7 @@ def unavailable_probes(seconds: int) -> list[dict[str, Any]]:
 
 
 def kubectl(namespace: str, *args: str) -> subprocess.CompletedProcess[str]:
-    completed = subprocess.run(["kubectl", "-n", namespace, *args], text=True, capture_output=True, env=kubectl_environment())
+    completed = subprocess.run(kubectl_command("-n", namespace, *args), text=True, capture_output=True, env=kubectl_environment())
     if completed.returncode:
         raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "kubectl command failed")
     return completed

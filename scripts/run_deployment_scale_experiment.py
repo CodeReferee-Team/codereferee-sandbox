@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from collect_baseline import kubectl_environment
+from collect_baseline import kubectl_command, kubectl_environment
 from run_pod_kill_experiment import (
     collect_probes,
     get_ready_pod,
@@ -116,7 +116,7 @@ def load_target(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def scale(namespace: str, deployment: str, replicas: int) -> None:
-    completed = subprocess.run(["kubectl", "scale", f"deployment/{deployment}", "-n", namespace, f"--replicas={replicas}"],
+    completed = subprocess.run(kubectl_command("scale", f"deployment/{deployment}", "-n", namespace, f"--replicas={replicas}"),
                                text=True, capture_output=True, env=kubectl_environment())
     if completed.returncode:
         raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "kubectl scale failed")

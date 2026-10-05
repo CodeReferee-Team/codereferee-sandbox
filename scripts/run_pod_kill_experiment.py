@@ -16,7 +16,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
-from collect_baseline import LABEL_SELECTOR, SERVICE, get_ready_pod, kubectl_environment, percentile
+from collect_baseline import LABEL_SELECTOR, SERVICE, get_ready_pod, kubectl_command, kubectl_environment, percentile
 
 
 NAMESPACE = "codereferee-sandbox"
@@ -192,7 +192,7 @@ def resolve_target(args: argparse.Namespace) -> dict[str, Any]:
 
 def start_port_forward(namespace: str, service: str, service_port: int, local_port: int) -> subprocess.Popen[str]:
     return subprocess.Popen(
-        ["kubectl", "-n", namespace, "port-forward", f"service/{service}", f"{local_port}:{service_port}"],
+        kubectl_command("-n", namespace, "port-forward", f"service/{service}", f"{local_port}:{service_port}"),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -394,7 +394,7 @@ def normalize_probe(probe: object) -> dict[str, Any] | None:
 
 def kubectl(namespace: str, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["kubectl", "-n", namespace, *args],
+        kubectl_command("-n", namespace, *args),
         check=True,
         capture_output=True,
         text=True,

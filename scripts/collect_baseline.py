@@ -23,16 +23,51 @@ LABEL_SELECTOR = "app.kubernetes.io/name=fixture-api"
 
 
 def kubectl_environment() -> dict[str, str]:
-    """Run local Docker Desktop kubectl without a global HTTP proxy.
+    """Run local Kubernetes commands without a global HTTP proxy.
 
     Some developer environments set HTTP(S)_PROXY to a local debugging proxy.
-    Kubernetes API traffic for Docker Desktop is local control-plane traffic and
-    must not be routed through that proxy.
+    Local Docker Desktop and kind control-plane traffic must not be routed
+    through that proxy.
     """
     environment = os.environ.copy()
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         environment.pop(key, None)
     return environment
+
+
+def kubectl_command(*args: str) -> list[str]:
+    """Build an explicit kubectl command for the configured Sandbox cluster.
+
+    ``CODEREFEREE_KUBECTL_CONTEXT`` wins when supplied.  A kind runtime has a
+    deterministic context name, so it can be selected without changing the
+    developer's global current-context.
+    """
+    context = os.getenv("CODEREFEREE_KUBECTL_CONTEXT")
+    if not context and os.getenv("CODEREFEREE_CLUSTER_PROVIDER", "existing").lower() == "kind":
+        cluster_name = os.getenv("CODEREFEREE_KIND_CLUSTER_NAME", "codereferee")
+        context = f"kind-{cluster_name}"
+    command = ["kubectl"]
+    if context:
+        command.extend(["--context", context])
+    command.extend(args)
+    return command
+
+
+def load_image_into_cluster(image: str) -> None:
+    """Make a locally built image available to kind nodes when requested."""
+    if os.getenv("CODEREFEREE_CLUSTER_PROVIDER", "existing").lower() != "kind":
+        return
+    cluster_name = os.getenv("CODEREFEREE_KIND_CLUSTER_NAME", "codereferee")
+    kind_command = os.getenv("CODEREFEREE_KIND_COMMAND", "kind")
+    completed = subprocess.run(
+        [kind_command, "load", "docker-image", image, "--name", cluster_name],
+        capture_output=True,
+        text=True,
+        env=kubectl_environment(),
+    )
+    if completed.returncode:
+        message = completed.stderr.strip() or completed.stdout.strip() or "kind image load failed"
+        raise RuntimeError(message)
 
 
 def main() -> int:
@@ -105,14 +140,13 @@ def probe_service(
     service_port: int = 5678,
 ) -> dict[str, Any]:
     process = subprocess.Popen(
-        [
-            "kubectl",
+        kubectl_command(
             "-n",
             namespace,
             "port-forward",
             f"service/{service}",
             f"{local_port}:{service_port}",
-        ],
+        ),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -185,7 +219,7 @@ def is_ready(pod: dict[str, Any]) -> bool:
 
 def kubectl(namespace: str, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["kubectl", "-n", namespace, *args],
+        kubectl_command("-n", namespace, *args),
         check=True,
         capture_output=True,
         text=True,
