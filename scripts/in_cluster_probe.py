@@ -145,6 +145,19 @@ class InClusterProbe:
     def collect(self, count: int) -> list[dict]:
         return [self.probe() for _ in range(count)]
 
+    def collect_until_healthy(self, seconds: float, required: int = 5) -> tuple[list[dict], bool]:
+        deadline = time.monotonic() + seconds
+        probes = []
+        consecutive = 0
+        while time.monotonic() < deadline:
+            result = self.probe()
+            probes.append(result)
+            consecutive = consecutive + 1 if result['success'] else 0
+            if consecutive >= required:
+                return probes, True
+            time.sleep(0.5)
+        return probes, False
+
     def run(self, *args, input_text=None):
         result = subprocess.run(kubectl_command('-n', self.namespace, *args),
             input=input_text, text=True, capture_output=True, env=kubectl_environment(), timeout=130)
