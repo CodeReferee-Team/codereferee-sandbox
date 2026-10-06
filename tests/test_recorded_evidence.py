@@ -8,7 +8,7 @@ class RecordedEvidenceTests(unittest.TestCase):
     def test_real_samples_have_consistent_counts_and_no_credentials(self):
         folder = Path(__file__).resolve().parents[1] / 'data/chaos/runtime-kind-2026-10-07'
         files = sorted(folder.glob('*.json'))
-        self.assertEqual(len(files), 10)
+        self.assertEqual(len(files), 12)
         for path in files:
             with self.subTest(sample=path.name):
                 sample = json.loads(path.read_text(encoding='utf-8'))

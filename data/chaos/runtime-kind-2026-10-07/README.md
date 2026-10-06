@@ -20,6 +20,8 @@ Litmus verdict/phase를 추출한 샘플 포맷이며 Sandbox API 전체 응답�
 | Memory OOM | fixture-api | 1/27 | 11.46 | 2.55 |
 | Pod Delete | fixture-api | 1/45 | 15.97 | 2.54 |
 | Service Blackhole | fixture-api | 15/30 | 14.25 | 13.55 |
+| Deployment Scale Down | QuickByte | 101/116 | 1032.07 | 95.98 |
+| Rollout Restart | QuickByte | 1/101 | 54.77 | 1.85 |
 
 ## 출처와 제외 기준
 
@@ -33,6 +35,9 @@ Litmus verdict/phase를 추출한 샘플 포맷이며 Sandbox API 전체 응답�
 - OOM: `kind-memory-limit-002.json`. 이번 실험 이후 OOMKilled와 restart 증가 확인.
 - Pod Delete: `kind-pod-delete-observer-002.json`.
 - Service Blackhole: `kind-routing-observer-001.json`. cluster 내부 HTTP로 단절·복구 확인.
+- Scale Down/Rollout: `frontend-backend-deep-final.json`, task
+  `f778fe57-9a96-469f-babc-c476c4f56cb5`. 정밀 검사 8종 모두 연속 실행·복구 확인.
+  Backend 판정은 복구 95.98초가 기준 65초를 넘어서 FAILED다. 관측 성공과 SLO 합격은 다르다.
 
 ## 해석 제한
 
