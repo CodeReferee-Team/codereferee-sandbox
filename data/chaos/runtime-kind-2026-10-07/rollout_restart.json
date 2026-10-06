@@ -1,0 +1,807 @@
+{
+  "sample_schema": "codereferee-runtime-observation-v1",
+  "captured_date": "2026-10-07",
+  "repository": {
+    "url": "https://github.com/phdcoco/QuickByte_Demo.git",
+    "commit": "d1c5c5edd86791bcec3ccbf93abde42d6778c3c3"
+  },
+  "source": {
+    "real_execution_observed": true,
+    "target": "quickbyte-api"
+  },
+  "scenario": "rollout_restart",
+  "observation": {
+    "type": "rollout_restart",
+    "kill_method": "kubectl_rollout_restart",
+    "started_at": "2026-10-06T21:42:02.171483Z",
+    "recovered": true,
+    "recovered_at": "2026-10-06T21:43:41.072715Z",
+    "recovery_seconds": 1.85,
+    "experiment_duration_seconds": 98.9,
+    "target_pod_uid": "5988295e-0c35-4649-990d-ade5fca78d0b",
+    "replacement_pod_uid": "ba29edaa-6114-4ac3-9a18-690eed688bd7",
+    "target_configuration": {
+      "replicas": 1,
+      "readiness_probe": {
+        "type": "http_get",
+        "initial_delay_seconds": null,
+        "period_seconds": 5,
+        "timeout_seconds": 2,
+        "failure_threshold": 12,
+        "success_threshold": 1
+      },
+      "liveness_probe": {
+        "type": "http_get",
+        "initial_delay_seconds": null,
+        "period_seconds": 10,
+        "timeout_seconds": 2,
+        "failure_threshold": 3,
+        "success_threshold": 1
+      },
+      "startup_probe": {
+        "type": "http_get",
+        "initial_delay_seconds": null,
+        "period_seconds": 5,
+        "timeout_seconds": 2,
+        "failure_threshold": 30,
+        "success_threshold": 1
+      },
+      "termination_grace_period_seconds": 30
+    },
+    "rollout_operation": {
+      "deployment": "quickbyte-api",
+      "strategy": "kubectl rollout restart"
+    },
+    "observation_window": {
+      "baseline_probe_count": 10,
+      "recovery_timeout_seconds": 180,
+      "error_rate_denominator": "all measured in-cluster HTTP requests during baseline, rollout restart, and replacement verification"
+    },
+    "abort_condition": {
+      "triggered": false,
+      "reason": null
+    }
+  },
+  "litmus": null,
+  "baseline": {
+    "availability": 1,
+    "p95_latency_ms": 123.23,
+    "error_rate": 0,
+    "probe_count": 10,
+    "success_count": 10,
+    "failure_count": 0,
+    "error_rate_denominator": "all HTTP GET / probes collected during baseline; readiness wait probes are excluded",
+    "cpu_usage_percent": null,
+    "memory_usage_mb": null,
+    "restart_count": 0
+  },
+  "observationStatus": "observed",
+  "probeTransport": "in_cluster_http",
+  "target": "QuickByte_Demo",
+  "exitCode": 0,
+  "probes": {
+    "baseline": [
+      {
+        "at": "2026-10-06T21:42:00.111942+00:00",
+        "status_code": 200,
+        "latency_ms": 32.22,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:00.256702+00:00",
+        "status_code": 200,
+        "latency_ms": 27.51,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:00.447559+00:00",
+        "status_code": 200,
+        "latency_ms": 38.03,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:00.608371+00:00",
+        "status_code": 200,
+        "latency_ms": 17.9,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:00.764678+00:00",
+        "status_code": 200,
+        "latency_ms": 42.94,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:00.919859+00:00",
+        "status_code": 200,
+        "latency_ms": 32.3,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:01.218256+00:00",
+        "status_code": 200,
+        "latency_ms": 19.8,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:01.526140+00:00",
+        "status_code": 200,
+        "latency_ms": 57.18,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:01.868388+00:00",
+        "status_code": 200,
+        "latency_ms": 22.16,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:02.165681+00:00",
+        "status_code": 200,
+        "latency_ms": 123.23,
+        "success": true,
+        "error": null
+      }
+    ],
+    "experiment": [
+      {
+        "at": "2026-10-06T21:42:03.209725+00:00",
+        "status_code": 200,
+        "latency_ms": 37.8,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:04.402731+00:00",
+        "status_code": 200,
+        "latency_ms": 26.21,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:05.438732+00:00",
+        "status_code": 200,
+        "latency_ms": 18.09,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:06.456755+00:00",
+        "status_code": 200,
+        "latency_ms": 17.23,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:07.464649+00:00",
+        "status_code": 200,
+        "latency_ms": 29.81,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:08.402485+00:00",
+        "status_code": 200,
+        "latency_ms": 13.17,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:09.502339+00:00",
+        "status_code": 200,
+        "latency_ms": 20.57,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:10.624440+00:00",
+        "status_code": 200,
+        "latency_ms": 49.24,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:11.701728+00:00",
+        "status_code": 200,
+        "latency_ms": 13.67,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:12.699746+00:00",
+        "status_code": 200,
+        "latency_ms": 8.27,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:13.690820+00:00",
+        "status_code": 200,
+        "latency_ms": 29.03,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:14.732265+00:00",
+        "status_code": 200,
+        "latency_ms": 19.33,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:15.694558+00:00",
+        "status_code": 200,
+        "latency_ms": 20.22,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:16.773125+00:00",
+        "status_code": 200,
+        "latency_ms": 42.23,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:18.079553+00:00",
+        "status_code": 200,
+        "latency_ms": 66.05,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:19.159090+00:00",
+        "status_code": 200,
+        "latency_ms": 36.38,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:20.185025+00:00",
+        "status_code": 200,
+        "latency_ms": 23.47,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:21.281155+00:00",
+        "status_code": 200,
+        "latency_ms": 17.99,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:22.300894+00:00",
+        "status_code": 200,
+        "latency_ms": 26.72,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:23.289357+00:00",
+        "status_code": 200,
+        "latency_ms": 10.33,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:24.198156+00:00",
+        "status_code": 200,
+        "latency_ms": 10.31,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:25.085427+00:00",
+        "status_code": 200,
+        "latency_ms": 16.38,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:26.140942+00:00",
+        "status_code": 200,
+        "latency_ms": 47.97,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:27.137232+00:00",
+        "status_code": 200,
+        "latency_ms": 15.27,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:28.511985+00:00",
+        "status_code": 200,
+        "latency_ms": 29.42,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:29.762633+00:00",
+        "status_code": 200,
+        "latency_ms": 33.12,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:30.845237+00:00",
+        "status_code": 200,
+        "latency_ms": 35.92,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:31.926219+00:00",
+        "status_code": 200,
+        "latency_ms": 16.2,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:32.994472+00:00",
+        "status_code": 200,
+        "latency_ms": 24.18,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:34.095497+00:00",
+        "status_code": 200,
+        "latency_ms": 25.2,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:35.173657+00:00",
+        "status_code": 200,
+        "latency_ms": 15.11,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:36.168146+00:00",
+        "status_code": 200,
+        "latency_ms": 41.54,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:37.196907+00:00",
+        "status_code": 200,
+        "latency_ms": 9.84,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:38.195425+00:00",
+        "status_code": 200,
+        "latency_ms": 9.05,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:39.197165+00:00",
+        "status_code": 200,
+        "latency_ms": 26.53,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:40.641898+00:00",
+        "status_code": 200,
+        "latency_ms": 11.92,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:41.650532+00:00",
+        "status_code": 200,
+        "latency_ms": 21.4,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:42.751912+00:00",
+        "status_code": 200,
+        "latency_ms": 26.57,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:44.060039+00:00",
+        "status_code": 200,
+        "latency_ms": 20.21,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:45.086076+00:00",
+        "status_code": 200,
+        "latency_ms": 8.78,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:46.092161+00:00",
+        "status_code": 200,
+        "latency_ms": 27.91,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:47.213112+00:00",
+        "status_code": 200,
+        "latency_ms": 9.72,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:48.205916+00:00",
+        "status_code": 200,
+        "latency_ms": 36.33,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:49.203673+00:00",
+        "status_code": 200,
+        "latency_ms": 9.7,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:50.284221+00:00",
+        "status_code": 200,
+        "latency_ms": 52.1,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:51.395146+00:00",
+        "status_code": 200,
+        "latency_ms": 35.86,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:52.566152+00:00",
+        "status_code": 200,
+        "latency_ms": 24.88,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:53.603889+00:00",
+        "status_code": 200,
+        "latency_ms": 25.54,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:54.598630+00:00",
+        "status_code": 200,
+        "latency_ms": 15.89,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:55.602083+00:00",
+        "status_code": 200,
+        "latency_ms": 9.91,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:56.674991+00:00",
+        "status_code": 200,
+        "latency_ms": 21.64,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:57.755900+00:00",
+        "status_code": 200,
+        "latency_ms": 36.84,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:58.887661+00:00",
+        "status_code": 200,
+        "latency_ms": 11.12,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:42:59.875014+00:00",
+        "status_code": 200,
+        "latency_ms": 47.91,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:01.044781+00:00",
+        "status_code": 200,
+        "latency_ms": 12.11,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:02.067441+00:00",
+        "status_code": 200,
+        "latency_ms": 35.93,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:03.077802+00:00",
+        "status_code": 200,
+        "latency_ms": 12.59,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:04.067873+00:00",
+        "status_code": 200,
+        "latency_ms": 14.09,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:05.133297+00:00",
+        "status_code": 200,
+        "latency_ms": 14.83,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:06.236993+00:00",
+        "status_code": 200,
+        "latency_ms": 29.99,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:07.331943+00:00",
+        "status_code": 200,
+        "latency_ms": 48.83,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:08.508413+00:00",
+        "status_code": 200,
+        "latency_ms": 18.82,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:09.687309+00:00",
+        "status_code": 200,
+        "latency_ms": 58.77,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:10.858385+00:00",
+        "status_code": 200,
+        "latency_ms": 25,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:12.019001+00:00",
+        "status_code": 200,
+        "latency_ms": 26,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:13.192645+00:00",
+        "status_code": 200,
+        "latency_ms": 54.77,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:14.488030+00:00",
+        "status_code": 200,
+        "latency_ms": 24.68,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:15.561512+00:00",
+        "status_code": 200,
+        "latency_ms": 19.27,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:16.482719+00:00",
+        "status_code": 200,
+        "latency_ms": 9.46,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:17.420277+00:00",
+        "status_code": 200,
+        "latency_ms": 20.86,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:18.410158+00:00",
+        "status_code": 200,
+        "latency_ms": 9.43,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:19.306286+00:00",
+        "status_code": 200,
+        "latency_ms": 10.59,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:20.305654+00:00",
+        "status_code": 200,
+        "latency_ms": 16.88,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:21.358876+00:00",
+        "status_code": 200,
+        "latency_ms": 11.14,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:22.412388+00:00",
+        "status_code": 200,
+        "latency_ms": 26.25,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:23.600149+00:00",
+        "status_code": 200,
+        "latency_ms": 32.52,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:24.687511+00:00",
+        "status_code": 200,
+        "latency_ms": 21.06,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:25.809513+00:00",
+        "status_code": 200,
+        "latency_ms": 8.97,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:26.787831+00:00",
+        "status_code": 200,
+        "latency_ms": 12.96,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:27.808766+00:00",
+        "status_code": 200,
+        "latency_ms": 30.49,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:29.001035+00:00",
+        "status_code": 200,
+        "latency_ms": 31.39,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:30.078759+00:00",
+        "status_code": 200,
+        "latency_ms": 24.42,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:31.149191+00:00",
+        "status_code": 200,
+        "latency_ms": 21.96,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:32.461388+00:00",
+        "status_code": 200,
+        "latency_ms": 9.91,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:33.556045+00:00",
+        "status_code": 200,
+        "latency_ms": 27.97,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:34.695339+00:00",
+        "status_code": null,
+        "latency_ms": 4.59,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:43:36.541917+00:00",
+        "status_code": 200,
+        "latency_ms": 225.2,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:37.641724+00:00",
+        "status_code": 200,
+        "latency_ms": 36.2,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:38.676253+00:00",
+        "status_code": 200,
+        "latency_ms": 19.95,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:39.643519+00:00",
+        "status_code": 200,
+        "latency_ms": 12.49,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:43:40.510583+00:00",
+        "status_code": 200,
+        "latency_ms": 20.91,
+        "success": true,
+        "error": null
+      }
+    ]
+  },
+  "metrics": {
+    "availability": 0.9900990099009901,
+    "p95_latency_ms": 54.77,
+    "error_rate": 0.00990099009900991,
+    "probe_count": 101,
+    "success_count": 100,
+    "failure_count": 1,
+    "error_rate_denominator": "all measured in-cluster HTTP requests during baseline, rollout restart, and replacement verification",
+    "cpu_usage_percent": null,
+    "memory_usage_mb": null,
+    "restart_count": 0
+  }
+}

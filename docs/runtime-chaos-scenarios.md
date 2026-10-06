@@ -54,6 +54,20 @@ Judge의 합격 기준을 바꾸지 않는다. 설정은 `app/scenarios.py`에 �
   Deployment Scale Down, Rollout Restart
 - DB/Redis 의존성과 메모리 실험은 추가 선택 가능
 
+### 기본 구성을 정한 이유
+
+현재 등급은 실행 범위·부담에 따른 초기 제품 기본값이며 소요 시간 보장이나 공인 등급이 아니다.
+빠른 검사는 같은 Pod 안의 프로세스 재시작·HTTP 복구라는 좁은 장애 범위에 집중한다.
+Container Kill이 모든 서비스에 보편적으로 필수라는 의미는 아니다. 컨테이너 웹 서비스의
+기본 복구 검사로 선택했으며 배치 작업 등 다른 서비스 유형에는 재검토가 필요하다.
+clone/build 및 애플리케이션 기동 때문에 빠른 검사도 수 분 걸릴 수 있다.
+
+중간 검사는 복구와 CPU·네트워크 성능 저하를 함께 보고, 정밀 검사는 Pod 교체,
+라우팅, 복제본과 배포 lifecycle까지 포함한다. DB/Redis에는 의존성·업무 API 선언이,
+OOM에는 메모리 limit이 필요하므로 추가 선택으로 둔다.
+공통 필수 절차는 정상 baseline 확인, 장애 해제·복구 관측, evidence 보존과 환경 정리다.
+합격 기준은 서비스 SLO와 AI 팀 정책에 따라 정하며, 실제 소요 시간·관측 결과로 기본 구성을 조정한다.
+
 각 시나리오 evidence는 `chaos_observation.scenarios`에 독립적으로 보존되어 기존
 AI parser와 Backend report를 통해 전달된다. 합계 availability/error rate는 측정
 요청 수로 계산한다. 개별 p95의 최대값을 전체 p95로 보고하지 않는다.
@@ -113,6 +127,7 @@ setup에서 사용하는 비밀번호는 이번 Sandbox 배포가 생성한 임�
 . ./scripts/start_local_integration.ps1 -DisableLlm
 .venv/Scripts/python.exe scripts/verify_backend_pipeline.py `
   --mode suite_custom__db__redis `
+  --verify-postgres `
   --output .runtime/evidence/full-pipeline.json
 ```
 
@@ -127,10 +142,10 @@ Windows Docker의 예약 포트 때문에 8080이 bind되지 않는 환경을 �
 
 ## 현재 검증 범위와 후속 작업
 
-- 유효한 실제 관측 샘플 10종: [샘플 및 출처](../data/chaos/runtime-kind-2026-10-07/README.md).
+- 유효한 실제 관측 샘플 12종: [샘플 및 출처](../data/chaos/runtime-kind-2026-10-07/README.md).
 - DB/Redis 사용자 업무 장애는 Frontend 프록시 → Backend → Redis → AI → Sandbox → Redis → Backend로 검증했다.
 - 브라우저 클릭/화면 동작 자동화는 검증하지 않았다. 프록시 HTTP와 프론트 빌드·테스트를 검증했다.
-- deep 8종 묶음 전체를 한 요청으로 실행한 최종 검증은 아직 하지 않았다. 개별 실행과 묶음 결과를 구분한다.
+- deep 8종을 QuickByte에 한 번 배포한 환경에서 순차 실행·복구·정리하는 전체 경로를 검증했다.
 - 현재 API 프로세스는 동시 실험을 lock으로 제한한다. 다중 Worker/동시 사용자 격리·스케줄링은 별도 단계다.
 - 임의 레포의 Dockerfile/Compose/Kubernetes 자동 분석은 아직 없다. 등록 profile 또는 레포 설정이 필요하다.
 - 다른 OS·클러스터의 실측은 별도 필요하다. 이번 runtime fault 검증은 로컬 kind 기준이다.
@@ -159,5 +174,45 @@ errors는 비어 있다. 실제 namespace와 host image가 존재하지 않는 �
 실제 LLM 생성 대신 명시적인 `-DisableLlm` 설정으로 규칙 판정·fallback 보고서를 사용했다.
 전체 실행 응답은 로컬 `.runtime/evidence/frontend-backend-standard-final.json`에 보존한다.
 
-이번 검증: Sandbox 단위 테스트 25개, Frontend 4개·production build 통과,
-Backend 전체 테스트 40개 실패/오류 0건. 프론트 lint는 기존 UI Fast Refresh 경고 2개다.
+이번 최종 테스트: Sandbox 28개, Frontend 4개·production build 통과,
+Backend 41개 실패/오류/skip 0건. 프론트 lint는 기존 UI Fast Refresh 경고 2개다.
+
+## 정밀 검사 8종 연속 실측 (2026-10-07)
+
+Task `f778fe57-9a96-469f-babc-c476c4f56cb5`, 같은 QuickByte commit을 한 번 clone·배포했다.
+전체 Sandbox 응답 소요 시간은 914,625ms(약 15분 15초)다. 아래 8종이 모두
+`observed / exitCode: 0 / recovered: true`이며 `not_executed`는 비어 있다.
+모든 시나리오의 probe transport는 `in_cluster_http`다.
+
+| 순서 | 시나리오 | 실패/전체 요청 | p95 ms | 복구 초 |
+|---|---|---:|---:|---:|
+| 1 | Container Kill | 33/75 | 47.82 | 82.60 |
+| 2 | Pod Delete | 31/66 | 31.14 | 76.90 |
+| 3 | CPU Stress | 0/47 | 32.98 | 0 |
+| 4 | Network Latency | 0/44 | 612.18 | 0 |
+| 5 | Packet Loss | 1/44 | 1444.60 | 2.41 |
+| 6 | Service Blackhole | 16/31 | 16.75 | 13.91 |
+| 7 | Scale Down | 101/116 | 1032.07 | 95.98 |
+| 8 | Rollout Restart | 1/101 | 54.77 | 1.85 |
+
+Scale Down은 replica 1 → 0 → 1을 복원하고 HTTP 연속 성공을 확인했다.
+Rollout은 실제 새 Pod UID로 교체됐고 HTTP 연속 성공을 확인했다.
+기존 앱 Pod 직접 port-forward 관측을 in-cluster Service HTTP로 보강했다.
+
+Backend 판정은 `FAILED`: `chaos_recovery_exceeds_expected_bound`, 95.98초 > 현재 기준 65초.
+실험 복구 성공을 SLO 합격으로 바꾸지 않았으며 AI 정책은 수정하지 않았다.
+namespace·host image·kind image 정리 report는 모두 성공, errors는 비어 있고 실제 제거도 확인했다.
+
+### 최종 보고서 DB 저장 보강
+
+정밀 검증에서 Redis 캐시의 최종 결과와 달리 PostgreSQL JSONB 저장이 실패하는 문제를 발견했다.
+Server `TaskStatusPgRepository`의 보고서 파라미터에 `CAST(? AS JSONB)`를 적용했다.
+실제 PostgreSQL 17 테스트에서 오류를 재현하고, 수정 후 전체 41개 테스트를 통과했다.
+캐시 조회만 성공하면 DB 저장도 성공했다고 간주하지 않는다.
+기존 실제 실험 결과를 AI SQLite에서 읽어 동일 최종 이벤트로 재전달했다.
+이는 저장 경로 재검증이며 Chaos 재실행이나 AI 판정 재생성이 아니다.
+로컬 재전달로 모니터링 카운터가 중복 집계될 수 있으므로 이번 카운터를 운영 통계로 쓰지 않는다.
+`verify_backend_pipeline.py --verify-postgres`는 최종 상태·observed·exit code·시나리오 수를 DB와 대조한다.
+직접 DB 조회 및 이 도구의 확인 결과: DB/Redis PASSED·2종, standard FAILED·3종,
+deep FAILED·8종의 JSONB 보고서와 최종 상태가 모두 저장됐다.
+재전달 후 DB의 updated_at은 재전달 시각이다. 실험 소요 시간은 원래 execution_result.duration_ms를 사용한다.
