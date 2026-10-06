@@ -12,6 +12,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
+from app.scenarios import ALIASES, SCENARIOS, SUITES, resolve_scenarios
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +21,7 @@ LITMUS_SCRIPT = PROJECT_ROOT / "scripts" / "run_litmus_pod_delete.py"
 SCALE_SCRIPT = PROJECT_ROOT / "scripts" / "run_deployment_scale_experiment.py"
 SERVICE_SELECTOR_SCRIPT = PROJECT_ROOT / "scripts" / "run_service_selector_experiment.py"
 ROLLOUT_RESTART_SCRIPT = PROJECT_ROOT / "scripts" / "run_rollout_restart_experiment.py"
+DEPENDENCY_SCRIPT = PROJECT_ROOT / 'scripts' / 'run_dependency_experiment.py'
 DEPLOY_SCRIPT = PROJECT_ROOT / "scripts" / "deploy_repository.py"
 EXPERIMENT_TIMEOUT_SECONDS = 300
 experiment_lock = threading.Lock()
@@ -50,6 +52,7 @@ class ChaosTarget(BaseModel):
     service_port: int = Field(alias="servicePort")
     label_selector: str = Field(alias="labelSelector")
     name: str | None = None
+    dependencies: dict[str, Any] = Field(default_factory=dict)
 
 
 class RepositoryValidationRequest(BaseModel):
@@ -72,10 +75,22 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get('/chaos/scenarios')
+def scenario_catalogue() -> dict[str, Any]:
+    return {'scenarios': SCENARIOS, 'suites': SUITES, 'aliases': ALIASES,
+            'execution': 'serial_per_request', 'customModePrefix': 'suite_custom__'}
+
+
 @app.post("/repositories/validate")
 def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
     """Run fixture Chaos, a pre-deployed target, or a profile-driven repository deployment."""
 
+    modes = None
+    if request.chaos_mode and request.chaos_mode != 'fixture':
+        try:
+            modes = resolve_scenarios(request.chaos_mode)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not experiment_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A Chaos v1 experiment is already running.")
 
@@ -85,15 +100,19 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         if request.deployment_profile:
             deployed = deploy_repository(request)
             deployed_target = ChaosTarget.model_validate(deployed["target"])
-        command = experiment_command(request, deployed_target)
-        completed = subprocess.run(
-            command,
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=EXPERIMENT_TIMEOUT_SECONDS,
-        )
-        result = parse_experiment_result(completed)
+        scenario_results = []
+        for mode in modes or [request.chaos_mode]:
+            scenario_request = request.model_copy(update={'chaos_mode': mode})
+            command = experiment_command(scenario_request, deployed_target)
+            completed = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True,
+                                       text=True, timeout=EXPERIMENT_TIMEOUT_SECONDS)
+            result = parse_experiment_result(completed)
+            result['chaosMode'] = mode
+            scenario_results.append(result)
+            if result.get('observationStatus') == 'infrastructure_error' or result.get('exitCode') != 0:
+                break
+        if modes and (len(modes) > 1 or request.chaos_mode.startswith('suite_')):
+            result = aggregate_scenarios(request.chaos_mode, modes, scenario_results)
         # Chaos v1 performs HTTP probes through kubectl port-forward, but it
         # does not start a headless browser.  Make that distinction explicit
         # so AI Core does not infer a failed browser smoke check from
@@ -121,6 +140,32 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         if 'deployed_target' in locals() and deployed_target is not None:
             cleanup_namespace(deployed_target.namespace)
         experiment_lock.release()
+
+
+def aggregate_scenarios(mode: str, planned: list[str], results: list[dict[str, Any]]) -> dict[str, Any]:
+    infra = next((r for r in results if r.get('observationStatus') == 'infrastructure_error'), None)
+    recovered = len(results) == len(planned) and all(r.get('exitCode') == 0 for r in results)
+    count = sum(r.get('metrics', {}).get('probe_count', 0) for r in results)
+    successes = sum(r.get('metrics', {}).get('success_count', 0) for r in results)
+    recovery = [r.get('chaos_observation', {}).get('recovery_seconds') for r in results]
+    recovery = [v for v in recovery if isinstance(v, (int, float))]
+    return {'schemaVersion': 'chaos-v1', 'scenario': mode,
+            'observationStatus': 'infrastructure_error' if infra else 'observed',
+            'exitCode': None if infra else (0 if recovered else 1),
+            'infraError': infra.get('infraError') if infra else None,
+            'stderr': infra.get('stderr', '') if infra else '',
+            'timedOut': any(r.get('timedOut', False) for r in results),
+            'baseline': results[0].get('baseline', {}),
+            'metrics': {'availability': successes/count if count else None,
+                        'error_rate': 1-successes/count if count else None,
+                        'probe_count': count, 'success_count': successes, 'failure_count': count-successes,
+                        'p95_latency_ms': None, 'error_rate_denominator': 'sum of per-scenario HTTP probe counts; inspect individual scenarios for latency'},
+            'chaos_observation': {'type': 'scenario_suite', 'recovered': recovered,
+                'recovery_seconds': max(recovery) if recovery else None,
+                'target_configuration': results[0].get('chaos_observation', {}).get('target_configuration', {}),
+                'abort_condition': {'triggered': bool(infra), 'reason': infra.get('infraError') if infra else None},
+                'scenarios': results, 'requested': planned, 'not_executed': planned[len(results):]},
+            'source': {'real_execution_observed': not bool(infra)}}
 
 
 def parse_experiment_result(completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
@@ -154,6 +199,15 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
     if request.chaos_mode in (None, "fixture") and request.chaos_target is None:
         return [sys.executable, str(EXPERIMENT_SCRIPT)]
     target = deployed_target or request.chaos_target
+    if request.chaos_mode in ('dependency_database_outage', 'dependency_redis_outage') and target is not None:
+        dependency = 'database' if request.chaos_mode == 'dependency_database_outage' else 'redis'
+        config = target.dependencies.get(dependency)
+        if not config:
+            raise HTTPException(status_code=422, detail=f'Profile must declare the {dependency} dependency and a business probe.')
+        return [sys.executable, str(DEPENDENCY_SCRIPT), '--namespace', target.namespace,
+                '--deployment', target.deployment, '--service', target.service,
+                '--service-port', str(target.service_port), '--scenario', request.chaos_mode,
+                '--dependency-config', json.dumps(config)]
     if request.chaos_mode == "deployment_scale_down" and target is not None:
         return [
             sys.executable, str(SCALE_SCRIPT),
@@ -181,7 +235,8 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
             "--service-port", str(target.service_port),
             "--label-selector", target.label_selector,
         ]
-    scenario_by_mode = {"litmus_pod_delete": "pod_delete", "litmus_container_kill": "container_kill"}
+    scenario_by_mode = {f'litmus_{scenario}': scenario for scenario in
+                        ('pod_delete', 'container_kill', 'pod_cpu_hog', 'pod_network_latency', 'pod_network_loss', 'pod_memory_hog', 'pod_memory_oom')}
     scenario = scenario_by_mode.get(request.chaos_mode or "")
     if scenario is None or target is None:
         raise HTTPException(
@@ -202,7 +257,7 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
 
 
 def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
-    if request.chaos_mode not in {"litmus_pod_delete", "deployment_scale_down", "service_selector_blackhole", "rollout_restart"}:
+    if request.chaos_mode not in SCENARIOS and request.chaos_mode not in SUITES and not (request.chaos_mode or '').startswith('suite_custom__'):
         raise HTTPException(status_code=422, detail="deploymentProfile requires a supported chaosMode.")
     if not request.request_id:
         raise HTTPException(status_code=422, detail="deploymentProfile requires requestId.")
@@ -231,13 +286,17 @@ def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         raise RuntimeError("Repository deployment returned invalid JSON.") from exc
 
 
-def cleanup_namespace(namespace: str) -> None:
+def cleanup_namespace(namespace: str) -> bool:
     """Best-effort cleanup; evidence has already been returned or recorded."""
     environment = os.environ.copy()
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         environment.pop(key, None)
-    subprocess.run(kubectl_command("delete", "namespace", namespace, "--ignore-not-found=true", "--wait=false"),
-                   cwd=PROJECT_ROOT, capture_output=True, text=True, env=environment)
+    try:
+        completed = subprocess.run(kubectl_command("delete", "namespace", namespace, "--ignore-not-found=true", "--wait=true", '--timeout=60s'),
+                       cwd=PROJECT_ROOT, capture_output=True, text=True, env=environment, timeout=70)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
 
 
 def infrastructure_error(
