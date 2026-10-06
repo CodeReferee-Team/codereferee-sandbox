@@ -44,6 +44,13 @@ $downloads = @(
         $containerKillManifest
     )
 )
+$runtimeFaults = @('pod-cpu-hog', 'pod-network-latency', 'pod-network-loss', 'pod-memory-hog')
+foreach ($fault in $runtimeFaults) {
+    $downloads += ,@(
+        "https://raw.githubusercontent.com/litmuschaos/chaos-charts/$faultCommit/faults/kubernetes/$fault/fault.yaml",
+        (Join-Path $manifestDirectory "$fault-v$faultVersion.yaml")
+    )
+}
 
 foreach ($download in $downloads) {
     if (-not (Test-Path -LiteralPath $download[1])) {
@@ -69,6 +76,15 @@ kubectl --context $Context -n litmus rollout status deployment/chaos-operator-ce
 kubectl --context $Context apply -f $runnerRbacManifest
 kubectl --context $Context -n litmus apply -f $podDeleteManifest
 kubectl --context $Context -n litmus apply -f $containerKillManifest
+foreach ($fault in $runtimeFaults) {
+    $faultManifest = Join-Path $manifestDirectory "$fault-v$faultVersion.yaml"
+    $faultContent = Get-Content -LiteralPath $faultManifest -Raw
+    if ($faultContent -notmatch 'kind: ChaosExperiment' -or $faultContent -notmatch "name: $fault") {
+        throw "Downloaded fault manifest is invalid: $fault"
+    }
+    kubectl --context $Context -n litmus apply -f $faultManifest
+    if ($LASTEXITCODE -ne 0) { throw "Fault installation failed: $fault" }
+}
 
 kubectl --context $Context -n litmus get pods
 kubectl --context $Context -n litmus get chaosexperiments
