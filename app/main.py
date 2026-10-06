@@ -104,8 +104,11 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         for mode in modes or [request.chaos_mode]:
             scenario_request = request.model_copy(update={'chaos_mode': mode})
             command = experiment_command(scenario_request, deployed_target)
+            child_environment = os.environ.copy()
+            child_environment['PYTHONIOENCODING'] = 'utf-8'
             completed = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True,
-                                       text=True, timeout=EXPERIMENT_TIMEOUT_SECONDS)
+                                       text=True, encoding='utf-8', errors='replace',
+                                       env=child_environment, timeout=EXPERIMENT_TIMEOUT_SECONDS)
             result = parse_experiment_result(completed)
             result['chaosMode'] = mode
             scenario_results.append(result)
@@ -138,7 +141,17 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         )
     finally:
         if 'deployed_target' in locals() and deployed_target is not None:
-            cleanup_namespace(deployed_target.namespace)
+            namespace_removed = cleanup_namespace(deployed_target.namespace)
+            if deployed and deployed.get('image'):
+                from scripts.artifact_cleanup import cleanup_request_image
+                try:
+                    report = cleanup_request_image(deployed['image'], deployed_target.namespace,
+                                                   remove_from_kind=namespace_removed)
+                    report['namespace_removed'] = namespace_removed
+                except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+                    report = {'namespace_removed': namespace_removed, 'errors': [str(exc)]}
+                if 'result' in locals():
+                    result.setdefault('source', {})['artifact_cleanup'] = report
         experiment_lock.release()
 
 
@@ -274,7 +287,10 @@ def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         patch_path.write_text(request.patch_diff, encoding="utf-8")
         command.extend(["--patch-file", str(patch_path)])
     try:
-        completed = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=600)
+        child_environment = os.environ.copy()
+        child_environment['PYTHONIOENCODING'] = 'utf-8'
+        completed = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True, text=True,
+                                   encoding='utf-8', errors='replace', env=child_environment, timeout=600)
     finally:
         if patch_path:
             patch_path.unlink(missing_ok=True)
