@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from collect_baseline import kubectl_command, kubectl_environment
+from in_cluster_probe import InClusterProbe
 from run_pod_kill_experiment import (
     collect_probes,
     get_ready_pod,
@@ -32,26 +33,29 @@ def main() -> int:
         raise SystemExit("Service selector is required for selector-blackhole chaos.")
 
     started_at = now_utc()
-    forward = start_port_forward(target["namespace"], target["service"], int(target["servicePort"]), args.local_port)
-    try:
-        wait_for_service(forward, args.local_port, args.request_timeout_seconds)
-        baseline = collect_probes(args.local_port, args.baseline_probes, args.request_timeout_seconds)
-        fault_started = time.monotonic()
-        replace_selector(target["namespace"], target["service"], {"app.kubernetes.io/name": "codereferee-blackhole"})
-        wait_for_endpoint_state(target["namespace"], target["service"], expected=False, timeout_seconds=args.recovery_timeout_seconds)
-        stop_process(forward)
-        fault_probes = unavailable_probes(args.fault_seconds)
-        replace_selector(target["namespace"], target["service"], original_selector)
-        wait_for_endpoint_state(target["namespace"], target["service"], expected=True, timeout_seconds=args.recovery_timeout_seconds)
-        forward = start_port_forward(target["namespace"], target["service"], int(target["servicePort"]), args.local_port)
-        wait_for_service(forward, args.local_port, args.recovery_timeout_seconds)
-        recovery_probes = collect_probes(args.local_port, args.recovery_probes, args.request_timeout_seconds)
-    finally:
-        replace_selector(target["namespace"], target["service"], original_selector)
-        stop_process(forward)
+    with InClusterProbe(target['namespace'], target['service'], int(target['servicePort']),
+                        local_port=args.local_port, timeout=args.request_timeout_seconds) as observer:
+        baseline = {'probes': observer.collect(args.baseline_probes)}
+        if not all(p['success'] for p in baseline['probes']):
+            raise RuntimeError('Service baseline is unhealthy; routing fault skipped.')
+        try:
+            fault_started = time.monotonic()
+            replace_selector(target["namespace"], target["service"], {"app.kubernetes.io/name": "codereferee-blackhole"})
+            wait_for_endpoint_state(target["namespace"], target["service"], expected=False, timeout_seconds=args.recovery_timeout_seconds)
+            fault_probes = []
+            deadline = time.monotonic() + args.fault_seconds
+            while time.monotonic() < deadline:
+                fault_probes.append(observer.probe())
+                time.sleep(0.5)
+            replace_selector(target["namespace"], target["service"], original_selector)
+            wait_for_endpoint_state(target["namespace"], target["service"], expected=True, timeout_seconds=args.recovery_timeout_seconds)
+            recovery_probes = {'probes': observer.collect(args.recovery_probes)}
+        finally:
+            replace_selector(target["namespace"], target["service"], original_selector)
 
     probes = [*baseline["probes"], *fault_probes, *recovery_probes["probes"]]
-    denominator = "HTTP baseline/recovery probes plus explicit Service-without-endpoints observations during the routing fault"
+    denominator = 'all measured in-cluster HTTP requests during baseline, routing fault, and recovery'
+    recovered = all(p['success'] for p in recovery_probes['probes'])
     baseline_metrics = metrics_from_probes(baseline["probes"])
     baseline_metrics["error_rate_denominator"] = "all HTTP GET / probes collected during baseline; readiness wait probes are excluded"
     observed_metrics = metrics_from_probes(probes)
@@ -60,6 +64,9 @@ def main() -> int:
         "schemaVersion": "chaos-v1",
         "scenario": "service_selector_blackhole",
         "observationStatus": "observed",
+        'exitCode': 0 if recovered else 1,
+        'probeTransport': 'in_cluster_http',
+        'probes': {'baseline': baseline['probes'], 'experiment': [*fault_probes, *recovery_probes['probes']]},
         "target": target,
         "replicas": configuration["replicas"],
         "baseline": {"metrics": baseline_metrics},
@@ -68,7 +75,8 @@ def main() -> int:
             "type": "service_selector_blackhole",
             "kill_method": "kubectl_patch_service_selector",
             "started_at": started_at,
-            "recovered_at": now_utc(),
+            "recovered_at": now_utc() if recovered else None,
+            'recovered': recovered,
             "recovery_seconds": round(time.monotonic() - fault_started, 2),
             "target_pod_uid": source_pod.get("uid"),
             "replacement_pod_uid": None,
@@ -81,13 +89,14 @@ def main() -> int:
             },
             "abort_condition": {"triggered": False, "reason": None},
         },
+        'source': {'real_execution_observed': True, 'target': target['deployment']},
     }
     rendered = json.dumps(output, ensure_ascii=False, indent=2)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered + "\n", encoding="utf-8")
     print(rendered)
-    return 0
+    return 0 if recovered else 1
 
 
 def parse_args() -> argparse.Namespace:
