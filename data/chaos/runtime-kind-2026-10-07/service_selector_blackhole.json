@@ -1,0 +1,306 @@
+{
+  "sample_schema": "codereferee-runtime-observation-v1",
+  "captured_date": "2026-10-07",
+  "repository": null,
+  "source": {
+    "real_execution_observed": true,
+    "target": "fixture-api"
+  },
+  "scenario": "service_selector_blackhole",
+  "observation": {
+    "type": "service_selector_blackhole",
+    "kill_method": "kubectl_patch_service_selector",
+    "started_at": "2026-10-06T20:57:33.146303Z",
+    "recovered_at": "2026-10-06T20:58:00.134462Z",
+    "recovered": true,
+    "recovery_seconds": 13.55,
+    "target_pod_uid": "4a22da5f-97ec-4857-a55d-f8e03ad65e21",
+    "replacement_pod_uid": null,
+    "target_configuration": {
+      "replicas": 1,
+      "readiness_probe": {
+        "type": "tcp_socket",
+        "initial_delay_seconds": 1,
+        "period_seconds": 2,
+        "timeout_seconds": 1,
+        "failure_threshold": 3,
+        "success_threshold": 1
+      },
+      "liveness_probe": {
+        "type": "tcp_socket",
+        "initial_delay_seconds": 1,
+        "period_seconds": 2,
+        "timeout_seconds": 1,
+        "failure_threshold": 3,
+        "success_threshold": 1
+      },
+      "startup_probe": null,
+      "termination_grace_period_seconds": 30
+    },
+    "routing_operation": {
+      "original_selector": {
+        "app.kubernetes.io/name": "fixture-api"
+      },
+      "blackhole_selector": {
+        "app.kubernetes.io/name": "codereferee-blackhole"
+      }
+    },
+    "observation_window": {
+      "baseline_probe_count": 10,
+      "fault_seconds": 10,
+      "error_rate_denominator": "all measured in-cluster HTTP requests during baseline, routing fault, and recovery"
+    },
+    "abort_condition": {
+      "triggered": false,
+      "reason": null
+    }
+  },
+  "litmus": {
+    "phase": null,
+    "verdict": null
+  },
+  "baseline": {
+    "availability": 1,
+    "p95_latency_ms": 14.25,
+    "error_rate": 0,
+    "probe_count": 10,
+    "success_count": 10,
+    "failure_count": 0,
+    "error_rate_denominator": "all HTTP GET / probes collected during baseline; readiness wait probes are excluded",
+    "cpu_usage_percent": null,
+    "memory_usage_mb": null,
+    "restart_count": 0
+  },
+  "observationStatus": "observed",
+  "probeTransport": "in_cluster_http",
+  "target": "fixture-api",
+  "exitCode": 0,
+  "probes": {
+    "baseline": [
+      {
+        "at": "2026-10-06T20:57:45.320464+00:00",
+        "status_code": 200,
+        "latency_ms": 3.6,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T20:57:45.413154+00:00",
+        "status_code": 200,
+        "latency_ms": 3.56,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T20:57:45.622305+00:00",
+        "status_code": 200,
+        "latency_ms": 4.49,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T20:57:45.806403+00:00",
+        "status_code": 200,
+        "latency_ms": 7.03,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T20:57:45.962721+00:00",
+        "status_code": 200,
+        "latency_ms": 14.25,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T20:57:46.133144+00:00",
+        "status_code": 200,
+        "latency_ms": 7.85,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T20:57:46.280759+00:00",
+        "status_code": 200,
+        "latency_ms": 8.03,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T20:57:46.420863+00:00",
+        "status_code": 200,
+        "latency_ms": 3.72,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T20:57:46.501279+00:00",
+        "status_code": 200,
+        "latency_ms": 3.36,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T20:57:46.578716+00:00",
+        "status_code": 200,
+        "latency_ms": 3.23,
+        "success": true,
+        "error": null
+      }
+    ],
+    "experiment": [
+      {
+        "at": "2026-10-06T20:57:47.223497+00:00",
+        "status_code": null,
+        "latency_ms": 9.63,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T20:57:47.806184+00:00",
+        "status_code": null,
+        "latency_ms": 2.98,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T20:57:48.505431+00:00",
+        "status_code": null,
+        "latency_ms": 10.93,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T20:57:49.143422+00:00",
+        "status_code": null,
+        "latency_ms": 4.15,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T20:57:49.800702+00:00",
+        "status_code": null,
+        "latency_ms": 5.57,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T20:57:50.489730+00:00",
+        "status_code": null,
+        "latency_ms": 7.71,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T20:57:51.145241+00:00",
+        "status_code": null,
+        "latency_ms": 9.68,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T20:57:51.773202+00:00",
+        "status_code": null,
+        "latency_ms": 4.33,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T20:57:52.403728+00:00",
+        "status_code": null,
+        "latency_ms": 6.03,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T20:57:53.049336+00:00",
+        "status_code": null,
+        "latency_ms": 4.3,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T20:57:53.686638+00:00",
+        "status_code": null,
+        "latency_ms": 6.18,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T20:57:54.336255+00:00",
+        "status_code": null,
+        "latency_ms": 4.69,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T20:57:54.935333+00:00",
+        "status_code": null,
+        "latency_ms": 2.83,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T20:57:55.520561+00:00",
+        "status_code": null,
+        "latency_ms": 3.14,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T20:57:57.155498+00:00",
+        "status_code": null,
+        "latency_ms": 1021.9,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T20:57:58.607807+00:00",
+        "status_code": 200,
+        "latency_ms": 8.42,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T20:57:58.784144+00:00",
+        "status_code": 200,
+        "latency_ms": 4.77,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T20:57:58.948639+00:00",
+        "status_code": 200,
+        "latency_ms": 13.22,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T20:57:59.084735+00:00",
+        "status_code": 200,
+        "latency_ms": 6.27,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T20:57:59.244389+00:00",
+        "status_code": 200,
+        "latency_ms": 5.43,
+        "success": true,
+        "error": null
+      }
+    ]
+  },
+  "metrics": {
+    "availability": 0.5,
+    "p95_latency_ms": 14.25,
+    "error_rate": 0.5,
+    "probe_count": 30,
+    "success_count": 15,
+    "failure_count": 15,
+    "error_rate_denominator": "all measured in-cluster HTTP requests during baseline, routing fault, and recovery",
+    "cpu_usage_percent": null,
+    "memory_usage_mb": null,
+    "restart_count": 0
+  }
+}
