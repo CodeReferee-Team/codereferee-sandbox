@@ -10,10 +10,21 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 
 from run_litmus_pod_delete import fault_environment, classify_result, measured_recovery_seconds, memory_megabytes, oom_during_experiment
-from in_cluster_probe import OBSERVER_CODE
+from in_cluster_probe import OBSERVER_CODE, InClusterProbe
 
 
 class RuntimeFaultTests(unittest.TestCase):
+    def test_transport_retries_are_separate_from_workload_failures(self):
+        observer = InClusterProbe('test', 'api', 80)
+        with patch.object(observer, 'request_once', side_effect=[ConnectionResetError('reset'),
+                {'success': True, 'status_code': 200}]), patch('in_cluster_probe.time.sleep'):
+            result = observer.probe()
+        self.assertTrue(result['success'])
+        self.assertEqual(result['observer_transport_retries'], 1)
+        with patch.object(observer, 'request_once', side_effect=TimeoutError('timeout')), \
+             patch('in_cluster_probe.time.sleep'):
+            with self.assertRaises(RuntimeError):
+                observer.probe()
     def test_workflow_timeout_after_success_is_not_counted_as_success(self):
         environment = {'TARGET_URL': 'http://test', 'PROBE_TIMEOUT': '2',
                        'PROBE_SPEC': json.dumps({'steps': [{'path': '/orders'}, {'path': '/payment'}]})}

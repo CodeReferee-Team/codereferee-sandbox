@@ -9,6 +9,7 @@ import json
 import subprocess
 import time
 import uuid
+from pathlib import Path
 from urllib.request import ProxyHandler, build_opener
 
 from collect_baseline import kubectl_command, kubectl_environment
@@ -61,7 +62,7 @@ class Handler(BaseHTTPRequestHandler):
   except HTTPError as exc: status=exc.code; error=str(exc)
   except Exception as exc: error=str(exc)
   body=json.dumps({"at":datetime.now(timezone.utc).isoformat(),"status_code":status,"latency_ms":round((time.monotonic()-started)*1000,2),"success":error is None and status is not None and 200<=status<400,"error":error}).encode()
-  self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body); self.wfile.flush()
+  self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(body))); self.send_header("Connection","close"); self.end_headers(); self.wfile.write(body); self.wfile.flush(); self.close_connection=True
  def log_message(self,*args): pass
 HTTPServer(("0.0.0.0",8080),Handler).serve_forever()
 '''
@@ -79,6 +80,7 @@ class InClusterProbe:
         self.forward = None
         self.spec = spec or {}
         self.context = context or {}
+        self.log_handles = []
 
     def __enter__(self):
         manifest = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {
@@ -97,17 +99,23 @@ class InClusterProbe:
         try:
             self.run('apply', '-f', '-', input_text=json.dumps(manifest))
             self.run('wait', '--for=condition=Ready', f'pod/{self.name}', '--timeout=120s')
+            # kubectl emits a line for every connection. Undrained PIPE buffers
+            # can block port-forward on Windows during a long observation.
+            log_dir = Path(__file__).resolve().parents[1] / '.runtime' / 'probe-logs'
+            log_dir.mkdir(parents=True, exist_ok=True)
+            self.log_handles = [(log_dir / f'{self.name}.{stream}.log').open('w', encoding='utf-8')
+                                for stream in ('stdout', 'stderr')]
             self.forward = subprocess.Popen(kubectl_command('-n', self.namespace, 'port-forward',
-                f'pod/{self.name}', f'{self.local_port}:8080'), stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True, env=kubectl_environment())
+                f'pod/{self.name}', f'{self.local_port}:8080'), stdout=self.log_handles[0],
+                stderr=self.log_handles[1], text=True, env=kubectl_environment())
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 try:
-                    self.probe()
+                    self.request_once()
                     return self
                 except (OSError, ValueError):
                     if self.forward.poll() is not None:
-                        raise RuntimeError('Observer port-forward failed: ' + self.forward.stderr.read())
+                        raise RuntimeError('Observer port-forward failed; inspect .runtime/probe-logs.')
                     time.sleep(0.2)
             raise RuntimeError('Observer port-forward did not become available.')
         except BaseException:
@@ -115,6 +123,21 @@ class InClusterProbe:
             raise
 
     def probe(self) -> dict:
+        errors = []
+        for attempt in range(3):
+            try:
+                result = self.request_once()
+                if errors:
+                    result['observer_transport_errors'] = errors
+                    result['observer_transport_retries'] = len(errors)
+                return result
+            except OSError as exc:
+                errors.append(f'{type(exc).__name__}: {exc}')
+                if attempt < 2:
+                    time.sleep(0.2)
+        raise RuntimeError('Observer transport failed after 3 attempts: ' + '; '.join(errors))
+
+    def request_once(self) -> dict:
         with build_opener(ProxyHandler({})).open(f'http://127.0.0.1:{self.local_port}/',
                                                timeout=self.timeout + 5) as response:
             return json.loads(response.read())
@@ -132,6 +155,8 @@ class InClusterProbe:
     def __exit__(self, *args):
         if self.forward:
             stop_process(self.forward)
+        for handle in self.log_handles:
+            handle.close()
         subprocess.run(kubectl_command('-n', self.namespace, 'delete', 'pod', self.name,
             '--ignore-not-found=true', '--wait=false'), capture_output=True,
             text=True, env=kubectl_environment(), timeout=20)
