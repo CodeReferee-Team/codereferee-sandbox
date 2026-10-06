@@ -7,6 +7,7 @@ CodeReferee의 Kubernetes 기반 실행 및 카오스 관측 컴포넌트입니�
 - [Chaos v1 Sandbox 계약](docs/chaos-v1-contract.md)
 - [실제 Chaos evidence 배치 수집](docs/chaos-evidence-batch.md)
 - [QuickByte 로컬 Kubernetes·Litmus 재현](docs/local-chaos-quickstart.md)
+- [Runtime Chaos 시나리오·검사 묶음·전체 연동](docs/runtime-chaos-scenarios.md)
 
 ## Kubernetes fixture
 
@@ -46,8 +47,8 @@ uvicorn app.main:app --host 127.0.0.1 --port 8100
 curl http://127.0.0.1:8100/health
 ```
 
-Chaos v1 요청은 다음과 같습니다. 현재는 요청에 포함된 레포지토리 대신 제어된
-fixture 서비스에 Pod Kill 실험을 수행합니다.
+아래 fixture 요청은 레포지토리 코드 대신 제어된 fixture 서비스에 Pod Kill을 수행합니다.
+사용자 레포 clone·배포 및 검사 묶음은 [Runtime Chaos 문서](docs/runtime-chaos-scenarios.md)를 참고하세요.
 
 ```bash
 curl -X POST http://127.0.0.1:8100/repositories/validate \
