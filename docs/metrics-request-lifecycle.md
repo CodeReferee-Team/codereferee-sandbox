@@ -85,9 +85,11 @@ Pod 교체나 일시적인 scrape gap 때문에 종료 한 점의 instant query�
 
 ## AI 팀과 남은 조율
 
-실연동은 AI main `a040a69`에서 실행했다. #99는 아직 별도 PR이며 이번 작업에서 AI 코드를 수정하지 않았다.
+초기 실연동은 AI main `a040a69`에서 실행했다. #99는 아직 별도 PR이며 이번 작업에서 AI 코드를 수정하지 않았다.
 현재 main에서도 source 보고서가 AI parser→Redis→Backend DB/조회 API까지 보존된다.
-CPU/메모리의 최종 SRE 필드를 채우고 Judge에 적용하는 것은 #99의 설정/머지 후 별도 검증이다.
+추가로 #99의 원본 코드 `514119a`를 별도 작업 공간에서 실제 Worker로 실행해 CPU/메모리 필드가 채워지고
+Judge 및 Backend DB까지 전달되는 Node E2E를 검증했다. 공유 AI main에 반영하려면 #99 머지와
+`PROMETHEUS_URL=http://127.0.0.1:19091` 설정이 필요하다. 모든 레포/정책 경로의 검증 완료를 뜻하지 않는다.
 
 #99의 실제 PromQL을 과거 실행에 적용해 라벨 호환성을 확인했다. 진단용 HTTP wrapper가 평가 시각을 실제 종료
 시각으로 고정했으며, 이것을 수정 없는 #99 workflow E2E라고 주장하지 않는다.

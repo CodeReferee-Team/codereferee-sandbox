@@ -59,9 +59,25 @@ CPU limit 대비 비율로 해석하면 안 된다. AI source·Judge·모델은 
 원본 보고서/임시 프로세스 설정은 커밋하지 않는다. receiver 준비는 기존 영속 receiver 재사용으로 실측했고
 새 머신에서 Compose 생성 및 Mac/Linux 실행은 추가 검증이 필요하다.
 
+## AI #99 실제 workflow E2E 추가 검증
+
+AI PR #99 원본 `514119a`를 별도 작업 공간에서 수정 없이 실제 Redis Worker로 실행했다.
+`PROMETHEUS_URL=http://127.0.0.1:19091` 설정을 사용했고 이번에는 조회 wrapper·고정 평가 시각·mock을 사용하지 않았다.
+공유 AI main 및 팀원 브랜치는 변경하지 않았다. 해당 PR의 기존 테스트 10개도 통과했다.
+
+- Node task `a0b8e89f-980a-4069-93d8-a34a5e5ae36e`: 최종 PASSED, 실제 API 278.152초.
+- `execution_result.metrics.cpu_usage_percent = 3.5898472083392816`.
+- `execution_result.metrics.memory_usage_mb = 36.913152`.
+- 최종 보고서 metrics 및 PostgreSQL의 자원 값이 동일함을 확인했다.
+- CPU/메모리 수신·정리 후 구간 보존·교체 UID 2개·clone/cache/앱/관측 namespace/host-kind 이미지 정리 모두 확인했다.
+- 원본은 `.runtime/evidence/metrics-ai99-e2e-024.json`이다.
+
+CPU는 #99 구현대로 cores × 100이며 limit 대비 %로 검증한 것은 아니다. 실제 연동 성공과 별개로
+현재 시각 조회 창 이동·재검증 구간·replica 합산·분모 조율 사항은 유지한다.
+
 ## 남은 범위
 
 - API 병렬 worker/물리 자원 격리, 멀티서비스/멀티레포 그룹, 강제 종료 TTL/GC.
 - 모든 미전송 WAL drain 및 관측 구간 전체 무누락의 증명.
-- AI #99 머지·정확한 평가 시각/분모/재검증 구간 계약 후 자원 SLO 최종 입력 연동.
+- AI #99 머지·설정 및 정확한 평가 시각/분모/재검증 구간 정책 조율. Node의 실제 #99 입력 연동은 위에서 검증했다.
 - 사용자 앱 distributed trace와 수신 인증/TLS/클라우드 네트워크/CD는 이번 PR 범위 밖.

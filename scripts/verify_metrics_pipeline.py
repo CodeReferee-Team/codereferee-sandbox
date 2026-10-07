@@ -25,6 +25,7 @@ def main():
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--require-pod-replacement', action='store_true')
     parser.add_argument('--verify-existing', help='Verify a captured final result without submitting again.')
+    parser.add_argument('--require-resource-enrichment', action='store_true', help='Require real AI Prometheus CPU/memory enrichment and DB persistence.')
     args = parser.parse_args()
     opener = build_opener(ProxyHandler({}))
     payload = {'repository_url': args.repository_url, 'branch': args.branch, 'chaos_mode': args.mode}
@@ -69,6 +70,10 @@ def main():
                   'workspace_removed': source.get('workspace_cleanup', {}).get('removed') is True}
         if args.require_pod_replacement:
             checks['replacement_bound'] = len({item['uid'] for item in bindings}) >= 2
+        resources = {key: (execution.get('metrics') or {}).get(key) for key in ('cpu_usage_percent', 'memory_usage_mb')}
+        if args.require_resource_enrichment:
+            checks['resources_measured'] = all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                                               and math.isfinite(value) and value >= 0 for value in resources.values())
         selector = '{codereferee_request_id=' + json.dumps(identifier) + ',namespace=' + json.dumps(observation.get('namespace', '')) + '}'
         for name in ('container_cpu_usage_seconds_total', 'container_memory_working_set_bytes'):
             # An instant at the end can legitimately fall in a scrape gap.
@@ -80,7 +85,8 @@ def main():
                 values = json.load(response).get('data', {}).get('result', [])
             checks[name + '_retained'] = bool(values) and float(values[0]['value'][1]) > 0
         sql = ("SELECT json_build_object('status',current_agent,'metrics',"
-               "ai_reports->'execution_result'->'source'->'metrics_observation') FROM task_status WHERE task_id='" + identifier + "'")
+               "ai_reports->'execution_result'->'source'->'metrics_observation', 'resources',"
+               "ai_reports->'execution_result'->'metrics') FROM task_status WHERE task_id='" + identifier + "'")
         stored = {}
         for attempt in range(5):
             db = subprocess.run(['docker', 'exec', 'codereferee-db', 'psql', '-U', 'postgres', '-d', 'codereferee', '-At', '-c', sql],
@@ -92,7 +98,10 @@ def main():
                 break
             time.sleep(1)
         checks['postgres_persisted'] = stored.get('status') == last and (stored.get('metrics') or {}).get('status') == 'received'
+        if args.require_resource_enrichment:
+            checks['resource_values_persisted'] = all((stored.get('resources') or {}).get(key) == value for key, value in resources.items())
         print(json.dumps({'taskId': identifier, 'backend_status': last, 'checks': checks,
+                          'resource_metrics': resources,
                           'pod_uids': [item['uid'] for item in bindings]}, ensure_ascii=False), flush=True)
         # Judge failure is distinct from a failed transport/observation check.
         return 0 if all(checks.values()) else 1
