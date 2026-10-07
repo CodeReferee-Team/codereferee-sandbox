@@ -166,7 +166,9 @@ def safe_name(value: str) -> str:
 def clone(url: str, branch: str | None, destination: Path) -> None:
     if not re.fullmatch(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?', url) or '..' in url.split('/')[-2:]:
         raise ConfigurationRequired('Only public GitHub HTTPS repository URLs without credentials are supported.')
-    command = ["git", "clone", "--depth", "1"]
+    # Container builds need repository line endings, not the Windows user's
+    # core.autocrlf=true checkout conversion (which breaks gradlew in Linux).
+    command = ["git", "-c", "core.autocrlf=false", "clone", "--depth", "1"]
     if branch:
         command.extend(["--branch", branch])
     command.extend([url, str(destination)])

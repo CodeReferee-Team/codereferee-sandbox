@@ -33,7 +33,10 @@ def cleanup_request_image(image: str, namespace: str, *, remove_from_kind: bool 
                     report['errors'].append(removed.stderr.strip())
     removed = subprocess.run(['docker', 'image', 'rm', image], capture_output=True,
                              text=True, env=environment, timeout=30)
-    report['host_removed'] = removed.returncode == 0
-    if removed.returncode:
+    absent = removed.returncode != 0 and 'no such image:' in removed.stderr.lower()
+    report['host_removed'] = removed.returncode == 0 or absent
+    if absent:
+        report['host_already_absent'] = True
+    if removed.returncode and not absent:
         report['errors'].append(removed.stderr.strip())
     return report
