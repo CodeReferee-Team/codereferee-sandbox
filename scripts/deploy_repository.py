@@ -42,6 +42,7 @@ def main() -> int:
         raise RuntimeError(f"A repository workspace already exists for requestId={request}.")
     workspace.mkdir()
     namespace_may_exist = False
+    image_load_attempted = False
     image = None
     stage = 'clone'
     checks = None
@@ -75,6 +76,9 @@ def main() -> int:
         stage = 'build'
         run(["docker", "build", "--tag", image, '--label', f'codereferee.request-id={request}', "--file", str(dockerfile), str(build_context)])
         stage = 'prepare'
+        # Loading can partially succeed on a multi-node cluster before raising.
+        # Track the attempt independently from namespace creation.
+        image_load_attempted = True
         load_image_into_cluster(image)
         if profile_name:
             template = ROOT / profile['manifestTemplate']
@@ -108,7 +112,7 @@ def main() -> int:
         cleanup = {'namespace_removed': namespace_removed}
         if image:
             try:
-                cleanup.update(cleanup_request_image(image, namespace, remove_from_kind=namespace_may_exist and namespace_removed))
+                cleanup.update(cleanup_request_image(image, namespace, remove_from_kind=image_load_attempted and namespace_removed))
             except (OSError, subprocess.TimeoutExpired):
                 cleanup['errors'] = ['Artifact cleanup failed.']
         cleanup['workspace_cleanup'] = cleanup_workspace(workspace)
