@@ -34,7 +34,8 @@ def main() -> int:
 
     started_at = now_utc()
     with InClusterProbe(target['namespace'], target['service'], int(target['servicePort']),
-                        local_port=args.local_port, timeout=args.request_timeout_seconds) as observer:
+                        local_port=args.local_port, timeout=args.request_timeout_seconds,
+                        path=getattr(args, 'probe_path', '/')) as observer:
         baseline = {'probes': observer.collect(args.baseline_probes)}
         if not all(p['success'] for p in baseline['probes']):
             raise RuntimeError('Service baseline is unhealthy; routing fault skipped.')
@@ -112,6 +113,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-timeout-seconds", type=float, default=2.0)
     parser.add_argument("--recovery-timeout-seconds", type=int, default=60)
     parser.add_argument("--local-port", type=int, default=18082)
+    parser.add_argument('--probe-path', default='/')
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
