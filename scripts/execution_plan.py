@@ -70,7 +70,24 @@ def resolve_plan(repository: Path, explicit_profile: str | None = None) -> dict[
             raise ConfigurationRequired('validation.yaml requires version: 1 and service, or deploymentProfile.')
         if 'generatedDockerfile' in data['service']:
             raise ConfigurationRequired('Declare a checked-in Dockerfile, not generatedDockerfile.')
-        plan = normalize_service(repository, data['service'])
+        service = dict(data['service'])
+        context = inside(repository, service.get('buildContext', '.'))
+        if 'artifactPath' in service:
+            artifact = inside(repository, service.pop('artifactPath'))
+            if not artifact.is_file() or artifact.suffix != '.jar' or not artifact.is_relative_to(context):
+                raise ConfigurationRequired('artifactPath must identify an existing built JAR inside buildContext.')
+            manifest = ''.join(inside(repository, name).read_text(encoding='utf-8') for name in
+                ('build.gradle', 'build.gradle.kts', 'pom.xml') if inside(repository, name).is_file())
+            java = '21' if re.search(r'(?:JavaLanguageVersion\.of\(|<java.version>\s*)21', manifest) else '17'
+            service['generatedDockerfile'] = (f'FROM eclipse-temurin:{java}-jre\n'
+                f'COPY {json.dumps([artifact.relative_to(context).as_posix(), "/app.jar"])}\n'
+                f'ENV SERVER_PORT={service.get("port", 8080)}\n'
+                'USER 10001:10001\nENTRYPOINT ["java","-jar","/app.jar"]\n')
+        elif 'dockerfile' not in service and not inside(repository, 'Dockerfile').is_file():
+            generated = stack_recipe(context, port=service.get('port'))
+            if generated:
+                service.update(generatedDockerfile=generated['generatedDockerfile'])
+        plan = normalize_service(repository, service)
         plan.update(source='repository_configuration', dependencies=normalize_dependencies(data.get('dependencies', {})))
         return plan
 
@@ -248,7 +265,7 @@ def compose_plan(repository: Path, data: dict, filename: str) -> dict:
     return plan
 
 
-def stack_recipe(repository: Path) -> dict | None:
+def stack_recipe(repository: Path, port: int | None = None) -> dict | None:
     package_path = inside(repository, 'package.json')
     if package_path.is_file():
         try:
@@ -262,30 +279,39 @@ def stack_recipe(repository: Path) -> dict | None:
         if script is None:
             return None
         install = 'npm ci' if inside(repository, 'package-lock.json').is_file() else 'npm install'
+        node_port = port if port is not None else 3000
+        if isinstance(node_port, bool) or not isinstance(node_port, int) or not 1 <= node_port <= 65535:
+            raise ConfigurationRequired('service.port must be an integer in 1..65535.')
         recipe = ("FROM node:20-bookworm-slim\nWORKDIR /app\n"
                   "RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*\n"
-                  f"COPY . .\nRUN {install}\nENV PORT=3000 HOST=0.0.0.0\nEXPOSE 3000\nCMD {json.dumps(['npm', 'run', script], separators=(',', ':'))}\n")
-        return {'port': 3000, 'generatedDockerfile': recipe}
+                  f"COPY . .\nRUN {install}\nENV PORT={node_port} HOST=0.0.0.0\nEXPOSE {node_port}\nCMD {json.dumps(['npm', 'run', script], separators=(',', ':'))}\n")
+        return {'port': node_port, 'generatedDockerfile': recipe}
     for entry in ('app.py', 'main.py', 'app/main.py'):
         path = inside(repository, entry)
         if not path.is_file():
             continue
         source = path.read_text(encoding='utf-8')
+        python_port = port if port is not None else 8000
+        if isinstance(python_port, bool) or not isinstance(python_port, int) or not 1 <= python_port <= 65535:
+            raise ConfigurationRequired('service.port must be an integer in 1..65535.')
         if 'FastAPI(' in source:
             module = entry.removesuffix('.py').replace('/', '.')
-            command = ['python', '-m', 'uvicorn', module + ':app', '--host', '0.0.0.0', '--port', '8000']
+            command = ['python', '-m', 'uvicorn', module + ':app', '--host', '0.0.0.0', '--port', str(python_port)]
             extra = 'fastapi uvicorn'
         elif 'Flask(' in source and entry in {'app.py', 'main.py'}:
-            command = ['python', '-m', 'flask', '--app', entry.removesuffix('.py'), 'run', '--host', '0.0.0.0', '--port', '8000']
+            command = ['python', '-m', 'flask', '--app', entry.removesuffix('.py'), 'run', '--host', '0.0.0.0', '--port', str(python_port)]
             extra = 'flask'
         else:
             continue
         requirements = 'RUN pip install --no-cache-dir -r requirements.txt\n' if inside(repository, 'requirements.txt').is_file() else ''
-        recipe = f'FROM python:3.12-slim\nWORKDIR /app\nCOPY . .\n{requirements}RUN pip install --no-cache-dir {extra}\nEXPOSE 8000\nCMD {json.dumps(command)}\n'
-        return {'port': 8000, 'generatedDockerfile': recipe}
+        recipe = f'FROM python:3.12-slim\nWORKDIR /app\nCOPY . .\n{requirements}RUN pip install --no-cache-dir {extra}\nEXPOSE {python_port}\nCMD {json.dumps(command)}\n'
+        return {'port': python_port, 'generatedDockerfile': recipe}
     manifest = ''.join(path.read_text(encoding='utf-8') for path in
         (inside(repository, 'build.gradle'), inside(repository, 'build.gradle.kts'), inside(repository, 'pom.xml')) if path.is_file())
     if 'org.springframework.boot' in manifest or 'spring-boot' in manifest:
+        spring_port = port if port is not None else 8080
+        if isinstance(spring_port, bool) or not isinstance(spring_port, int) or not 1 <= spring_port <= 65535:
+            raise ConfigurationRequired('service.port must be an integer in 1..65535.')
         java = '21' if re.search(r'(?:JavaLanguageVersion\.of\(|<java.version>\s*)21', manifest) else '17'
         if inside(repository, 'gradlew').is_file():
             builder = f'eclipse-temurin:{java}-jdk'
@@ -295,8 +321,8 @@ def stack_recipe(repository: Path) -> dict | None:
             build = "RUN mvn -B package -DskipTests && mkdir /output && find target -maxdepth 1 -name '*.jar' ! -name 'original-*' -exec cp {} /output/app.jar \\;\n"
         else:
             return None
-        recipe = f'FROM {builder} AS builder\nWORKDIR /app\nCOPY . .\n{build}FROM eclipse-temurin:{java}-jre\nCOPY --from=builder /output/app.jar /app.jar\nENV SERVER_PORT=8080\nEXPOSE 8080\nENTRYPOINT ["java","-jar","/app.jar"]\n'
-        return {'port': 8080, 'generatedDockerfile': recipe}
+        recipe = f'FROM {builder} AS builder\nWORKDIR /app\nCOPY . .\n{build}FROM eclipse-temurin:{java}-jre\nCOPY --from=builder /output/app.jar /app.jar\nENV SERVER_PORT={spring_port}\nEXPOSE {spring_port}\nENTRYPOINT ["java","-jar","/app.jar"]\n'
+        return {'port': spring_port, 'generatedDockerfile': recipe}
     return None
 
 

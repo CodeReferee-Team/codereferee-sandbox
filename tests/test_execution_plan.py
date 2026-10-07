@@ -146,3 +146,20 @@ class ExecutionPlanTests(unittest.TestCase):
         self.write('.codereferee/validation.yaml', 'version: 1\nservice: {port: 8080}\ndependencies:\n  a: {type: postgres, probePath: /a}\n  b: {type: mysql, probePath: /b}\n')
         with self.assertRaises(ConfigurationRequired):
             resolve_plan(self.root)
+
+    def test_declared_node_port_can_generate_dockerfile_without_a_profile(self):
+        self.write('package.json', json.dumps({'scripts': {'start': 'node app.js'}}))
+        self.write('.codereferee/validation.yaml', 'version: 1\nservice: {port: 5000}\n')
+        plan = resolve_plan(self.root)
+        self.assertEqual(plan['port'], 5000)
+        self.assertIn('ENV PORT=5000', plan['generatedDockerfile'])
+
+    def test_explicit_multimodule_jar_is_selected_not_guessed(self):
+        self.write('modules/api/build/libs/application.jar', 'jar')
+        self.write('modules/other/build/libs/other.jar', 'jar')
+        self.write('.codereferee/validation.yaml', 'version: 1\nservice:\n  port: 8080\n  artifactPath: modules/api/build/libs/application.jar\n')
+        recipe = resolve_plan(self.root)['generatedDockerfile']
+        self.assertIn('modules/api/build/libs/application.jar', recipe)
+        self.assertNotIn('other.jar', recipe)
+        self.write('.codereferee/validation.yaml', 'version: 1\nservice: {port: 8080, artifactPath: absent.jar}\n')
+        with self.assertRaises(ConfigurationRequired): resolve_plan(self.root)
