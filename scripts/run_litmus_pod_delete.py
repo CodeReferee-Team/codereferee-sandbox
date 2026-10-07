@@ -115,7 +115,8 @@ def main() -> int:
         memory_mb = max(1, int(limit * (1.25 if args.scenario == 'pod_memory_oom' else 0.2)))
     target_configuration = get_target_configuration(target["namespace"], target["deployment"])
     with InClusterProbe(target['namespace'], target['service'], int(target['servicePort']),
-                        timeout=args.request_timeout_seconds, local_port=args.local_port) as observer:
+                        timeout=args.request_timeout_seconds, local_port=args.local_port,
+                        path=target.get('probePath', args.probe_path)) as observer:
         baseline = {'probes': observer.collect(args.baseline_probes)}
         if not all(probe['success'] for probe in baseline['probes']):
             raise RuntimeError('Target baseline is unhealthy; fault injection was skipped.')
@@ -195,6 +196,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-probes", type=int, default=20)
     parser.add_argument("--request-timeout-seconds", type=float, default=2.0)
     parser.add_argument("--local-port", type=int, default=18080)
+    parser.add_argument('--probe-path', default='/')
     parser.add_argument("--timeout-seconds", type=int, default=180)
     parser.add_argument("--output", type=Path, help="Optional JSON evidence output path.")
     parser.add_argument("--scenario", choices=SCENARIOS, default="pod_delete")

@@ -7,6 +7,8 @@ import os
 import subprocess
 import sys
 import threading
+import time
+from uuid import uuid4
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,7 @@ SERVICE_SELECTOR_SCRIPT = PROJECT_ROOT / "scripts" / "run_service_selector_exper
 ROLLOUT_RESTART_SCRIPT = PROJECT_ROOT / "scripts" / "run_rollout_restart_experiment.py"
 DEPENDENCY_SCRIPT = PROJECT_ROOT / 'scripts' / 'run_dependency_experiment.py'
 DEPLOY_SCRIPT = PROJECT_ROOT / "scripts" / "deploy_repository.py"
+SMOKE_SCRIPT = PROJECT_ROOT / 'scripts' / 'run_service_smoke.py'
 EXPERIMENT_TIMEOUT_SECONDS = 300
 experiment_lock = threading.Lock()
 
@@ -53,6 +56,12 @@ class ChaosTarget(BaseModel):
     label_selector: str = Field(alias="labelSelector")
     name: str | None = None
     dependencies: dict[str, Any] = Field(default_factory=dict)
+    probe_path: str = Field(default='/', alias='probePath')
+
+
+class RepositoryExecutionFailure(Exception):
+    def __init__(self, result: dict):
+        self.result = result
 
 
 class RepositoryValidationRequest(BaseModel):
@@ -94,12 +103,25 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
     if not experiment_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A Chaos v1 experiment is already running.")
 
+    request_started = time.monotonic()
     try:
         deployed: dict[str, Any] | None = None
         deployed_target: ChaosTarget | None = None
-        if request.deployment_profile:
+        if request.deployment_profile or (request.chaos_mode != 'fixture' and request.chaos_target is None):
+            if not request.request_id:
+                request = request.model_copy(update={'request_id': str(uuid4())})
             deployed = deploy_repository(request)
             deployed_target = ChaosTarget.model_validate(deployed["target"])
+        if request.chaos_mode is None and deployed_target is not None:
+            command = [sys.executable, str(SMOKE_SCRIPT), '--namespace', deployed_target.namespace,
+                       '--service', deployed_target.service, '--service-port', str(deployed_target.service_port),
+                       '--probe-path', deployed_target.probe_path]
+            completed = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True, text=True,
+                encoding='utf-8', errors='replace', env=dict(os.environ, PYTHONIOENCODING='utf-8'), timeout=180)
+            result = parse_experiment_result(completed)
+            result.update(requestId=request.request_id, repositoryUrl=request.repository_url,
+                          commitSha=deployed['repository']['commitSha'], deployment=deployed)
+            return result
         scenario_results = []
         for mode in modes or [request.chaos_mode]:
             scenario_request = request.model_copy(update={'chaos_mode': mode})
@@ -129,16 +151,21 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         if deployed:
             result["deployment"] = deployed
         return result
+    except RepositoryExecutionFailure as exc:
+        result = exc.result
+        return result
     except HTTPException:
         raise
     except (RuntimeError, KeyError, json.JSONDecodeError) as exc:
-        return infrastructure_error(str(exc), request, timed_out=False)
+        result = infrastructure_error(str(exc), request, timed_out=False)
+        return result
     except subprocess.TimeoutExpired as exc:
-        return infrastructure_error(
+        result = infrastructure_error(
             f"Chaos v1 experiment exceeded {EXPERIMENT_TIMEOUT_SECONDS} seconds: {exc}",
             request,
             timed_out=True,
         )
+        return result
     finally:
         if 'deployed_target' in locals() and deployed_target is not None:
             namespace_removed = cleanup_namespace(deployed_target.namespace)
@@ -152,6 +179,8 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
                     report = {'namespace_removed': namespace_removed, 'errors': [str(exc)]}
                 if 'result' in locals():
                     result.setdefault('source', {})['artifact_cleanup'] = report
+        if 'result' in locals():
+            result['durationMillis'] = round((time.monotonic() - request_started) * 1000)
         experiment_lock.release()
 
 
@@ -229,6 +258,7 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
             "--service", target.service,
             "--service-port", str(target.service_port),
             "--label-selector", target.label_selector,
+            '--probe-path', target.probe_path,
         ]
     if request.chaos_mode == "service_selector_blackhole" and target is not None:
         return [
@@ -238,6 +268,7 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
             "--service", target.service,
             "--service-port", str(target.service_port),
             "--label-selector", target.label_selector,
+            '--probe-path', target.probe_path,
         ]
     if request.chaos_mode == "rollout_restart" and target is not None:
         return [
@@ -247,6 +278,7 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
             "--service", target.service,
             "--service-port", str(target.service_port),
             "--label-selector", target.label_selector,
+            '--probe-path', target.probe_path,
         ]
     scenario_by_mode = {f'litmus_{scenario}': scenario for scenario in
                         ('pod_delete', 'container_kill', 'pod_cpu_hog', 'pod_network_latency', 'pod_network_loss', 'pod_memory_hog', 'pod_memory_oom')}
@@ -263,6 +295,7 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
         "--service", target.service,
         "--service-port", str(target.service_port),
         "--label-selector", target.label_selector,
+        '--probe-path', target.probe_path,
         "--scenario", scenario,
         "--baseline-probes", "20",
         "--timeout-seconds", "240",
@@ -270,13 +303,15 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
 
 
 def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
-    if request.chaos_mode not in SCENARIOS and request.chaos_mode not in SUITES and not (request.chaos_mode or '').startswith('suite_custom__'):
+    if request.chaos_mode is not None and request.chaos_mode not in SCENARIOS and request.chaos_mode not in SUITES and not (request.chaos_mode or '').startswith('suite_custom__'):
         raise HTTPException(status_code=422, detail="deploymentProfile requires a supported chaosMode.")
     if not request.request_id:
         raise HTTPException(status_code=422, detail="deploymentProfile requires requestId.")
-    command = [sys.executable, str(DEPLOY_SCRIPT), "--repository-url", request.repository_url,
-               "--request-id", request.request_id, "--profile", request.deployment_profile,
-               *(["--branch", request.branch] if request.branch else [])]
+    command = [sys.executable, str(DEPLOY_SCRIPT), '--repository-url', request.repository_url,
+               '--request-id', request.request_id,
+               *(['--profile', request.deployment_profile] if request.deployment_profile else []),
+               *(['--branch', request.branch] if request.branch else []),
+               *(['--commit-sha', request.commit_sha] if request.commit_sha else [])]
     patch_path: Path | None = None
     if request.patch_diff is not None:
         if len(request.patch_diff.encode("utf-8")) > 1_000_000:
@@ -290,10 +325,16 @@ def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         child_environment = os.environ.copy()
         child_environment['PYTHONIOENCODING'] = 'utf-8'
         completed = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True, text=True,
-                                   encoding='utf-8', errors='replace', env=child_environment, timeout=600)
+                                   encoding='utf-8', errors='replace', env=child_environment, timeout=1200)
     finally:
         if patch_path:
             patch_path.unlink(missing_ok=True)
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        payload = None
+    if payload and payload.get('executionFailure'):
+        raise RepositoryExecutionFailure(payload['result'])
     if completed.returncode:
         raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "Repository deployment failed.")
     try:

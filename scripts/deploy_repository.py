@@ -13,6 +13,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ import yaml
 
 from collect_baseline import kubectl_command, kubectl_environment, load_image_into_cluster
 from artifact_cleanup import cleanup_request_image
+from execution_plan import ConfigurationRequired, inside, render_plan, resolve_plan
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,28 +40,47 @@ def main() -> int:
     workspace.mkdir()
     namespace_may_exist = False
     image = None
+    stage = 'clone'
+    started = time.monotonic()
     try:
         repository = workspace / "repository"
         clone(args.repository_url, args.branch, repository)
+        if args.commit_sha:
+            if not re.fullmatch(r'[a-f0-9]{40}', args.commit_sha):
+                raise ConfigurationRequired('commitSha must be a full 40-character SHA.')
+            run(['git', 'fetch', '--depth', '1', 'origin', args.commit_sha], cwd=repository)
+            run(['git', 'checkout', '--detach', args.commit_sha], cwd=repository)
+        stage = 'patch'
         if args.patch_file:
             apply_patch(repository, args.patch_file)
-        profile_name = args.profile or repository_profile_name(repository)
-        profile = load_profile(profile_name)
+        stage = 'detect'
+        plan = resolve_plan(repository, args.profile)
+        profile_name = plan.get('profile')
+        profile = load_profile(profile_name) if profile_name else plan
         commit_sha = run(["git", "rev-parse", "HEAD"], cwd=repository).stdout.strip()
         image = f"codereferee/{request}:{commit_sha[:12]}"
-        dockerfile = repository / profile.get("dockerfile", "Dockerfile")
+        dockerfile = inside(repository, profile.get('dockerfile', 'Dockerfile'))
+        if profile.get('generatedDockerfile'):
+            dockerfile = workspace / 'generated.Dockerfile'
+            dockerfile.write_text(profile['generatedDockerfile'], encoding='utf-8')
         if not dockerfile.is_file():
             raise RuntimeError(f"Required Dockerfile was not found: {profile.get('dockerfile', 'Dockerfile')}")
-        build_context = repository / profile.get("buildContext", ".")
+        build_context = inside(repository, profile.get('buildContext', '.'))
+        stage = 'build'
         run(["docker", "build", "--tag", image, '--label', f'codereferee.request-id={request}', "--file", str(dockerfile), str(build_context)])
+        stage = 'prepare'
         load_image_into_cluster(image)
-        template = ROOT / profile["manifestTemplate"]
-        if not template.is_file():
-            raise RuntimeError(f"Deployment template was not found: {template}")
-        rendered = render_template(template, namespace, image, profile)
+        if profile_name:
+            template = ROOT / profile['manifestTemplate']
+            if not template.is_file():
+                raise RuntimeError(f'Deployment template was not found: {template}')
+            rendered = render_template(template, namespace, image, profile)
+            target = dict(profile['target'])
+        else:
+            rendered, target = render_plan(plan, namespace, image)
         namespace_may_exist = True
+        stage = 'run'
         apply(rendered)
-        target = dict(profile["target"])
         target["namespace"] = namespace
         wait_rollout(namespace, target["deployment"], args.rollout_timeout_seconds)
         print(json.dumps({
@@ -67,18 +88,34 @@ def main() -> int:
             "target": target,
             "image": image,
             "deploymentProfile": profile_name,
+            'executionPlan': {'source': plan['source'], 'dockerfile': 'generated' if profile.get('generatedDockerfile') else profile.get('dockerfile', 'Dockerfile'),
+                              'warnings': plan.get('warnings', []), 'servicePort': target['servicePort']},
         }, ensure_ascii=False))
         return 0
-    except Exception:
+    except Exception as exc:
         namespace_removed = not namespace_may_exist
         if namespace_may_exist:
             namespace_removed = delete_namespace(namespace)
+        cleanup = {'namespace_removed': namespace_removed}
         if image:
             try:
-                cleanup_request_image(image, namespace, remove_from_kind=namespace_may_exist and namespace_removed)
+                cleanup.update(cleanup_request_image(image, namespace, remove_from_kind=namespace_may_exist and namespace_removed))
             except (OSError, subprocess.TimeoutExpired):
-                pass
-        raise
+                cleanup['errors'] = ['Artifact cleanup failed.']
+        message = str(exc)[-6000:]
+        infra = isinstance(exc, (FileNotFoundError, OSError)) or stage == 'prepare' or any(
+            term in message.lower() for term in ('cannot connect to the docker daemon', 'dockerdesktoplinuxengine', 'error during connect'))
+        code = None if infra else (89 if isinstance(exc, ConfigurationRequired) else 1)
+        print(json.dumps({'executionFailure': True, 'result': {
+            'schemaVersion': 'sandbox-result.v1', 'observationStatus': 'infrastructure_error' if infra else 'observed',
+            'infraError': 'execution_infrastructure_error' if infra else None, 'exitCode': code,
+            'timedOut': isinstance(exc, subprocess.TimeoutExpired), 'durationMillis': round((time.monotonic()-started)*1000),
+            'stdout': '', 'stderr': message, 'serverStarted': False, 'serviceCheckAttempted': stage == 'run',
+            'browserCheckAttempted': False, 'requestId': args.request_id,
+            'sandboxReport': {'schema_version': 'sandbox-result.v1', 'outcome': 'failed', 'failed_step': stage,
+                              'configuration_required': isinstance(exc, ConfigurationRequired), 'verification_declared': False},
+            'source': {'artifact_cleanup': cleanup}}}, ensure_ascii=False))
+        return 1
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 
@@ -87,6 +124,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Deploy a supported repository for a Chaos run.")
     parser.add_argument("--repository-url", required=True)
     parser.add_argument("--branch")
+    parser.add_argument('--commit-sha')
     parser.add_argument("--request-id", required=True)
     parser.add_argument("--profile", help="Optional checked-in Sandbox deployment profile override.")
     parser.add_argument("--patch-file", type=Path)
@@ -126,6 +164,8 @@ def safe_name(value: str) -> str:
 
 
 def clone(url: str, branch: str | None, destination: Path) -> None:
+    if not re.fullmatch(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?', url) or '..' in url.split('/')[-2:]:
+        raise ConfigurationRequired('Only public GitHub HTTPS repository URLs without credentials are supported.')
     command = ["git", "clone", "--depth", "1"]
     if branch:
         command.extend(["--branch", branch])
@@ -187,7 +227,7 @@ def run(command: list[str], *, cwd: Path | None = None, input_text: str | None =
     # Keep Docker Buildx state out of a developer's shared home directory.
     environment["BUILDX_CONFIG"] = str(buildx_config)
     completed = subprocess.run(command, cwd=cwd, input=input_text, text=True, capture_output=True,
-                               env=environment)
+                               env=environment, timeout=600)
     if completed.returncode:
         message = completed.stderr.strip() or completed.stdout.strip() or "command failed"
         raise RuntimeError(f"{' '.join(command[:3])}: {message}")
