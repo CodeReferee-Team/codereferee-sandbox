@@ -10,6 +10,10 @@ TOOL_DIR="$ROOT/.runtime/tools"
 mkdir -p "$TOOL_DIR"
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"   # darwin | linux
+case "$OS" in
+  darwin|linux) ;;
+  *) echo "Unsupported OS: $OS. Windows users should use install_kind.ps1." >&2; exit 1 ;;
+esac
 case "$(uname -m)" in
   arm64|aarch64) ARCH="arm64" ;;
   x86_64|amd64)  ARCH="amd64" ;;

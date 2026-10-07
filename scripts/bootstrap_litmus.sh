@@ -18,30 +18,41 @@ kubectl --context "$CONTEXT" get nodes
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST_DIR="$ROOT/.runtime/litmus"
 OPERATOR_MANIFEST="$MANIFEST_DIR/litmus-operator-v$OPERATOR_VERSION.yaml"
-POD_DELETE_MANIFEST="$MANIFEST_DIR/pod-delete-v$FAULT_VERSION.yaml"
-CONTAINER_KILL_MANIFEST="$MANIFEST_DIR/container-kill-v$FAULT_VERSION.yaml"
+FAULTS=(pod-delete container-kill pod-cpu-hog pod-network-latency pod-network-loss pod-memory-hog)
 RUNNER_RBAC_MANIFEST="$ROOT/k8s/litmus-runner-rbac.yaml"
 mkdir -p "$MANIFEST_DIR"
 
 download() {  # url dest
-  [ -f "$2" ] || curl -fsSL "$1" -o "$2"
+  [ -f "$2" ] && return 0
+  local temporary="$2.download.$$"
+  if curl -fsSL "$1" -o "$temporary"; then
+    mv -f "$temporary" "$2"
+  else
+    rm -f "$temporary"
+    return 1
+  fi
 }
 download "https://raw.githubusercontent.com/litmuschaos/litmus/$OPERATOR_COMMIT/mkdocs/docs/litmus-operator-v$OPERATOR_VERSION.yaml" "$OPERATOR_MANIFEST"
-download "https://raw.githubusercontent.com/litmuschaos/chaos-charts/$FAULT_COMMIT/faults/kubernetes/pod-delete/fault.yaml" "$POD_DELETE_MANIFEST"
-download "https://raw.githubusercontent.com/litmuschaos/chaos-charts/$FAULT_COMMIT/faults/kubernetes/container-kill/fault.yaml" "$CONTAINER_KILL_MANIFEST"
+for fault in "${FAULTS[@]}"; do
+  download "https://raw.githubusercontent.com/litmuschaos/chaos-charts/$FAULT_COMMIT/faults/kubernetes/$fault/fault.yaml" "$MANIFEST_DIR/$fault-v$FAULT_VERSION.yaml"
+done
 
 grep -q 'name: chaos-operator-ce' "$OPERATOR_MANIFEST" && grep -q "chaos-operator:$OPERATOR_VERSION" "$OPERATOR_MANIFEST" \
   || { echo "Downloaded Litmus operator manifest did not match the pinned version." >&2; exit 1; }
-grep -q 'kind: ChaosExperiment' "$POD_DELETE_MANIFEST" && grep -q 'name: pod-delete' "$POD_DELETE_MANIFEST" \
-  || { echo "Downloaded Pod Delete manifest is invalid." >&2; exit 1; }
-grep -q 'kind: ChaosExperiment' "$CONTAINER_KILL_MANIFEST" && grep -q 'name: container-kill' "$CONTAINER_KILL_MANIFEST" \
-  || { echo "Downloaded Container Kill manifest is invalid." >&2; exit 1; }
+for fault in "${FAULTS[@]}"; do
+  manifest="$MANIFEST_DIR/$fault-v$FAULT_VERSION.yaml"
+  grep -Eq '^kind:[[:space:]]*ChaosExperiment[[:space:]]*$' "$manifest" \
+    && grep -Eq "^[[:space:]]*name:[[:space:]]*$fault[[:space:]]*$" "$manifest" \
+    && grep -Eq "go-runner:${FAULT_VERSION//./\\.}([\"'[:space:]]|$)" "$manifest" \
+    || { echo "Downloaded fault manifest is invalid or has an unexpected version: $fault" >&2; exit 1; }
+done
 
 kubectl --context "$CONTEXT" apply -f "$OPERATOR_MANIFEST"
 kubectl --context "$CONTEXT" -n litmus rollout status deployment/chaos-operator-ce --timeout=180s
 kubectl --context "$CONTEXT" apply -f "$RUNNER_RBAC_MANIFEST"
-kubectl --context "$CONTEXT" -n litmus apply -f "$POD_DELETE_MANIFEST"
-kubectl --context "$CONTEXT" -n litmus apply -f "$CONTAINER_KILL_MANIFEST"
+for fault in "${FAULTS[@]}"; do
+  kubectl --context "$CONTEXT" -n litmus apply -f "$MANIFEST_DIR/$fault-v$FAULT_VERSION.yaml"
+done
 
 kubectl --context "$CONTEXT" -n litmus get pods
 kubectl --context "$CONTEXT" -n litmus get chaosexperiments
