@@ -47,7 +47,7 @@ dependencies:
 
 `command`/`args`는 문자열이 아니라 exec 배열이다. env는 재현용 값을 직접 선언한다.
 개발자의 환경이나 `.env` 파일을 읽거나 `${SECRET}`를 호스트 값으로 치환하지 않는다.
-PostgreSQL password는 매 실행 새로 생성하며 다음과 같이 앱에 같은 값을 전달할 수 있다.
+PostgreSQL/MySQL password는 매 실행 새로 생성하며 다음과 같이 앱에 같은 값을 전달할 수 있다.
 
 ```yaml
 version: 1
@@ -71,6 +71,7 @@ dependencies:
 ## 자동 탐색의 현재 범위
 
 - Compose: build 가능한 HTTP 서비스 하나와 단순 Redis 의존성. 여러 앱 후보이면 대상 선언 필요.
+  Compose target 포트와 Dockerfile EXPOSE가 충돌하면 임의로 채택하지 않고 설정을 요청한다.
 - Dockerfile: 정확히 한 EXPOSE HTTP 포트. EXPOSE는 HTTP임을 보증하지 않아 실제 probe로 검증한다.
 - Node: package.json의 start 또는 dev 스크립트, 기본 PORT=3000. 실제 앱이 이 설정을 따르지 않으면 YAML 필요.
 - Python: 제한된 Flask/FastAPI 진입점. factory/복잡한 패키지는 명시적 Dockerfile 필요.
@@ -81,6 +82,14 @@ Compose의 bind mount·영속 데이터·호스트 Docker socket은 재사용하
 호스트 의존 command, privileged, env_file, secret 등은 자동 추정하지 않고 설정을 요청한다.
 clone 밖의 빌드 경로와 `.git` 내부 경로를 금지한다. 제출 코드/Dockerfile 자체는 실행되므로
 namespace만으로 악성 코드의 보안 격리가 완성됐다고 보지 않는다. 운영에서는 전용 Worker와 접근 제한이 필요하다.
+
+명시적 `dependencies`는 `redis`, `postgres`, `mysql`을 지원한다. MySQL은 `mysql:8.4`의
+요청 전용 빈 DB이며 앱 계정과 root 비밀번호를 각각 생성한다. 개발자의 `.env`를 읽지 않는다.
+`{{dependency.db.host}}`, `port`, `username`, `database`, `password`로 앱 환경 변수에 연결한다.
+빈 DB에는 기존 서비스 데이터가 없으므로 스키마 생성·seed·검증 API는 프로젝트의 재현 설정에 맞아야 한다.
+여러 DB 중 장애 타깃을 임의로 선택하지 않는다.
+
+Windows에서도 clone별 `core.autocrlf=false`로 원격 LF를 보존하며 전역 Git 설정은 변경하지 않는다.
 
 ## 실패와 호환성
 
@@ -95,3 +104,5 @@ namespace만으로 악성 코드의 보안 격리가 완성됐다고 보지 않�
 추가된 단위/계약 테스트는 실행 계획 선택, 경로 탈출, env 안전 처리, replica/resource 범위,
 Compose 대상 모호성, 자동 API 분기, 일반 서비스 검증 분기 등을 확인한다.
 실제 성공/실패 사례와 완료 범위는 이후 실측 기록으로 별도 추가한다.
+
+[Node·Python/Redis·Whik 실제 API 검증 기록](repository-execution-validation.md)을 참고한다.
