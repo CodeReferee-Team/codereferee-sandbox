@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -22,6 +24,7 @@ import yaml
 from collect_baseline import kubectl_command, kubectl_environment, load_image_into_cluster
 from artifact_cleanup import cleanup_request_image
 from execution_plan import ConfigurationRequired, inside, render_plan, resolve_plan
+from repository_checks import CheckFailure, verify_repository
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +44,7 @@ def main() -> int:
     namespace_may_exist = False
     image = None
     stage = 'clone'
+    checks = None
     started = time.monotonic()
     try:
         repository = workspace / "repository"
@@ -53,11 +57,13 @@ def main() -> int:
         stage = 'patch'
         if args.patch_file:
             apply_patch(repository, args.patch_file)
+        commit_sha = run(["git", "rev-parse", "HEAD"], cwd=repository).stdout.strip()
+        stage = 'verify'
+        checks = verify_repository(repository, workspace / 'check-cache', request)
         stage = 'detect'
         plan = resolve_plan(repository, args.profile)
         profile_name = plan.get('profile')
         profile = load_profile(profile_name) if profile_name else plan
-        commit_sha = run(["git", "rev-parse", "HEAD"], cwd=repository).stdout.strip()
         image = f"codereferee/{request}:{commit_sha[:12]}"
         dockerfile = inside(repository, profile.get('dockerfile', 'Dockerfile'))
         if profile.get('generatedDockerfile'):
@@ -83,11 +89,14 @@ def main() -> int:
         apply(rendered)
         target["namespace"] = namespace
         wait_rollout(namespace, target["deployment"], args.rollout_timeout_seconds)
+        workspace_cleanup = cleanup_workspace(workspace)
         print(json.dumps({
             "repository": {"url": args.repository_url, "branch": args.branch, "commitSha": commit_sha},
             "target": target,
             "image": image,
             "deploymentProfile": profile_name,
+            'sandboxReport': checks,
+            'workspaceCleanup': workspace_cleanup,
             'executionPlan': {'source': plan['source'], 'dockerfile': 'generated' if profile.get('generatedDockerfile') else profile.get('dockerfile', 'Dockerfile'),
                               'warnings': plan.get('warnings', []), 'servicePort': target['servicePort']},
         }, ensure_ascii=False))
@@ -102,22 +111,52 @@ def main() -> int:
                 cleanup.update(cleanup_request_image(image, namespace, remove_from_kind=namespace_may_exist and namespace_removed))
             except (OSError, subprocess.TimeoutExpired):
                 cleanup['errors'] = ['Artifact cleanup failed.']
+        cleanup['workspace_cleanup'] = cleanup_workspace(workspace)
         message = str(exc)[-6000:]
-        infra = isinstance(exc, (FileNotFoundError, OSError)) or stage == 'prepare' or any(
+        if isinstance(exc, CheckFailure):
+            checks = exc.report
+            stage = checks['failed_step']
+        infra = bool((checks or {}).get('infrastructure_error')) or isinstance(exc, (FileNotFoundError, OSError)) or stage == 'prepare' or any(
             term in message.lower() for term in ('cannot connect to the docker daemon', 'dockerdesktoplinuxengine', 'error during connect'))
-        code = None if infra else (89 if isinstance(exc, ConfigurationRequired) else 1)
+        code = None if infra else (89 if isinstance(exc, ConfigurationRequired) else
+            (checks or {}).get('exit_code', 1))
+        report = dict(checks or {}, schema_version='sandbox-result.v1', outcome='failed', failed_step=stage,
+            configuration_required=isinstance(exc, ConfigurationRequired))
+        report.setdefault('verification_declared', False)
         print(json.dumps({'executionFailure': True, 'result': {
             'schemaVersion': 'sandbox-result.v1', 'observationStatus': 'infrastructure_error' if infra else 'observed',
             'infraError': 'execution_infrastructure_error' if infra else None, 'exitCode': code,
-            'timedOut': isinstance(exc, subprocess.TimeoutExpired), 'durationMillis': round((time.monotonic()-started)*1000),
+            'timedOut': isinstance(exc, subprocess.TimeoutExpired) or bool((checks or {}).get('timed_out')), 'durationMillis': round((time.monotonic()-started)*1000),
             'stdout': '', 'stderr': message, 'serverStarted': False, 'serviceCheckAttempted': stage == 'run',
             'browserCheckAttempted': False, 'requestId': args.request_id,
-            'sandboxReport': {'schema_version': 'sandbox-result.v1', 'outcome': 'failed', 'failed_step': stage,
-                              'configuration_required': isinstance(exc, ConfigurationRequired), 'verification_declared': False},
-            'source': {'artifact_cleanup': cleanup}}}, ensure_ascii=False))
+            'sandboxReport': report,
+            'source': {'artifact_cleanup': cleanup, 'workspace_cleanup': cleanup['workspace_cleanup']}}}, ensure_ascii=False))
         return 1
     finally:
-        shutil.rmtree(workspace, ignore_errors=True)
+        if workspace.exists():
+            cleanup_workspace(workspace)
+
+
+def cleanup_workspace(workspace: Path) -> dict:
+    """Delete only the exact request scratch directory, including readonly Git files."""
+    runtime = RUNTIME_ROOT.resolve()
+    resolved = workspace.resolve()
+    if resolved.parent != runtime or not re.fullmatch(r'repository-[a-z0-9-]{1,45}', resolved.name):
+        raise ValueError('Refusing cleanup outside an exact request workspace.')
+
+    def retry_readonly(function, path, exc_info):
+        candidate = Path(path)
+        if not candidate.resolve().is_relative_to(resolved):
+            raise ValueError('Refusing permissions change outside request workspace.')
+        os.chmod(candidate, candidate.stat().st_mode | stat.S_IWRITE)
+        function(path)
+
+    try:
+        if workspace.exists():
+            shutil.rmtree(workspace, onerror=retry_readonly)
+        return {'removed': not workspace.exists(), 'error': None}
+    except (OSError, ValueError) as exc:
+        return {'removed': False, 'error': str(exc)[-1000:]}
 
 
 def parse_args() -> argparse.Namespace:
@@ -176,6 +215,7 @@ def clone(url: str, branch: str | None, destination: Path) -> None:
 
 
 def apply_patch(repository: Path, patch_file: Path) -> None:
+    patch_file = patch_file.resolve()
     if not patch_file.is_file():
         raise RuntimeError("Patch file was not found.")
     if patch_file.stat().st_size > 1_000_000:

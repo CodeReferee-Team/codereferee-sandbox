@@ -3,10 +3,18 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from app.main import RepositoryValidationRequest, RepositoryExecutionFailure, deploy_repository, validate_repository
+from app.main import RepositoryValidationRequest, RepositoryExecutionFailure, attach_repository_checks, deploy_repository, validate_repository
 
 
 class RepositoryExecutionApiTests(unittest.TestCase):
+    def test_repository_checks_are_preserved_without_inventing_service_results(self):
+        result = {'sandboxReport': {'service_smoke_observed': True, 'test_execution': 'not_attempted'}}
+        attach_repository_checks(result, {'sandboxReport': {'test_execution': 'not_declared',
+            'detected_stack': 'node', 'verification_declared': False, 'steps': [], 'outcome': 'passed'}})
+        self.assertEqual(result['sandboxReport']['test_execution'], 'not_declared')
+        self.assertTrue(result['sandboxReport']['service_smoke_observed'])
+        self.assertNotIn('serverStarted', result)
+
     @patch('app.main.subprocess.run')
     def test_missing_profile_is_omitted_to_enable_repository_discovery(self, run):
         run.return_value = subprocess.CompletedProcess([], 0, json.dumps({'target': {}}), '')

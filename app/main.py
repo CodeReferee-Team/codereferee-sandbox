@@ -119,6 +119,7 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
             completed = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True, text=True,
                 encoding='utf-8', errors='replace', env=dict(os.environ, PYTHONIOENCODING='utf-8'), timeout=180)
             result = parse_experiment_result(completed)
+            attach_repository_checks(result, deployed)
             result.update(requestId=request.request_id, repositoryUrl=request.repository_url,
                           commitSha=deployed['repository']['commitSha'], deployment=deployed)
             return result
@@ -150,6 +151,7 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         result["commitSha"] = (deployed or {}).get("repository", {}).get("commitSha") or request.commit_sha
         if deployed:
             result["deployment"] = deployed
+            attach_repository_checks(result, deployed)
         return result
     except RepositoryExecutionFailure as exc:
         result = exc.result
@@ -182,6 +184,19 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         if 'result' in locals():
             result['durationMillis'] = round((time.monotonic() - request_started) * 1000)
         experiment_lock.release()
+
+
+def attach_repository_checks(result: dict, deployed: dict) -> None:
+    """Preserve actual build/test evidence without changing AI judgement policy."""
+    if 'workspaceCleanup' in deployed:
+        result.setdefault('source', {})['workspace_cleanup'] = deployed['workspaceCleanup']
+    checks = deployed.get('sandboxReport')
+    if not isinstance(checks, dict):
+        return
+    report = result.setdefault('sandboxReport', {})
+    report.update({key: checks[key] for key in ('detected_stack', 'verification_declared',
+        'test_execution', 'test_count', 'steps', 'check_cache_cleanup') if key in checks})
+    report['repository_check_outcome'] = checks.get('outcome')
 
 
 def aggregate_scenarios(mode: str, planned: list[str], results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -318,7 +333,8 @@ def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
             raise HTTPException(status_code=422, detail="patchDiff exceeds the 1 MiB Sandbox limit.")
         runtime = PROJECT_ROOT / ".runtime"
         runtime.mkdir(exist_ok=True)
-        patch_path = runtime / f"patch-{request.request_id}.diff"
+        # requestId is external metadata, not a filesystem path.
+        patch_path = runtime / f"patch-{uuid4().hex}.diff"
         patch_path.write_text(request.patch_diff, encoding="utf-8")
         command.extend(["--patch-file", str(patch_path)])
     try:
