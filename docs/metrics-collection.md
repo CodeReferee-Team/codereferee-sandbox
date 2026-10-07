@@ -61,6 +61,25 @@ docker run -d --name cr-recv -p 9090:9090 prom/prometheus:v2.54.1 \
 
 **scrape 예산.** `scrape_interval`이 1초이므로 `scrape_timeout`도 1초를 넘길 수 없고, 한 번이라도 넘기면 그 1초가 비어버린다. 단일 노드 kind에서 실측한 `scrape_duration_seconds`는 0.27초로 예산의 1/4이다. 대상 저장소의 컨테이너가 늘면 이 값도 커지므로, 해상도를 포기하지 않으려면 keep 목록이 아니라 cAdvisor의 `--disable_metrics`로 **노출 자체를** 줄여야 한다. `metric_relabel_configs`는 scrape 이후에 걸리므로 scrape 비용을 줄여주지 않는다.
 
+## 카오스가 수집 스택을 죽이면
+
+세 단계로 갈라진다. 같은 "샌드박스가 죽었다"가 아니다.
+
+**설계된 카오스(pod-delete / container-kill).** Litmus는 `appns`를 요청별 네임스페이스(`codereferee-<requestId>`)로, `applabel`로 대상을 좁힌다. 관측 네임스페이스는 그 라벨을 쓰지 않으므로 사정권 밖이다. Agent는 살아서 하락과 복구를 1초 해상도로 기록한다. 이게 의도한 경우다.
+
+> 불변조건: 카오스 selector가 `codereferee-observability`를 절대 포함하지 않아야 한다. 네임스페이스 단위로 대상을 고르는 실험을 추가한다면 이 네임스페이스를 명시적으로 제외한다.
+
+**노드 자원 압박.** kubelet은 메모리 압박 시 "요청을 초과했는지"를 먼저 보고, 그다음 **우선순위** 순으로 축출한다. 우선순위를 주지 않으면 0이라 애플리케이션과 동급이고, 카오스가 만든 압박이 관측자를 먼저 죽일 수 있다. 하필 가장 보고 싶은 순간이다. 그래서 두 가지를 둔다.
+
+- 자체 `PriorityClass`(`codereferee-observability`, 1000000)를 세 워크로드 모두에 적용한다. `system-node-critical`을 쓰지 않는 이유는 그 등급이 kube-system 구성요소용이고 클러스터가 ResourceQuota로 네임스페이스를 제한해 둘 수 있기 때문이다. 값은 kube-system 등급(2e9)보다 낮아 쿠버네티스 자체 구성요소보다는 뒤에 선다.
+- 메모리는 `requests == limits`로 둔다. 사용량이 요청 안에 머무르면 축출 후보에서 가장 뒤로 간다. **CPU는 일부러 버스트를 허용한다.** 한도를 메모리처럼 조이면 1초 housekeeping이 스로틀링에 걸려 샘플을 놓치는데, 축출을 피하려다 같은 손실을 자초하는 셈이다. CPU는 압축 가능한 자원이라 축출 사유가 되지 않는다.
+
+**노드·클러스터 자체 소멸.** cAdvisor·Node Exporter·Agent가 같이 죽고 **전송 전 버퍼는 잃는다.** 정상 전송 중이면 `batch_send_deadline: 1s`라 손실 창이 약 1초지만, 전송이 밀려 있으면 `capacity`(10,000 샘플)까지 쌓인 것이 전부 사라진다. WAL이 메모리 `emptyDir`이라 Agent 재시작만으로도 버퍼가 비는 것도 같은 이유다. 이건 "샌드박스에 아무것도 남기지 않는다"와 맞바꾼 값이고, 디스크로 바꾸면 그 성질이 깨진다.
+
+다만 이 경우 **관측할 복구 자체가 없다.** 실험이 성립하지 않았으므로 `observationStatus = infrastructure_error` → ERROR(판정 불가)로 가야 하고, FAILED(코드 결함)로 오판하지 않는 것이 중요하다.
+
+즉 "Prometheus를 샌드박스에 두지 않는다"가 지켜 주는 것은 **이미 내보낸 데이터**다. 전송 전 버퍼는 지켜 주지 않는다.
+
 ## 전송량
 
 보낼 지표는 `metric_relabel_configs`의 keep 목록으로 좁힌다. cAdvisor는 기본적으로 컨테이너의 모든 label을 시계열 label로 복사하므로(이미지 maintainer까지 따라붙는다) `--store_container_labels=false`로 끄고 식별에 필요한 셋만 남긴다. cgroup 경로(`id`)와 컨테이너 해시(`name`), `image`도 한 샘플당 수백 바이트인데 식별에 보탬이 없어 버린다.
