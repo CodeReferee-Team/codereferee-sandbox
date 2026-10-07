@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--branch", default="main")
     parser.add_argument("--request-id", required=True)
     parser.add_argument("--chaos-mode", default="litmus_pod_delete")
-    parser.add_argument("--deployment-profile", required=True)
+    parser.add_argument("--deployment-profile")
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
