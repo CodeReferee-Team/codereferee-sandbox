@@ -53,16 +53,30 @@ def memory_megabytes(value: str) -> int:
 
 
 def classify_result(result: dict[str, Any]) -> str:
-    if result.get('verdict') == 'Pass':
-        return 'observed'
     status = result.get('raw', {}).get('experimentStatus', {})
     code = str((status.get('errorOutput') or {}).get('errorCode', ''))
     # Failed runtime/helper/setup must never be labelled as a user resilience failure.
+    # PROBE_ERROR describes the Litmus probe mechanism, not our independent HTTP
+    # observation. Injection history cannot turn a broken probe into user failure.
+    if code and code != 'STATUS_CHECKS_ERROR':
+        return 'infrastructure_error'
+    if result.get('verdict') == 'Pass':
+        return 'observed'
     targets = result.get('raw', {}).get('history', {}).get('targets', [])
     injected = any(t.get('chaosStatus') in {'injected', 'reverted'} for t in targets)
-    if code in {'STATUS_CHECKS_ERROR', 'PROBE_ERROR'} and injected:
+    if code == 'STATUS_CHECKS_ERROR' and injected:
         return 'observed'
     return 'infrastructure_error'
+
+
+def recovery_outcome(result: dict[str, Any], probes: list[dict[str, Any]]) -> dict[str, Any]:
+    status = classify_result(result)
+    # Litmus verdict is retained as execution evidence, never used as the HTTP
+    # recovery verdict. Require five actual samples, not all([]) == True.
+    recovered = (len(probes) >= 5 and all(p.get('success') for p in probes[-5:])) if status == 'observed' else None
+    return {'observationStatus': status, 'recovered': recovered,
+        'exitCode': (0 if recovered else 1) if status == 'observed' else None,
+        'infraError': 'litmus_fault_execution_failed' if status == 'infrastructure_error' else None}
 
 
 def measured_recovery_seconds(probes: list[dict[str, Any]]) -> float | None:
@@ -126,9 +140,10 @@ def main() -> int:
         result, recovery_probes = wait_for_result(target["namespace"], name, args.timeout_seconds, args.local_port,
                                                    args.request_timeout_seconds, observer=observer)
         recovery_probes.extend(observer.collect(5))
-        recovered = result.get('verdict') == 'Pass' and all(p['success'] for p in recovery_probes[-5:])
+        outcome = recovery_outcome(result, recovery_probes)
+        recovered = outcome['recovered']
         recovered_at = now_utc() if recovered else None
-    observation_status = classify_result(result)
+    observation_status = outcome['observationStatus']
     try:
         replacement_pod = get_ready_pod(target["namespace"], target["labelSelector"], target.get("service") or target["deployment"])
     except RuntimeError:
@@ -144,8 +159,8 @@ def main() -> int:
                     if termination:
                         terminations.append({k: termination.get(k) for k in ('reason', 'exitCode', 'startedAt', 'finishedAt')})
     output = {"schemaVersion": "chaos-v1", "scenario": args.scenario, "observationStatus": observation_status,
-              'exitCode': (0 if recovered else 1) if observation_status == 'observed' else None,
-              'infraError': 'litmus_fault_execution_failed' if observation_status == 'infrastructure_error' else None,
+              'exitCode': outcome['exitCode'],
+              'infraError': outcome['infraError'],
               'probeTransport': 'in_cluster_http',
               "target": target, "replicas": target_configuration["replicas"], "chaosEngine": name, "chaosResult": result,
               "chaos_observation": {"type": args.scenario, "kill_method": f"litmus_{args.scenario}", "started_at": fault_started_at,
@@ -168,7 +183,8 @@ def main() -> int:
                                       "error_rate_denominator": "all in-cluster HTTP requests during baseline, experiment, and recovery verification"},
                                     "abort_condition": {"triggered": result.get("verdict") == "Stopped",
                                       "reason": result.get("verdict") if result.get("verdict") != "Pass" else None}},
-              "source": {"real_execution_observed": True, "target": target.get("deployment")}}
+              "source": {"real_execution_observed": observation_status == 'observed',
+                         'http_observation_available': True, "target": target.get("deployment")}}
     if baseline is not None:
         probes = [*baseline["probes"], *recovery_probes]
         output["baseline"] = {"metrics": metrics_from_probes(baseline["probes"])}
@@ -294,7 +310,7 @@ def wait_for_result(namespace: str, engine: str, timeout: int, local_port: int |
                 if item.get("metadata", {}).get("name", "").startswith(engine + "-"):
                     status = item.get("status", {})
                     verdict = status.get("experimentStatus", {}).get("verdict")
-                    if verdict in {"Pass", "Fail", "Stopped"}:
+                    if verdict in {"Pass", "Fail", "Stopped", "Error"}:
                         return (
                             {"name": item["metadata"]["name"], "verdict": verdict,
                              "phase": status.get("experimentStatus", {}).get("phase"), "raw": status},
