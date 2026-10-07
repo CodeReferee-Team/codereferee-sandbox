@@ -37,6 +37,7 @@ def main() -> int:
         raise RuntimeError(f"A repository workspace already exists for requestId={request}.")
     workspace.mkdir()
     namespace_may_exist = False
+    image_load_attempted = False
     image = None
     try:
         repository = workspace / "repository"
@@ -52,6 +53,9 @@ def main() -> int:
             raise RuntimeError(f"Required Dockerfile was not found: {profile.get('dockerfile', 'Dockerfile')}")
         build_context = repository / profile.get("buildContext", ".")
         run(["docker", "build", "--tag", image, '--label', f'codereferee.request-id={request}', "--file", str(dockerfile), str(build_context)])
+        # Loading can partially succeed on a multi-node cluster before raising.
+        # Track the attempt independently from namespace creation.
+        image_load_attempted = True
         load_image_into_cluster(image)
         template = ROOT / profile["manifestTemplate"]
         if not template.is_file():
@@ -75,7 +79,7 @@ def main() -> int:
             namespace_removed = delete_namespace(namespace)
         if image:
             try:
-                cleanup_request_image(image, namespace, remove_from_kind=namespace_may_exist and namespace_removed)
+                cleanup_request_image(image, namespace, remove_from_kind=image_load_attempted and namespace_removed)
             except (OSError, subprocess.TimeoutExpired):
                 pass
         raise
