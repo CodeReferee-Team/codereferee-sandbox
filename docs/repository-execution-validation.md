@@ -38,8 +38,30 @@ clone별 `core.autocrlf=false` 적용 후 재검증했다. 이 실패도 `observ
 `whik-mysql-006.json`, `whik-mysql-007.json`에 보존했다. 임시 patch는 `.runtime/`에 있으며
 로그·원본 결과·실험용 clone은 커밋하지 않는다.
 
-- 일반 HTTP smoke는 단위 테스트 실행이 아니며 `test_execution: not_attempted`를 유지한다.
+- 일반 HTTP smoke는 단위 테스트 실행이 아니다. 이후 build/test 연결 단계에서는 실제 명령과
+  테스트 상태를 별도로 기록한다(아래 추가 검증).
 - 이번 단계는 Sandbox 실제 API 검증이다. 최신 Backend·Redis·AI 전체 경로 재검증은 별도 단계다.
 - 임의 멀티모듈, 여러 서비스의 Compose, 멀티레포 MSA 그룹, 전용 온디맨드 Worker는 아직 미완료다.
 - 외부 `.env`, 운영 비밀번호·외부 인증을 자동 사용하지 않는다. 모호한 실행 계약은 설정 보완을 요청한다.
 - 메트릭 remote-write 수명주기 연결은 별도 브랜치 작업이며 이번 실행 검증 완료에 포함하지 않는다.
+
+## build/test 연결과 멀티모듈 추가 검증
+
+- `checks-failure-008`: 실제 clone한 Python 레포에 명시적 검증 실패 명령을 patch로 전달했다.
+  install·compile 후 `exitCode: 7`, `observed`, `failed_step: test`로 중단되어 배포·Chaos를 하지 않았다.
+- `checks-cleanup-012`: 동일 실패를 요청 전용 Linux 캐시와 clone 정리 보강 후 다시 확인했다.
+  캐시 볼륨·임시 clone이 모두 실제 삭제됐고 테스트 실패를 인프라 오류로 바꾸지 않았다.
+- `whik-checks-009`: Windows bind mount 캐시 경로에서 600초 제한에 걸렸다. 성공으로 처리하지
+  않았으며 검증 컨테이너 삭제를 확인했다. 이 결과를 학습용 서비스 실패 라벨로 사용하면 안 된다.
+- `checks-native-cache-010`: 요청 전용 Docker 캐시 볼륨에서 실제 build 및 JUnit 테스트 1개가
+  성공했다. 앱 배포·Container Kill·복구까지 성공했고 캐시·이미지·namespace를 삭제했다.
+  전체 API는 726.792초였다. 기존 AI HTTP timeout이 600초라면 이 경우는 그대로 연동할 수 없으며,
+  이미 빌드한 산출물을 재사용하는 경로 또는 요청 처리 방식·대기 계약의 보완이 필요하다.
+- `multi-module-013`: `spring-guides/gs-multi-module`의 `complete` 프로젝트에서 application과
+  library 테스트 2개를 실제 실행했다. `:application:bootJar`가 만든 JAR를 `artifactPath`로 선택해
+  재컴파일 없는 런타임 이미지를 생성했다. `/actuator/health` 관측, Container Kill·복구,
+  clone·캐시·호스트/kind 이미지·namespace 정리가 모두 성공했다.
+
+원본은 `.runtime/evidence/`의 위 요청 ID JSON에 보존한다(내부 CLI로 실행한 cleanup-012는
+실행 결과 출력으로 확인). 이는 단일 실행 서비스의 멀티모듈 검증이며 여러 서비스나 멀티레포 MSA
+배포의 완료를 뜻하지 않는다. 최종 회귀 테스트는 64개 통과했다.

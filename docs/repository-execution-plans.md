@@ -13,8 +13,13 @@ URL만으로 모든 비밀 값·외부 서비스·MSA 연결을 추측하는 기
 사용자가 처음부터 YAML을 반드시 작성할 필요는 없다. 자동 탐색에 실패했을 때 보완한다.
 명시적 `chaosMode: fixture`만 공통 fixture를 실행한다. 모드를 생략한 일반 요청은
 실제 레포의 build·배포·HTTP smoke를 진행하며 Chaos는 주입하지 않는다.
-일반 경로의 unit test 실행은 아직 추가 단계다. 현재 `test_execution: not_attempted`를
-명시하고, 실행하지 않은 테스트를 통과한 것으로 보고하지 않는다.
+clone·patch 후 같은 clone에서 격리된 컨테이너로 install/build/test를 수행한다.
+지원 스택은 Node, Python, Gradle, Maven이다. 각 단계의 exit code·시간·제한된 로그를
+`sandboxReport.steps`에 남긴다. 테스트가 없으면 `test_execution: not_declared`,
+Gradle/Maven XML 결과가 0개이면 `no_tests_collected`로 구분한다. 명령의 성공은
+`command_passed`로 표현하며 테스트의 충분성이나 SRE 합격 판정을 대신하지 않는다.
+실패하면 배포·Chaos 전에 중단한다. 테스트가 없는 앱의 HTTP/Chaos 관측은 가능하지만
+테스트를 통과했다고 보고하지 않으며 최종 해석은 AI 정책 영역이다.
 
 ## YAML
 
@@ -24,7 +29,8 @@ URL만으로 모든 비밀 값·외부 서비스·MSA 연결을 추측하는 기
 deploymentProfile: quickbyte-demo
 ```
 
-직접 선언할 때는 레포 내부 Dockerfile을 사용한다.
+직접 선언할 때는 레포 내부 Dockerfile을 사용한다. Dockerfile이 없으면 지원되는
+단일 서비스 스택은 생성 recipe를 사용할 수 있다. 재현할 포트·환경이 모호하면 보완을 요청한다.
 
 ```yaml
 version: 1
@@ -98,6 +104,41 @@ Windows에서도 clone별 `core.autocrlf=false`로 원격 LF를 보존하며 전
 - Docker/클러스터 준비 오류: infrastructure_error, exitCode null.
 - 정상 HTTP smoke: sandbox-result.v1, Chaos evidence를 가짜로 생성하지 않음.
 - 기존 AI parser의 sandboxReport/source와 observationStatus를 사용하며 AI 정책은 수정하지 않음.
+
+## 검증 명령 선언과 멀티모듈 산출물
+
+자동 검증 명령이 맞지 않으면 동일 YAML의 `verification`으로 명시한다. 기존 AI 계약의
+최상위 `test`(단순 명령 문자열/exec 배열) 및 Python `testDependencies` 파일 경로도 읽는다.
+`verification_declared`는 배포 프로필 유무가 아니라 명시적 테스트 명령 유무다.
+
+```yaml
+version: 1
+verification:
+  stack: gradle
+  workingDirectory: .
+  build: [sh, ./gradlew, ':api:bootJar', --no-daemon]
+  test: [sh, ./gradlew, ':api:test', --no-daemon]
+  env:
+    SPRING_PROFILES_ACTIVE: test
+service:
+  port: 8080
+  healthPath: /health
+  artifactPath: api/build/libs/application.jar
+```
+
+`artifactPath`는 실제 build가 만든 JAR 하나를 buildContext 안에서 선택한다. 임의의 JAR를
+골라 실행하지 않는다. runtime 이미지만 생성하므로 같은 앱을 다시 컴파일할 필요가 없다.
+이는 한 실행 서비스의 멀티모듈 산출물 선택이지 여러 MSA 서비스·멀티레포 그룹 배포가 아니다.
+검증 workingDirectory·실행 명령·artifact는 해당 프로젝트에 맞게 지정해야 한다.
+
+검증 명령은 호스트 shell에서 실행하지 않는다. 컨테이너마다 CPU 2·메모리 2GiB·PID 512 제한과
+capability 제거를 적용한다. 검증 단계 전체의 기본 시간 한도는 600초다. 패키지 캐시는
+요청 전용 Docker 볼륨에 두고 검증 종료 후 제거한다. timeout 시 명명된 검증 컨테이너만
+정리하며 정리 실패를 숨기지 않는다. 임시 clone 삭제도 읽기 전용 Git 파일을 처리하고
+`workspaceCleanup`/`source.workspace_cleanup`에 실제 결과를 기록한다.
+
+이 제한만으로 악성 코드의 운영 보안 격리가 완성되는 것은 아니다. 전용 Worker·네트워크 제한은
+별도 작업이며 아직 현재 단일 Worker API는 요청을 직렬 처리한다.
 
 ## 진행 기록
 
