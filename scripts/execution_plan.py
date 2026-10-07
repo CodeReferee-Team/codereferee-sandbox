@@ -19,7 +19,7 @@ class ConfigurationRequired(ValueError):
 
 
 def inside(repository: Path, relative: str) -> Path:
-    if not isinstance(relative, str) or not relative or '\\' in relative:
+    if not isinstance(relative, str) or not relative or '\\' in relative or Path(relative).is_absolute() or re.match(r'^[A-Za-z]:', relative):
         raise ConfigurationRequired('Paths must be repository-relative POSIX paths.')
     root = repository.resolve()
     path = (root / relative).resolve()
@@ -31,10 +31,31 @@ def inside(repository: Path, relative: str) -> Path:
 def read_yaml(path: Path) -> dict:
     if path.stat().st_size > 256_000:
         raise ConfigurationRequired('Configuration exceeds 256 KB.')
-    data = yaml.safe_load(path.read_text(encoding='utf-8'))
+    try:
+        data = yaml.safe_load(path.read_text(encoding='utf-8'))
+    except yaml.YAMLError as exc:
+        raise ConfigurationRequired('Configuration is not valid YAML.') from exc
     if not isinstance(data, dict):
         raise ConfigurationRequired('Configuration must be a YAML object.')
     return data
+
+
+def exposed_tcp_ports(dockerfile: Path) -> set[int]:
+    """Inspect only the final build stage; EXPOSE is a hint, not proof of HTTP."""
+    ports = set()
+    text = re.sub(r'\\\r?\n', ' ', dockerfile.read_text(encoding='utf-8'))
+    for line in text.splitlines():
+        tokens = line.split('#', 1)[0].split()
+        if not tokens:
+            continue
+        if tokens[0].upper() == 'FROM':
+            ports = set()
+        elif tokens[0].upper() == 'EXPOSE':
+            for token in tokens[1:]:
+                if not re.fullmatch(r'\d+(?:/tcp)?', token):
+                    raise ConfigurationRequired('Declare an explicit HTTP port for variable or non-TCP EXPOSE values.')
+                ports.add(int(token.split('/')[0]))
+    return ports
 
 
 def resolve_plan(repository: Path, explicit_profile: str | None = None) -> dict[str, Any]:
@@ -60,9 +81,7 @@ def resolve_plan(repository: Path, explicit_profile: str | None = None) -> dict[
 
     dockerfile = inside(repository, 'Dockerfile')
     if dockerfile.is_file():
-        text = dockerfile.read_text(encoding='utf-8')
-        ports = {int(p) for line in re.findall(r'^\s*EXPOSE\s+(.+)$', text, re.M | re.I)
-                 for p in re.findall(r'\b(\d+)(?:/tcp)?\b', line)}
+        ports = exposed_tcp_ports(dockerfile)
         if len(ports) != 1:
             raise ConfigurationRequired('Dockerfile must expose exactly one HTTP port, or declare service.port in validation.yaml.')
         plan = normalize_service(repository, {'port': ports.pop(), 'dockerfile': 'Dockerfile'})
@@ -140,14 +159,18 @@ def normalize_dependencies(dependencies: dict) -> dict:
     for name, dependency in dependencies.items():
         if name == 'repository-api' or not re.fullmatch(r'[a-z][a-z0-9-]{0,40}', name) or not isinstance(dependency, dict):
             raise ConfigurationRequired('Invalid dependency declaration.')
-        if dependency.get('type') not in {'redis', 'postgres'} or set(dependency) - {'type', 'probePath', 'probeSpec'}:
-            raise ConfigurationRequired('Only ephemeral redis/postgres dependencies and explicit business probes are supported.')
+        if dependency.get('type') not in {'redis', 'postgres', 'mysql'} or set(dependency) - {'type', 'probePath', 'probeSpec'}:
+            raise ConfigurationRequired('Only ephemeral redis/postgres/mysql dependencies and explicit business probes are supported.')
+    probe_kinds = [dependency['type'] == 'redis' for dependency in dependencies.values()
+                   if dependency.get('probePath') or dependency.get('probeSpec')]
+    if len(probe_kinds) != len(set(probe_kinds)):
+        raise ConfigurationRequired('Declare at most one business-probed Redis and one database dependency for the current scenario contract.')
     return dependencies
 
 
 def compose_plan(repository: Path, data: dict, filename: str) -> dict:
     services = data.get('services', {})
-    if not isinstance(services, dict):
+    if not isinstance(services, dict) or any(not isinstance(config, dict) for config in services.values()):
         raise ConfigurationRequired('Compose services must be an object.')
     candidates = [(name, config) for name, config in services.items()
                   if isinstance(config, dict) and 'build' in config]
@@ -163,20 +186,34 @@ def compose_plan(repository: Path, data: dict, filename: str) -> dict:
     context = build if isinstance(build, str) else build.get('context', '.')
     dockerfile = 'Dockerfile' if isinstance(build, str) else build.get('dockerfile', 'Dockerfile')
     ports = []
-    for value in app.get('ports', []):
+    mappings = app.get('ports', [])
+    if not isinstance(mappings, list):
+        raise ConfigurationRequired('Compose ports must be a list.')
+    for value in mappings:
         if isinstance(value, dict):
+            if value.get('protocol', 'tcp') != 'tcp' or isinstance(value.get('target'), bool) or not str(value.get('target', '')).isdigit():
+                raise ConfigurationRequired('Compose HTTP port mappings need an integer TCP target.')
             ports.append(int(value['target']))
         elif re.fullmatch(r'(?:[0-9.:]+:)?\d+(?:/tcp)?', str(value)):
             ports.append(int(str(value).split(':')[-1].removesuffix('/tcp')))
         else:
             raise ConfigurationRequired('Unsupported Compose port mapping.')
     if not ports:
-        ports = [int(v) for v in app.get('expose', [])]
+        exposed = app.get('expose', [])
+        if not isinstance(exposed, list) or any(isinstance(v, bool) or not str(v).isdigit() for v in exposed):
+            raise ConfigurationRequired('Compose expose must contain integer TCP ports.')
+        ports = [int(v) for v in exposed]
     if len(set(ports)) != 1:
         raise ConfigurationRequired('Compose must declare exactly one target HTTP port.')
+    compose_dockerfile = inside(repository, str(Path(context) / dockerfile))
+    if not compose_dockerfile.is_file():
+        raise ConfigurationRequired('Compose Dockerfile is missing; declare a buildable service.')
+    declared_ports = exposed_tcp_ports(compose_dockerfile)
+    if declared_ports and ports[0] not in declared_ports:
+        raise ConfigurationRequired('Compose target port conflicts with Dockerfile EXPOSE; declare the reproduction port in validation.yaml.')
     environment = app.get('environment', {})
     if isinstance(environment, list):
-        if any('=' not in item for item in environment):
+        if any(not isinstance(item, str) or '=' not in item for item in environment):
             raise ConfigurationRequired('Compose cannot inherit host environment variables.')
         environment = dict(item.split('=', 1) for item in environment)
     service = {'port': ports[0], 'buildContext': context,
@@ -214,7 +251,12 @@ def compose_plan(repository: Path, data: dict, filename: str) -> dict:
 def stack_recipe(repository: Path) -> dict | None:
     package_path = inside(repository, 'package.json')
     if package_path.is_file():
-        package = json.loads(package_path.read_text(encoding='utf-8'))
+        try:
+            package = json.loads(package_path.read_text(encoding='utf-8'))
+        except json.JSONDecodeError as exc:
+            raise ConfigurationRequired('package.json is not valid JSON.') from exc
+        if not isinstance(package, dict) or not isinstance(package.get('scripts', {}), dict):
+            raise ConfigurationRequired('package.json scripts must be an object.')
         scripts = package.get('scripts', {})
         script = 'start' if isinstance(scripts.get('start'), str) else ('dev' if isinstance(scripts.get('dev'), str) else None)
         if script is None:
@@ -261,7 +303,7 @@ def stack_recipe(repository: Path) -> dict | None:
 def render_plan(plan: dict, namespace: str, image: str) -> tuple[str, dict]:
     dependency_values = {}
     for name, dependency in plan['dependencies'].items():
-        dependency_values[name] = {'host': name, 'port': '6379' if dependency['type'] == 'redis' else '5432',
+        dependency_values[name] = {'host': name, 'port': {'redis': '6379', 'postgres': '5432', 'mysql': '3306'}[dependency['type']],
             'username': 'codereferee', 'database': 'codereferee', 'password': secrets.token_hex(24)}
     environment = {}
     for name, value in plan['env'].items():
@@ -290,8 +332,8 @@ def render_plan(plan: dict, namespace: str, image: str) -> tuple[str, dict]:
     target_dependencies = {}
     for name, dependency in plan['dependencies'].items():
         kind = dependency['type']
-        dep_port = 6379 if kind == 'redis' else 5432
-        dep_image = 'redis:7-alpine' if kind == 'redis' else 'postgres:17-alpine'
+        dep_port = {'redis': 6379, 'postgres': 5432, 'mysql': 3306}[kind]
+        dep_image = {'redis': 'redis:7-alpine', 'postgres': 'postgres:17-alpine', 'mysql': 'mysql:8.4'}[kind]
         dep_labels = {'app.kubernetes.io/name': name}
         dep_container = {'name': kind, 'image': dep_image, 'ports': [{'containerPort': dep_port}],
                          'resources': {'requests': {'cpu': '50m', 'memory': '64Mi'}, 'limits': {'cpu': '500m', 'memory': '256Mi'}}}
@@ -300,6 +342,14 @@ def render_plan(plan: dict, namespace: str, image: str) -> tuple[str, dict]:
             # these declared values; unknown external secret requirements are not inferred.
             dep_container['env'] = [{'name': 'POSTGRES_USER', 'value': 'codereferee'},
                 {'name': 'POSTGRES_PASSWORD', 'value': dependency_values[name]['password']}, {'name': 'POSTGRES_DB', 'value': 'codereferee'}]
+        elif kind == 'mysql':
+            dep_container['resources']['requests']['memory'] = '128Mi'
+            dep_container['resources']['limits']['memory'] = '512Mi'
+            dep_container['env'] = [{'name': 'MYSQL_USER', 'value': 'codereferee'},
+                {'name': 'MYSQL_PASSWORD', 'value': dependency_values[name]['password']},
+                {'name': 'MYSQL_DATABASE', 'value': 'codereferee'},
+                {'name': 'MYSQL_ROOT_PASSWORD', 'value': secrets.token_hex(24)}]
+        dep_container['readinessProbe'] = {'tcpSocket': {'port': dep_port}, 'periodSeconds': 2}
         objects += [
             {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': {'name': name, 'namespace': namespace},
              'spec': {'replicas': 1, 'selector': {'matchLabels': dep_labels}, 'template': {'metadata': {'labels': dep_labels},

@@ -51,6 +51,8 @@ class ExecutionPlanTests(unittest.TestCase):
             inside(self.root, '../Dockerfile')
         with self.assertRaises(ConfigurationRequired):
             inside(self.root, '.git/config')
+        with self.assertRaises(ConfigurationRequired):
+            inside(self.root, self.root.as_posix())
 
     def test_compose_redis_network_is_reproduced_without_host_mounts(self):
         self.write('Dockerfile', 'FROM python:3.12\nEXPOSE 5000\n')
@@ -93,3 +95,54 @@ class ExecutionPlanTests(unittest.TestCase):
         self.assertEqual(limits['requests'], {'cpu': '50m', 'memory': '32Mi'})
         with self.assertRaises(ConfigurationRequired):
             normalize_resources({'memory': '8Gi'})
+
+    def test_final_docker_stage_port_only_and_udp_requires_configuration(self):
+        self.write('Dockerfile', 'FROM node:20 AS builder\nEXPOSE 9000\nFROM nginx\nEXPOSE 80/tcp\n')
+        self.assertEqual(resolve_plan(self.root)['port'], 80)
+        self.write('Dockerfile', 'FROM alpine\nEXPOSE 53/udp\n')
+        with self.assertRaises(ConfigurationRequired):
+            resolve_plan(self.root)
+
+    def test_compose_conflicting_port_requires_configuration_before_build(self):
+        self.write('Dockerfile', 'FROM python:3.12\nEXPOSE 5000\n')
+        self.write('compose.yaml', 'services:\n  web: {build: ., ports: ["8000:8000"]}\n')
+        with self.assertRaisesRegex(ConfigurationRequired, 'conflicts'):
+            resolve_plan(self.root)
+
+    def test_malformed_compose_returns_configuration_required(self):
+        self.write('Dockerfile', 'FROM node:20\nEXPOSE 3000\n')
+        for config in ('services: {web: {build: ., ports: [{published: 3000}]}}',
+                       'services: {web: {build: ., ports: [3000], environment: [null]}}',
+                       'services: {web: {build: ., ports: [3000]}, redis: null}',
+                       'services: {web: {build: {dockerfile: absent}, ports: [3000]}}',
+                       'services: ['):
+            with self.subTest(config=config):
+                self.write('compose.yaml', config)
+                with self.assertRaises(ConfigurationRequired):
+                    resolve_plan(self.root)
+
+    def test_malformed_package_is_configuration_error_not_infrastructure(self):
+        for package in ('{', '[]', '{"scripts": []}'):
+            with self.subTest(package=package):
+                self.write('package.json', package)
+                with self.assertRaises(ConfigurationRequired):
+                    resolve_plan(self.root)
+
+    def test_mysql_reproduction_credentials_and_business_probe(self):
+        self.write('Dockerfile', 'FROM eclipse-temurin:17\n')
+        self.write('.codereferee/validation.yaml', 'version: 1\nservice:\n  port: 8080\n  env:\n    DB_PASSWORD: "{{dependency.db.password}}"\ndependencies:\n  db: {type: mysql, probePath: /categories}\n')
+        import yaml
+        objects = list(yaml.safe_load_all(render_plan(resolve_plan(self.root), 'codereferee-test', 'test')[0]))
+        app = objects[1]['spec']['template']['spec']['containers'][0]
+        database = objects[3]['spec']['template']['spec']['containers'][0]
+        env = {value['name']: value['value'] for value in database['env']}
+        self.assertEqual(app['env'][0]['value'], env['MYSQL_PASSWORD'])
+        self.assertNotEqual(env['MYSQL_ROOT_PASSWORD'], env['MYSQL_PASSWORD'])
+        self.assertEqual(database['image'], 'mysql:8.4')
+        self.assertEqual(database['readinessProbe']['tcpSocket']['port'], 3306)
+
+    def test_same_kind_business_dependencies_do_not_overwrite_target(self):
+        self.write('Dockerfile', 'FROM nginx\n')
+        self.write('.codereferee/validation.yaml', 'version: 1\nservice: {port: 8080}\ndependencies:\n  a: {type: postgres, probePath: /a}\n  b: {type: mysql, probePath: /b}\n')
+        with self.assertRaises(ConfigurationRequired):
+            resolve_plan(self.root)
