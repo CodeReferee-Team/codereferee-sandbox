@@ -11,15 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from collect_baseline import kubectl_command, kubectl_environment
+from in_cluster_probe import InClusterProbe
+from run_litmus_pod_delete import measured_recovery_seconds
 from run_pod_kill_experiment import (
-    collect_probes,
     get_ready_pod,
     get_target_configuration,
     metrics_from_probes,
-    probe_once,
-    start_port_forward,
-    stop_process,
-    wait_for_service,
 )
 
 
@@ -33,27 +30,31 @@ def main() -> int:
         raise SystemExit("Deployment must have at least one replica before scale-down chaos.")
 
     started_at = now_utc()
-    forward = start_port_forward(target["namespace"], target["service"], int(target["servicePort"]), args.local_port)
-    try:
-        wait_for_service(forward, args.local_port, args.request_timeout_seconds)
-        baseline = collect_probes(args.local_port, args.baseline_probes, args.request_timeout_seconds)
-        fault_started = time.monotonic()
-        scale(target["namespace"], target["deployment"], 0)
-        fault_probes = collect_for_seconds(args.local_port, args.fault_seconds, args.request_timeout_seconds)
-        scale(target["namespace"], target["deployment"], original_replicas)
-        stop_process(forward)
-        replacement_pod = wait_for_ready_pod(
-            target["namespace"], target["labelSelector"], target["deployment"], args.recovery_timeout_seconds
-        )
-        forward = start_port_forward(target["namespace"], target["service"], int(target["servicePort"]), args.local_port)
-        wait_for_service(forward, args.local_port, args.recovery_timeout_seconds)
-        recovery_probes = collect_probes(args.local_port, args.recovery_probes, args.request_timeout_seconds)
-    finally:
-        scale(target["namespace"], target["deployment"], original_replicas)
-        stop_process(forward)
+    with InClusterProbe(target['namespace'], target['service'], int(target['servicePort']),
+                        local_port=args.local_port, timeout=args.request_timeout_seconds) as observer:
+        baseline = {'probes': observer.collect(args.baseline_probes)}
+        if not all(p['success'] for p in baseline['probes']):
+            raise RuntimeError('Scale-down baseline is unhealthy; fault skipped.')
+        try:
+            fault_started = time.monotonic()
+            started_at = now_utc()
+            scale(target['namespace'], target['deployment'], 0)
+            fault_probes = []
+            deadline = time.monotonic() + args.fault_seconds
+            while time.monotonic() < deadline:
+                fault_probes.append(observer.probe())
+                time.sleep(0.5)
+            scale(target['namespace'], target['deployment'], original_replicas)
+            recovered_probes, recovered = observer.collect_until_healthy(
+                args.recovery_timeout_seconds, args.recovery_probes)
+            recovery_probes = {'probes': recovered_probes}
+            replacement_pod = get_ready_pod(target['namespace'], target['labelSelector'],
+                                            target['deployment']) if recovered else {}
+        finally:
+            scale(target['namespace'], target['deployment'], original_replicas)
 
     probes = [*baseline["probes"], *fault_probes, *recovery_probes["probes"]]
-    denominator = "all HTTP GET / probes collected during baseline, scale-down, and recovery; readiness wait probes are excluded"
+    denominator = 'all measured in-cluster HTTP requests during baseline, scale-down, and recovery'
     baseline_metrics = metrics_from_probes(baseline["probes"])
     baseline_metrics["error_rate_denominator"] = "all HTTP GET / probes collected during baseline; readiness wait probes are excluded"
     observed_metrics = metrics_from_probes(probes)
@@ -62,6 +63,10 @@ def main() -> int:
         "schemaVersion": "chaos-v1",
         "scenario": "deployment_scale_down",
         "observationStatus": "observed",
+        'exitCode': 0 if recovered else 1,
+        'timedOut': not recovered,
+        'probeTransport': 'in_cluster_http',
+        'probes': {'baseline': baseline['probes'], 'experiment': [*fault_probes, *recovery_probes['probes']]},
         "target": target,
         "replicas": original_replicas,
         "baseline": {"metrics": baseline_metrics},
@@ -70,8 +75,10 @@ def main() -> int:
             "type": "deployment_scale_down",
             "kill_method": "kubectl_scale",
             "started_at": started_at,
-            "recovered_at": now_utc(),
-            "recovery_seconds": round(time.monotonic() - fault_started, 2),
+            'recovered': recovered,
+            "recovered_at": now_utc() if recovered else None,
+            "recovery_seconds": measured_recovery_seconds([*fault_probes, *recovery_probes['probes']]),
+            'experiment_duration_seconds': round(time.monotonic() - fault_started, 2),
             "target_pod_uid": source_pod.get("uid"),
             "replacement_pod_uid": replacement_pod.get("uid"),
             "target_configuration": configuration,
@@ -84,13 +91,14 @@ def main() -> int:
             },
             "abort_condition": {"triggered": False, "reason": None},
         },
+        'source': {'real_execution_observed': True, 'target': target['deployment']},
     }
     rendered = json.dumps(output, ensure_ascii=False, indent=2)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered + "\n", encoding="utf-8")
     print(rendered)
-    return 0
+    return 0 if recovered else 1
 
 
 def parse_args() -> argparse.Namespace:
@@ -120,26 +128,6 @@ def scale(namespace: str, deployment: str, replicas: int) -> None:
                                text=True, capture_output=True, env=kubectl_environment())
     if completed.returncode:
         raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "kubectl scale failed")
-
-
-def collect_for_seconds(local_port: int, seconds: int, timeout_seconds: float) -> list[dict[str, Any]]:
-    deadline = time.monotonic() + seconds
-    probes: list[dict[str, Any]] = []
-    while time.monotonic() < deadline:
-        probes.append(probe_once(local_port, timeout_seconds))
-    return probes
-
-
-def wait_for_ready_pod(namespace: str, label_selector: str, deployment: str, timeout_seconds: int) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout_seconds
-    last_error = ""
-    while time.monotonic() < deadline:
-        try:
-            return get_ready_pod(namespace, label_selector, deployment)
-        except RuntimeError as exc:
-            last_error = str(exc)
-            time.sleep(1)
-    raise TimeoutError(last_error or f"Timed out waiting for Ready Pod in {namespace}")
 
 
 def now_utc() -> str:

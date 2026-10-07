@@ -1,0 +1,914 @@
+{
+  "sample_schema": "codereferee-runtime-observation-v1",
+  "captured_date": "2026-10-07",
+  "repository": {
+    "url": "https://github.com/phdcoco/QuickByte_Demo.git",
+    "commit": "d1c5c5edd86791bcec3ccbf93abde42d6778c3c3"
+  },
+  "source": {
+    "real_execution_observed": true,
+    "target": "quickbyte-api"
+  },
+  "scenario": "deployment_scale_down",
+  "observation": {
+    "type": "deployment_scale_down",
+    "kill_method": "kubectl_scale",
+    "started_at": "2026-10-06T21:40:07.925473Z",
+    "recovered": true,
+    "recovered_at": "2026-10-06T21:41:48.304509Z",
+    "recovery_seconds": 95.98,
+    "experiment_duration_seconds": 100.38,
+    "target_pod_uid": "4082fb4c-4ee1-4d93-ae52-71e77bda4d05",
+    "replacement_pod_uid": "5988295e-0c35-4649-990d-ade5fca78d0b",
+    "target_configuration": {
+      "replicas": 1,
+      "readiness_probe": {
+        "type": "http_get",
+        "initial_delay_seconds": null,
+        "period_seconds": 5,
+        "timeout_seconds": 2,
+        "failure_threshold": 12,
+        "success_threshold": 1
+      },
+      "liveness_probe": {
+        "type": "http_get",
+        "initial_delay_seconds": null,
+        "period_seconds": 10,
+        "timeout_seconds": 2,
+        "failure_threshold": 3,
+        "success_threshold": 1
+      },
+      "startup_probe": {
+        "type": "http_get",
+        "initial_delay_seconds": null,
+        "period_seconds": 5,
+        "timeout_seconds": 2,
+        "failure_threshold": 30,
+        "success_threshold": 1
+      },
+      "termination_grace_period_seconds": 30
+    },
+    "scale_operation": {
+      "from_replicas": 1,
+      "to_replicas": 0,
+      "restored_replicas": 1
+    },
+    "observation_window": {
+      "baseline_probe_count": 10,
+      "fault_seconds": 10,
+      "recovery_timeout_seconds": 180,
+      "error_rate_denominator": "all measured in-cluster HTTP requests during baseline, scale-down, and recovery"
+    },
+    "abort_condition": {
+      "triggered": false,
+      "reason": null
+    }
+  },
+  "litmus": null,
+  "baseline": {
+    "availability": 1,
+    "p95_latency_ms": 24.93,
+    "error_rate": 0,
+    "probe_count": 10,
+    "success_count": 10,
+    "failure_count": 0,
+    "error_rate_denominator": "all HTTP GET / probes collected during baseline; readiness wait probes are excluded",
+    "cpu_usage_percent": null,
+    "memory_usage_mb": null,
+    "restart_count": 0
+  },
+  "observationStatus": "observed",
+  "probeTransport": "in_cluster_http",
+  "target": "QuickByte_Demo",
+  "exitCode": 0,
+  "probes": {
+    "baseline": [
+      {
+        "at": "2026-10-06T21:40:06.635976+00:00",
+        "status_code": 200,
+        "latency_ms": 12.63,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:40:06.767960+00:00",
+        "status_code": 200,
+        "latency_ms": 11.14,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:40:06.903535+00:00",
+        "status_code": 200,
+        "latency_ms": 12.89,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:40:07.052255+00:00",
+        "status_code": 200,
+        "latency_ms": 13.21,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:40:07.197615+00:00",
+        "status_code": 200,
+        "latency_ms": 19.44,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:40:07.350492+00:00",
+        "status_code": 200,
+        "latency_ms": 24.93,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:40:07.486950+00:00",
+        "status_code": 200,
+        "latency_ms": 10.66,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:40:07.633875+00:00",
+        "status_code": 200,
+        "latency_ms": 11.01,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:40:07.790030+00:00",
+        "status_code": 200,
+        "latency_ms": 23.52,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:40:07.923526+00:00",
+        "status_code": 200,
+        "latency_ms": 10.95,
+        "success": true,
+        "error": null
+      }
+    ],
+    "experiment": [
+      {
+        "at": "2026-10-06T21:40:08.476134+00:00",
+        "status_code": null,
+        "latency_ms": 7.84,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:09.135716+00:00",
+        "status_code": null,
+        "latency_ms": 3.56,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:09.767946+00:00",
+        "status_code": null,
+        "latency_ms": 5.76,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:10.396607+00:00",
+        "status_code": null,
+        "latency_ms": 8.35,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:11.025143+00:00",
+        "status_code": null,
+        "latency_ms": 3.32,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:11.646898+00:00",
+        "status_code": null,
+        "latency_ms": 3.43,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:12.252465+00:00",
+        "status_code": null,
+        "latency_ms": 2.8,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:12.903548+00:00",
+        "status_code": null,
+        "latency_ms": 13.66,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:13.520101+00:00",
+        "status_code": null,
+        "latency_ms": 3.29,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:14.137283+00:00",
+        "status_code": null,
+        "latency_ms": 3.59,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:14.779603+00:00",
+        "status_code": null,
+        "latency_ms": 5.11,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:15.405776+00:00",
+        "status_code": null,
+        "latency_ms": 4.76,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:16.030347+00:00",
+        "status_code": null,
+        "latency_ms": 3.72,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:16.655971+00:00",
+        "status_code": null,
+        "latency_ms": 4.49,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:17.289030+00:00",
+        "status_code": null,
+        "latency_ms": 3.77,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:17.944865+00:00",
+        "status_code": null,
+        "latency_ms": 9.6,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:18.896001+00:00",
+        "status_code": null,
+        "latency_ms": 3.21,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:20.521260+00:00",
+        "status_code": null,
+        "latency_ms": 1020.66,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:21.128000+00:00",
+        "status_code": null,
+        "latency_ms": 3.21,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:21.858306+00:00",
+        "status_code": null,
+        "latency_ms": 28.07,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:23.522742+00:00",
+        "status_code": null,
+        "latency_ms": 1006.65,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:24.158489+00:00",
+        "status_code": null,
+        "latency_ms": 4.27,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:24.784196+00:00",
+        "status_code": null,
+        "latency_ms": 3.68,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:26.442319+00:00",
+        "status_code": null,
+        "latency_ms": 1021.26,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:27.132060+00:00",
+        "status_code": null,
+        "latency_ms": 8.08,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:27.938145+00:00",
+        "status_code": null,
+        "latency_ms": 3.76,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:29.638852+00:00",
+        "status_code": null,
+        "latency_ms": 1056.7,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:30.272224+00:00",
+        "status_code": null,
+        "latency_ms": 6.43,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:30.976429+00:00",
+        "status_code": null,
+        "latency_ms": 8.6,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:32.646322+00:00",
+        "status_code": null,
+        "latency_ms": 1029.14,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:33.313846+00:00",
+        "status_code": null,
+        "latency_ms": 22.75,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:34.023258+00:00",
+        "status_code": null,
+        "latency_ms": 4.45,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:35.654375+00:00",
+        "status_code": null,
+        "latency_ms": 1025.11,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:36.247088+00:00",
+        "status_code": null,
+        "latency_ms": 2.63,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:36.870970+00:00",
+        "status_code": null,
+        "latency_ms": 4.91,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:38.498716+00:00",
+        "status_code": null,
+        "latency_ms": 1006.36,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:39.156255+00:00",
+        "status_code": null,
+        "latency_ms": 20.33,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:40.770269+00:00",
+        "status_code": null,
+        "latency_ms": 1015.64,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:41.416971+00:00",
+        "status_code": null,
+        "latency_ms": 9.41,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:42.069472+00:00",
+        "status_code": null,
+        "latency_ms": 20.87,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:43.718423+00:00",
+        "status_code": null,
+        "latency_ms": 1037.26,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:44.379075+00:00",
+        "status_code": null,
+        "latency_ms": 3.91,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:45.014877+00:00",
+        "status_code": null,
+        "latency_ms": 2.84,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:46.657029+00:00",
+        "status_code": null,
+        "latency_ms": 1022.27,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:47.315217+00:00",
+        "status_code": null,
+        "latency_ms": 4.25,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:47.943943+00:00",
+        "status_code": null,
+        "latency_ms": 5.29,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:49.605383+00:00",
+        "status_code": null,
+        "latency_ms": 1022.43,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:50.364269+00:00",
+        "status_code": null,
+        "latency_ms": 40.71,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:51.020496+00:00",
+        "status_code": null,
+        "latency_ms": 12.8,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:52.672959+00:00",
+        "status_code": null,
+        "latency_ms": 1032.07,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:53.263420+00:00",
+        "status_code": null,
+        "latency_ms": 2.59,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:53.901755+00:00",
+        "status_code": null,
+        "latency_ms": 12.31,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:55.553795+00:00",
+        "status_code": null,
+        "latency_ms": 1021.82,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:56.231686+00:00",
+        "status_code": null,
+        "latency_ms": 7.38,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:56.865498+00:00",
+        "status_code": null,
+        "latency_ms": 4.54,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:58.658085+00:00",
+        "status_code": null,
+        "latency_ms": 1040.86,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:59.306083+00:00",
+        "status_code": null,
+        "latency_ms": 18.01,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:40:59.951409+00:00",
+        "status_code": null,
+        "latency_ms": 8.51,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:01.569793+00:00",
+        "status_code": null,
+        "latency_ms": 1007.11,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:02.239877+00:00",
+        "status_code": null,
+        "latency_ms": 4.29,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:02.840112+00:00",
+        "status_code": null,
+        "latency_ms": 3.23,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:04.480981+00:00",
+        "status_code": null,
+        "latency_ms": 1034.44,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:05.110645+00:00",
+        "status_code": null,
+        "latency_ms": 6.53,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:06.755158+00:00",
+        "status_code": null,
+        "latency_ms": 1016.9,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:07.390610+00:00",
+        "status_code": null,
+        "latency_ms": 3.67,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:08.051634+00:00",
+        "status_code": null,
+        "latency_ms": 8.18,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:09.697834+00:00",
+        "status_code": null,
+        "latency_ms": 1020.25,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:10.390631+00:00",
+        "status_code": null,
+        "latency_ms": 9.83,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:11.001958+00:00",
+        "status_code": null,
+        "latency_ms": 5.27,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:12.640955+00:00",
+        "status_code": null,
+        "latency_ms": 1031.99,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:13.238251+00:00",
+        "status_code": null,
+        "latency_ms": 2.98,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:13.888952+00:00",
+        "status_code": null,
+        "latency_ms": 15.81,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:15.489884+00:00",
+        "status_code": null,
+        "latency_ms": 1014.87,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:16.128660+00:00",
+        "status_code": null,
+        "latency_ms": 4.32,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:16.764759+00:00",
+        "status_code": null,
+        "latency_ms": 9.91,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:18.430440+00:00",
+        "status_code": null,
+        "latency_ms": 1012.09,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:19.062618+00:00",
+        "status_code": null,
+        "latency_ms": 4.12,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:20.733745+00:00",
+        "status_code": null,
+        "latency_ms": 1033.51,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:21.338797+00:00",
+        "status_code": null,
+        "latency_ms": 3.03,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:22.069224+00:00",
+        "status_code": null,
+        "latency_ms": 3.59,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:23.713741+00:00",
+        "status_code": null,
+        "latency_ms": 1026.32,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:24.306576+00:00",
+        "status_code": null,
+        "latency_ms": 5.71,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:24.908599+00:00",
+        "status_code": null,
+        "latency_ms": 3.15,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:26.530276+00:00",
+        "status_code": null,
+        "latency_ms": 1023.74,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:27.161480+00:00",
+        "status_code": null,
+        "latency_ms": 5.13,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:27.809799+00:00",
+        "status_code": null,
+        "latency_ms": 4.16,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:29.473642+00:00",
+        "status_code": null,
+        "latency_ms": 1039.12,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:30.119498+00:00",
+        "status_code": null,
+        "latency_ms": 4.47,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:30.824221+00:00",
+        "status_code": null,
+        "latency_ms": 20.43,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:32.733894+00:00",
+        "status_code": null,
+        "latency_ms": 1027.39,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:33.341001+00:00",
+        "status_code": null,
+        "latency_ms": 4.13,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:33.978331+00:00",
+        "status_code": null,
+        "latency_ms": 11.79,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:35.583374+00:00",
+        "status_code": null,
+        "latency_ms": 1016.5,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:36.213708+00:00",
+        "status_code": null,
+        "latency_ms": 3.34,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:36.833573+00:00",
+        "status_code": null,
+        "latency_ms": 3.27,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:38.461676+00:00",
+        "status_code": null,
+        "latency_ms": 1014.83,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:39.091619+00:00",
+        "status_code": null,
+        "latency_ms": 4.38,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:40.737696+00:00",
+        "status_code": null,
+        "latency_ms": 1011.12,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:41.399243+00:00",
+        "status_code": null,
+        "latency_ms": 4.12,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:42.039151+00:00",
+        "status_code": null,
+        "latency_ms": 4.69,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:43.709746+00:00",
+        "status_code": null,
+        "latency_ms": 1030.15,
+        "success": false,
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "at": "2026-10-06T21:41:44.459317+00:00",
+        "status_code": 200,
+        "latency_ms": 122.94,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:41:45.074838+00:00",
+        "status_code": 200,
+        "latency_ms": 14.4,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:41:45.705173+00:00",
+        "status_code": 200,
+        "latency_ms": 19.76,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:41:46.385746+00:00",
+        "status_code": 200,
+        "latency_ms": 49.89,
+        "success": true,
+        "error": null
+      },
+      {
+        "at": "2026-10-06T21:41:47.057562+00:00",
+        "status_code": 200,
+        "latency_ms": 32.76,
+        "success": true,
+        "error": null
+      }
+    ]
+  },
+  "metrics": {
+    "availability": 0.12931034482758622,
+    "p95_latency_ms": 1032.07,
+    "error_rate": 0.8706896551724138,
+    "probe_count": 116,
+    "success_count": 15,
+    "failure_count": 101,
+    "error_rate_denominator": "all measured in-cluster HTTP requests during baseline, scale-down, and recovery",
+    "cpu_usage_percent": null,
+    "memory_usage_mb": null,
+    "restart_count": 0
+  }
+}

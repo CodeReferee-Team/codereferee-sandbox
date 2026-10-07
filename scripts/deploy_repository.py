@@ -19,6 +19,7 @@ from typing import Any
 import yaml
 
 from collect_baseline import kubectl_command, kubectl_environment, load_image_into_cluster
+from artifact_cleanup import cleanup_request_image
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +37,8 @@ def main() -> int:
         raise RuntimeError(f"A repository workspace already exists for requestId={request}.")
     workspace.mkdir()
     namespace_may_exist = False
+    image_load_attempted = False
+    image = None
     try:
         repository = workspace / "repository"
         clone(args.repository_url, args.branch, repository)
@@ -49,7 +52,10 @@ def main() -> int:
         if not dockerfile.is_file():
             raise RuntimeError(f"Required Dockerfile was not found: {profile.get('dockerfile', 'Dockerfile')}")
         build_context = repository / profile.get("buildContext", ".")
-        run(["docker", "build", "--tag", image, "--file", str(dockerfile), str(build_context)])
+        run(["docker", "build", "--tag", image, '--label', f'codereferee.request-id={request}', "--file", str(dockerfile), str(build_context)])
+        # Loading can partially succeed on a multi-node cluster before raising.
+        # Track the attempt independently from namespace creation.
+        image_load_attempted = True
         load_image_into_cluster(image)
         template = ROOT / profile["manifestTemplate"]
         if not template.is_file():
@@ -68,8 +74,14 @@ def main() -> int:
         }, ensure_ascii=False))
         return 0
     except Exception:
+        namespace_removed = not namespace_may_exist
         if namespace_may_exist:
-            delete_namespace(namespace)
+            namespace_removed = delete_namespace(namespace)
+        if image:
+            try:
+                cleanup_request_image(image, namespace, remove_from_kind=image_load_attempted and namespace_removed)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         raise
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
@@ -163,9 +175,13 @@ def wait_rollout(namespace: str, deployment: str, timeout: int) -> None:
     run(kubectl_command("rollout", "status", f"deployment/{deployment}", "-n", namespace, f"--timeout={timeout}s"))
 
 
-def delete_namespace(namespace: str) -> None:
-    subprocess.run(kubectl_command("delete", "namespace", namespace, "--ignore-not-found=true", "--wait=false"),
-                   text=True, capture_output=True, env=kubectl_environment())
+def delete_namespace(namespace: str) -> bool:
+    try:
+        result = subprocess.run(kubectl_command("delete", "namespace", namespace, "--ignore-not-found=true", '--wait=true', '--timeout=60s'),
+                       text=True, capture_output=True, env=kubectl_environment(), timeout=70)
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def run(command: list[str], *, cwd: Path | None = None, input_text: str | None = None) -> subprocess.CompletedProcess[str]:

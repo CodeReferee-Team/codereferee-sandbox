@@ -8,6 +8,29 @@
     "deployment": "quickbyte-api",
     "service": "quickbyte-api",
     "servicePort": 8080,
-    "labelSelector": "app.kubernetes.io/name=quickbyte-api"
+    "labelSelector": "app.kubernetes.io/name=quickbyte-api",
+    "dependencies": {
+      "database": {
+        "deployment": "quickbyte-postgres", "container": "postgres",
+        "labelSelector": "app.kubernetes.io/name=quickbyte-postgres",
+        "probePath": "/api/restaurants"
+      },
+      "redis": {
+        "deployment": "quickbyte-redis", "container": "redis",
+        "labelSelector": "app.kubernetes.io/name=quickbyte-redis",
+        "contextFromDeploymentEnv": {"password": "BOOTSTRAP_ADMIN_PASSWORD"},
+        "probeSpec": {
+          "setup": [
+            {"path": "/api/auth/login", "method": "POST", "body": {"email": "admin@quickbyte.local", "password": "${password}"}, "extract": {"token": "accessToken"}},
+            {"path": "/api/admin/restaurants", "method": "POST", "headers": {"Authorization": "Bearer ${token}"}, "body": {"name": "Chaos restaurant", "address": "Sandbox only", "deliveryFee": 0}, "extract": {"restaurant": "id"}},
+            {"path": "/api/admin/restaurants/${restaurant}/menu-items", "method": "POST", "headers": {"Authorization": "Bearer ${token}"}, "body": {"name": "Chaos meal", "price": 1, "available": true}, "extract": {"menu": "id"}}
+          ],
+          "steps": [
+            {"path": "/api/orders", "method": "POST", "headers": {"Authorization": "Bearer ${token}"}, "body": {"restaurantId": "${restaurant}", "deliveryAddress": "Sandbox only", "items": [{"menuItemId": "${menu}", "quantity": 1}]}, "extract": {"payment": "payment.id"}},
+            {"path": "/api/payments/${payment}/authorize", "method": "POST", "headers": {"Authorization": "Bearer ${token}"}, "body": {"providerReference": "sandbox-chaos"}}
+          ]
+        }
+      }
+    }
   }
 }
