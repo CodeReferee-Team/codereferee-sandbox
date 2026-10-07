@@ -3,17 +3,57 @@ import io
 import json
 import os
 import unittest
+import subprocess
 from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 
-from run_litmus_pod_delete import fault_environment, classify_result, measured_recovery_seconds, memory_megabytes, oom_during_experiment
+from run_litmus_pod_delete import fault_environment, classify_result, recovery_outcome, wait_for_result, measured_recovery_seconds, memory_megabytes, oom_during_experiment
 from in_cluster_probe import OBSERVER_CODE, InClusterProbe
 
 
 class RuntimeFaultTests(unittest.TestCase):
+    @patch('run_litmus_pod_delete.subprocess.run')
+    def test_terminal_litmus_error_is_returned_without_waiting_for_timeout(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, json.dumps({'items': [{
+            'metadata': {'name': 'engine-container-kill'}, 'status': {'experimentStatus': {
+                'verdict': 'Error', 'phase': 'Error', 'errorOutput': {'errorCode': 'PROBE_ERROR'}}}}]}), '')
+        result, probes = wait_for_result('namespace', 'engine', 1, None, 1)
+        self.assertEqual(result['verdict'], 'Error')
+        self.assertEqual(classify_result(result), 'infrastructure_error')
+        self.assertEqual(probes, [])
+        run.assert_called_once()
+
+    def test_litmus_probe_error_is_infrastructure_even_after_injection(self):
+        for verdict in ('Fail', 'Pass'):
+            result = {'verdict': verdict, 'raw': {'experimentStatus': {
+                'errorOutput': {'errorCode': 'PROBE_ERROR'}},
+                'history': {'targets': [{'chaosStatus': 'reverted'}]}}}
+            outcome = recovery_outcome(result, [{'success': True}] * 5)
+            self.assertEqual(outcome['observationStatus'], 'infrastructure_error')
+            self.assertIsNone(outcome['exitCode'])
+            self.assertIsNone(outcome['recovered'])
+
+    def test_valid_injection_recovery_uses_independent_http_not_litmus_verdict(self):
+        result = {'verdict': 'Fail', 'raw': {'experimentStatus': {
+            'errorOutput': {'errorCode': 'STATUS_CHECKS_ERROR'}},
+            'history': {'targets': [{'chaosStatus': 'reverted'}]}}}
+        outcome = recovery_outcome(result, [{'success': False}] + [{'success': True}] * 5)
+        self.assertEqual(outcome['observationStatus'], 'observed')
+        self.assertTrue(outcome['recovered'])
+        self.assertEqual(outcome['exitCode'], 0)
+        failed = recovery_outcome(result, [{'success': False}] * 5)
+        self.assertFalse(failed['recovered'])
+        self.assertEqual(failed['exitCode'], 1)
+
+    def test_litmus_pass_does_not_override_failed_or_missing_http_samples(self):
+        for probes in ([], [{'success': True}] * 4, [{'success': False}] * 5):
+            outcome = recovery_outcome({'verdict': 'Pass'}, probes)
+            self.assertFalse(outcome['recovered'])
+            self.assertEqual(outcome['exitCode'], 1)
+
     def test_transport_retries_are_separate_from_workload_failures(self):
         observer = InClusterProbe('test', 'api', 80)
         with patch.object(observer, 'request_once', side_effect=[ConnectionResetError('reset'),
