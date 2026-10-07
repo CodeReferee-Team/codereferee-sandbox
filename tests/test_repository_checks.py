@@ -35,15 +35,21 @@ class RepositoryChecksTests(unittest.TestCase):
         self.assertEqual(report['test_execution'], 'not_declared')
         self.assertFalse(report['verification_declared'])
         self.assertEqual([s['name'] for s in report['steps']], ['install'])
-        command = next(c.args[0] for c in run.call_args_list if c.args[0][:2] == ['docker', 'run'])
+        command = next(c.args[0] for c in run.call_args_list if '--user' in c.args[0])
         self.assertIn('--cap-drop', command)
+        self.assertIn('1000:1000', command)
+        self.assertNotIn('--cap-add', command)
         self.assertIn('2g', command)
         self.assertNotIn('docker.sock', ' '.join(command))
+        self.assertIn('readonly', ' '.join(command))
+        setup = next(c.args[0] for c in run.call_args_list if '--cap-add' in c.args[0])
+        self.assertIn('none', setup)
+        self.assertNotIn('type=bind', ' '.join(setup))
 
     @patch('repository_checks.subprocess.run')
     def test_actual_test_failure_preserves_stage_and_exit_code(self, run):
         self.node({'test': 'node --test'})
-        run.side_effect = [subprocess.CompletedProcess([], 0, '', ''),
+        run.side_effect = [subprocess.CompletedProcess([], 0, '', ''), subprocess.CompletedProcess([], 0, '', ''),
             subprocess.CompletedProcess([], 0, '', ''),
             subprocess.CompletedProcess([], 3, 'test output', 'assertion failed'),
             subprocess.CompletedProcess([], 0, '', '')]
@@ -65,15 +71,15 @@ class RepositoryChecksTests(unittest.TestCase):
     @patch('repository_checks.subprocess.run')
     def test_timeout_removes_only_its_own_check_container(self, run):
         self.node({})
-        run.side_effect = [subprocess.CompletedProcess([], 0, '', ''),
+        run.side_effect = [subprocess.CompletedProcess([], 0, '', ''), subprocess.CompletedProcess([], 0, '', ''),
             subprocess.TimeoutExpired('docker', 1), subprocess.CompletedProcess([], 0, '', ''),
             subprocess.CompletedProcess([], 0, '', '')]
         with self.assertRaises(CheckFailure) as failure:
             verify_repository(self.root, self.cache, 'test', timeout=1)
         self.assertTrue(failure.exception.report['timed_out'])
         self.assertTrue(failure.exception.report['check_container_cleanup']['removed'])
-        original = run.call_args_list[1].args[0]
-        cleanup = run.call_args_list[2].args[0]
+        original = run.call_args_list[2].args[0]
+        cleanup = run.call_args_list[3].args[0]
         self.assertEqual(cleanup, ['docker', 'rm', '--force', original[original.index('--name')+1]])
         self.assertTrue(failure.exception.report['check_cache_cleanup']['removed'])
 
@@ -100,3 +106,15 @@ class RepositoryChecksTests(unittest.TestCase):
         self.write('gradlew', 'wrapper')
         self.write('modules/api/src/test/java/ExampleTest.java', 'test')
         self.assertEqual(check_plan(self.root)['test'], ['sh', './gradlew', 'test', '--no-daemon'])
+
+    @patch('repository_checks.subprocess.run')
+    def test_node_setup_failure_is_infrastructure_and_cache_is_removed(self, run):
+        self.node({})
+        run.side_effect = [subprocess.CompletedProcess([], 0, '', ''),
+            subprocess.CompletedProcess([], 125, '', 'volume setup failed'),
+            subprocess.CompletedProcess([], 0, '', '')]
+        with self.assertRaises(CheckFailure) as failure:
+            verify_repository(self.root, self.cache, 'test')
+        self.assertIsNone(failure.exception.report['exit_code'])
+        self.assertTrue(failure.exception.report['infrastructure_error'])
+        self.assertTrue(failure.exception.report['check_cache_cleanup']['removed'])
