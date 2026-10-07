@@ -40,6 +40,7 @@ class RequestMetrics:
         self.stop = threading.Event()
         self.thread = None
         self.bindings = {}
+        self.bindings_lock = threading.Lock()
         self.started = time.time()
         self.report = {'schema_version': 'metrics-observation.v1',
             'status': 'pending' if self.enabled else 'disabled',
@@ -68,8 +69,9 @@ class RequestMetrics:
         labels = {'codereferee_request_id': self.request_id, 'codereferee_cluster': self.cluster,
                   'namespace': self.target['namespace']}
         matchers = [k + '=' + json.dumps(v) for k, v in labels.items()]
-        if self.bindings:
+        with self.bindings_lock:
             names = sorted({value['pod'] for value in self.bindings.values()})
+        if names:
             matchers.append('pod=~' + json.dumps('|'.join(re.escape(name) for name in names)))
         return metric + '{' + ','.join(matchers) + '}'
 
@@ -90,12 +92,13 @@ class RequestMetrics:
             for container in pod.get('spec', {}).get('containers', []):
                 key = (metadata['uid'], container['name'])
                 status = statuses.get(container['name'], {})
-                binding = self.bindings.setdefault(key, {'pod': metadata['name'], 'uid': metadata['uid'],
-                    'container': container['name'], 'node': pod.get('spec', {}).get('nodeName'),
-                    'first_observed_at': now, 'restart_count_initial': status.get('restartCount'),
-                    'resources': container.get('resources', {}), 'created_at': metadata.get('creationTimestamp')})
-                binding.update(last_observed_at=now, restart_count_final=status.get('restartCount'),
-                    container_id=status.get('containerID'), deletion_timestamp=metadata.get('deletionTimestamp'))
+                with self.bindings_lock:
+                    binding = self.bindings.setdefault(key, {'pod': metadata['name'], 'uid': metadata['uid'],
+                        'container': container['name'], 'node': pod.get('spec', {}).get('nodeName'),
+                        'first_observed_at': now, 'restart_count_initial': status.get('restartCount'),
+                        'resources': container.get('resources', {}), 'created_at': metadata.get('creationTimestamp')})
+                    binding.update(last_observed_at=now, restart_count_final=status.get('restartCount'),
+                        container_id=status.get('containerID'), deletion_timestamp=metadata.get('deletionTimestamp'))
 
     def watch(self):
         while not self.stop.wait(2):
@@ -112,7 +115,7 @@ class RequestMetrics:
             if not self.remote or not self.query_base:
                 raise ValueError('Both METRICS_REMOTE_WRITE_URL and METRICS_QUERY_URL must be configured.')
             self.query_base = receiver_url(self.query_base)
-            rendered = wiring.render(self.remote, self.request_id, self.cluster, self.target['namespace'])
+            rendered = wiring.render(self.remote, self.request_id, self.cluster, self.target['namespace'], self.target['deployment'])
             self.attempted = True  # apply can partially succeed
             wiring.apply(rendered)
             for workload in wiring.WORKLOADS:
@@ -177,7 +180,8 @@ class RequestMetrics:
             self.stop.set()
             if self.thread:
                 self.thread.join(timeout=6)
-            self.report['pod_bindings'] = list(self.bindings.values())
+            with self.bindings_lock:
+                self.report['pod_bindings'] = list(self.bindings.values())
             if self.attempted:
                 self.report['cleanup']['attempted'] = True
                 try:

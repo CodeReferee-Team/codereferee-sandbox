@@ -8,7 +8,7 @@ import install_observability as wiring
 
 class ObservabilityTests(unittest.TestCase):
     def test_request_namespace_and_container_filter(self):
-        text = wiring.render('http://receiver:9090/api/v1/write', 'run-1', 'local', 'codereferee-run-1')
+        text = wiring.render('http://receiver:9090/api/v1/write', 'run-1', 'local', 'codereferee-run-1', 'api')
         documents = list(yaml.safe_load_all(text))
         namespace = wiring.observation_namespace('run-1', 'codereferee-run-1')
         self.assertEqual(documents[0]['metadata']['name'], namespace)
@@ -19,6 +19,7 @@ class ObservabilityTests(unittest.TestCase):
         for scrape in config['scrape_configs']:
             self.assertEqual(scrape['kubernetes_sd_configs'][0]['namespaces']['names'], [namespace])
         self.assertIn('codereferee-run-1', str(config['scrape_configs'][0]['metric_relabel_configs']))
+        self.assertIn('api-[a-z0-9]+-[a-z0-9]+', str(config['scrape_configs'][0]['metric_relabel_configs']))
         self.assertNotIn('${', str(documents))
         self.assertNotEqual(namespace, wiring.observation_namespace('run-2', 'codereferee-run-2'))
 

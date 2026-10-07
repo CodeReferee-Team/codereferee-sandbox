@@ -244,6 +244,10 @@ data:
           - source_labels: [namespace]
             action: keep
             regex: "${TARGET_NAMESPACE}"
+          # Request summaries must not include observer/Litmus helper/dependency pods.
+          - source_labels: [pod]
+            action: keep
+            regex: "${TARGET_POD_PATTERN}"
           - regex: container_label_io_kubernetes_(pod_namespace|pod_name|container_name)
             action: labeldrop
           # 컨테이너 이름이 없는 집계 시계열(cgroup 상위 노드, pause 컨테이너)은 버린다.

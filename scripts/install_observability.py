@@ -40,7 +40,7 @@ def main() -> int:
         uninstall(observation_namespace(args.request_id, args.target_namespace or ('codereferee-' + args.request_id)))
         return 0
 
-    rendered = render(args.remote_write_url, args.request_id, args.cluster_name, args.target_namespace)
+    rendered = render(args.remote_write_url, args.request_id, args.cluster_name, args.target_namespace, args.deployment)
     namespace = observation_namespace(args.request_id, args.target_namespace or ('codereferee-' + args.request_id))
     apply(rendered)
     for workload in WORKLOADS:
@@ -56,7 +56,7 @@ def observation_namespace(request_id: str, target_namespace: str) -> str:
     return 'codereferee-metrics-' + hashlib.sha256((request_id + ':' + target_namespace).encode()).hexdigest()[:16]
 
 
-def render(remote_write_url: str, request_id: str, cluster_name: str, target_namespace: str | None = None) -> str:
+def render(remote_write_url: str, request_id: str, cluster_name: str, target_namespace: str | None = None, deployment: str | None = None) -> str:
     """Substitute Sandbox-owned placeholders, as k8s/quickbyte-demo.yaml does."""
     target_namespace = target_namespace or ('codereferee-' + request_id)
     remote = urlparse(remote_write_url)
@@ -66,11 +66,14 @@ def render(remote_write_url: str, request_id: str, cluster_name: str, target_nam
         raise ValueError('Invalid request or cluster identity.')
     if not re.fullmatch(r'codereferee-[a-z0-9-]{1,51}', target_namespace):
         raise ValueError('Observation is restricted to a CodeReferee request namespace.')
+    if deployment and not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,62}', deployment):
+        raise ValueError('Invalid Deployment identity.')
     values = {
         "${REMOTE_WRITE_URL}": remote_write_url,
         "${REQUEST_ID}": request_id,
         "${CLUSTER_NAME}": cluster_name,
         '${TARGET_NAMESPACE}': target_namespace,
+        '${TARGET_POD_PATTERN}': deployment + '-[a-z0-9]+-[a-z0-9]+' if deployment else '.+',
     }
     rendered = MANIFEST.read_text(encoding="utf-8")
     # PriorityClass remains a shared cluster prerequisite; namespaced resources
@@ -162,6 +165,7 @@ def parse_args() -> argparse.Namespace:
                         help="Stamped on every sample so the receiver can separate runs.")
     parser.add_argument("--cluster-name", default="codereferee")
     parser.add_argument('--target-namespace')
+    parser.add_argument('--deployment', help='Keep only this Deployment Pod family in request container metrics.')
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--uninstall", action="store_true")
     return parser.parse_args()
