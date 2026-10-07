@@ -11,14 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from collect_baseline import kubectl_command, kubectl_environment
+from in_cluster_probe import InClusterProbe
+from run_litmus_pod_delete import measured_recovery_seconds
 from run_pod_kill_experiment import (
-    collect_probes,
     get_ready_pod,
     get_target_configuration,
     metrics_from_probes,
-    start_port_forward,
-    stop_process,
-    wait_for_service,
 )
 
 
@@ -29,39 +27,53 @@ def main() -> int:
     initial_pod_uids = {pod["uid"] for pod in ready_pods(target)}
     configuration = get_target_configuration(target["namespace"], target["deployment"])
     started_at = now_utc()
-    forward = start_port_forward(target["namespace"], target["service"], target["servicePort"], args.local_port)
-    try:
-        wait_for_service(forward, args.local_port, args.request_timeout_seconds)
-        baseline = collect_probes(args.local_port, args.baseline_probes, args.request_timeout_seconds)
+    with InClusterProbe(target['namespace'], target['service'], target['servicePort'],
+                        local_port=args.local_port, timeout=args.request_timeout_seconds,
+                        path=getattr(args, 'probe_path', '/')) as observer:
+        baseline = {'probes': observer.collect(args.baseline_probes)}
+        if not all(p['success'] for p in baseline['probes']):
+            raise RuntimeError('Rollout baseline is unhealthy; restart skipped.')
         fault_started = time.monotonic()
+        started_at = now_utc()
         kubectl(target["namespace"], "rollout", "restart", f"deployment/{target['deployment']}")
-        fault_probes = collect_until_replacement(
-            target, initial_pod_uids, args.local_port, args.request_timeout_seconds, args.recovery_timeout_seconds
-        )
-        replacement = wait_for_replacement(target, initial_pod_uids, args.recovery_timeout_seconds)
-        kubectl(target["namespace"], "rollout", "status", f"deployment/{target['deployment']}",
-                f"--timeout={args.recovery_timeout_seconds}s")
-        stop_process(forward)
-        forward = start_port_forward(target["namespace"], target["service"], target["servicePort"], args.local_port)
-        wait_for_service(forward, args.local_port, args.recovery_timeout_seconds)
-        recovery_probes = collect_probes(args.local_port, args.recovery_probes, args.request_timeout_seconds)
-    finally:
-        stop_process(forward)
+        fault_probes = []
+        recovered = False
+        replacement = {}
+        deadline = time.monotonic() + args.recovery_timeout_seconds
+        consecutive = 0
+        while time.monotonic() < deadline:
+            probe = observer.probe()
+            fault_probes.append(probe)
+            pods = ready_pods(target)
+            replaced = len(pods) >= configuration['replicas'] and all(p['uid'] not in initial_pod_uids for p in pods)
+            consecutive = consecutive + 1 if replaced and probe['success'] else 0
+            if consecutive >= args.recovery_probes:
+                replacement = pods[0]
+                recovered = True
+                break
+            time.sleep(0.5)
+        recovery_probes = {'probes': []}
 
     probes = [*baseline["probes"], *fault_probes, *recovery_probes["probes"]]
-    denominator = "all HTTP GET / probes collected during baseline, rollout restart, and replacement verification; readiness wait probes are excluded"
+    denominator = 'all measured in-cluster HTTP requests during baseline, rollout restart, and replacement verification'
     baseline_metrics = metrics_from_probes(baseline["probes"])
     baseline_metrics["error_rate_denominator"] = "all HTTP GET / probes collected during baseline; readiness wait probes are excluded"
     observed_metrics = metrics_from_probes(probes)
     observed_metrics["error_rate_denominator"] = denominator
     output = {
         "schemaVersion": "chaos-v1", "scenario": "rollout_restart", "observationStatus": "observed",
+        'exitCode': 0 if recovered else 1, 'timedOut': not recovered,
+        'probeTransport': 'in_cluster_http',
+        'probes': {'baseline': baseline['probes'], 'experiment': fault_probes},
         "target": target, "replicas": configuration["replicas"], "baseline": {"metrics": baseline_metrics},
         "metrics": observed_metrics,
         "chaos_observation": {
             "type": "rollout_restart", "kill_method": "kubectl_rollout_restart", "started_at": started_at,
-            "recovered_at": now_utc(), "recovery_seconds": round(time.monotonic() - fault_started, 2),
-            "target_pod_uid": source_pod["uid"], "replacement_pod_uid": replacement["uid"],
+            'recovered': recovered,
+            "recovered_at": now_utc() if recovered else None,
+            "recovery_seconds": measured_recovery_seconds(fault_probes),
+            'experiment_duration_seconds': round(time.monotonic() - fault_started, 2),
+            "target_pod_uid": source_pod["uid"], "replacement_pod_uid": replacement.get('uid'),
             "target_configuration": configuration,
             "rollout_operation": {"deployment": target["deployment"], "strategy": "kubectl rollout restart"},
             "observation_window": {"baseline_probe_count": args.baseline_probes,
@@ -69,13 +81,14 @@ def main() -> int:
                                    "error_rate_denominator": denominator},
             "abort_condition": {"triggered": False, "reason": None},
         },
+        'source': {'real_execution_observed': True, 'target': target['deployment']},
     }
     rendered = json.dumps(output, ensure_ascii=False, indent=2)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered + "\n", encoding="utf-8")
     print(rendered)
-    return 0
+    return 0 if recovered else 1
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,6 +103,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-timeout-seconds", type=float, default=2.0)
     parser.add_argument("--recovery-timeout-seconds", type=int, default=180)
     parser.add_argument("--local-port", type=int, default=18083)
+    parser.add_argument('--probe-path', default='/')
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
@@ -115,28 +129,6 @@ def ready_pods(target: dict[str, Any]) -> list[dict[str, Any]]:
         and any(condition.get("type") == "Ready" and condition.get("status") == "True"
                 for condition in item.get("status", {}).get("conditions", []))
     ]
-
-
-def wait_for_replacement(target: dict[str, Any], initial_pod_uids: set[str], timeout_seconds: int) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        replacements = [pod for pod in ready_pods(target) if pod["uid"] not in initial_pod_uids]
-        if replacements:
-            return replacements[0]
-        time.sleep(1)
-    raise TimeoutError("Timed out waiting for a replacement Ready Pod after rollout restart.")
-
-
-def collect_until_replacement(target: dict[str, Any], initial_pod_uids: set[str], local_port: int,
-                              timeout_seconds: float, recovery_timeout_seconds: int) -> list[dict[str, Any]]:
-    from run_pod_kill_experiment import probe_once
-    deadline = time.monotonic() + recovery_timeout_seconds
-    probes: list[dict[str, Any]] = []
-    while time.monotonic() < deadline:
-        probes.append(probe_once(local_port, timeout_seconds))
-        if any(pod["uid"] not in initial_pod_uids for pod in ready_pods(target)):
-            return probes
-    raise TimeoutError("Timed out observing rollout replacement.")
 
 
 def now_utc() -> str:
