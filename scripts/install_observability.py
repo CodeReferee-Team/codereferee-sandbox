@@ -22,7 +22,10 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from collect_baseline import kubectl_command, kubectl_environment
+try:
+    from .collect_baseline import kubectl_command, kubectl_environment
+except ImportError:
+    from collect_baseline import kubectl_command, kubectl_environment
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -143,7 +146,7 @@ def uninstall(namespace: str) -> None:
 
 def run(command: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(command, input=input_text, text=True, capture_output=True,
-                               env=kubectl_environment(), timeout=180)
+                               env=kubectl_environment(), timeout=180, encoding='utf-8', errors='replace')
     if completed.returncode:
         message = completed.stderr.strip() or completed.stdout.strip() or "command failed"
         raise RuntimeError(f"{' '.join(command[:3])}: {message}")
