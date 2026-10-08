@@ -123,6 +123,7 @@ def junit_test_count(repository: Path, stack: str) -> int | None:
 
 
 def verify_repository(repository: Path, cache: Path, request: str, *, timeout: int = 600) -> dict:
+    started = time.monotonic()
     # Validate before creating any resources. Linux package caches do not belong
     # on a slow Windows bind mount or in the submitted source/build context.
     plan = check_plan(repository)
@@ -139,7 +140,35 @@ def verify_repository(repository: Path, cache: Path, request: str, *, timeout: i
             'outcome': 'failed', 'test_execution': 'not_attempted', 'verification_declared': plan['declared']})
     report = {}
     try:
-        report = _verify_repository(repository, volume, request, timeout=timeout)
+        if plan['stack'] == 'node':
+            # Trusted setup only: fresh cache volume, no source mount, no
+            # network and no submitted commands. Repository code never gets
+            # CAP_CHOWN; all check steps run as uid 1000 with cap-drop ALL.
+            setup_name = 'codereferee-check-setup-' + uuid4().hex[:16]
+            try:
+                initialized = subprocess.run(['docker', 'run', '--rm', '--name', setup_name, '--network', 'none',
+                    '--cpus', '0.5', '--memory', '128m', '--pids-limit', '32',
+                    '--cap-drop', 'ALL', '--cap-add', 'CHOWN', '--security-opt', 'no-new-privileges',
+                    '--mount', f'type=volume,source={volume},target=/cache', plan['image'],
+                    'sh', '-ec', 'mkdir -p /cache/workspace /cache/npm /cache/node-home; chown 1000:1000 /cache /cache/workspace /cache/npm /cache/node-home'], text=True, capture_output=True,
+                    env=environment, timeout=min(120, max(1, timeout - (time.monotonic() - started))))
+                setup_code, setup_error = initialized.returncode, initialized.stderr[-2000:]
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                setup_code, setup_error = None, 'Node workspace setup failed or exceeded its bounded execution window.'
+                if isinstance(exc, subprocess.TimeoutExpired):
+                    report['timed_out'] = True
+                    try:
+                        removed = subprocess.run(['docker', 'rm', '--force', setup_name], text=True,
+                            capture_output=True, env=environment, timeout=30)
+                        report['check_setup_container_cleanup'] = {'removed': removed.returncode == 0}
+                    except (OSError, subprocess.TimeoutExpired):
+                        report['check_setup_container_cleanup'] = {'removed': False}
+            if setup_code != 0:
+                report.update(steps=[{'name': 'prepare', 'stderr': setup_error}],
+                    failed_step='prepare', exit_code=None, infrastructure_error=True,
+                    outcome='failed', test_execution='not_attempted', verification_declared=plan['declared'])
+                raise CheckFailure(report)
+        report = _verify_repository(repository, volume, request, timeout=max(1, timeout - (time.monotonic() - started)))
         return report
     except CheckFailure as failure:
         report = failure.report
@@ -164,6 +193,11 @@ def _verify_repository(repository: Path, cache_name: str, request: str, *, timeo
     # Installed packages persist across check steps, but stay in the disposable
     # request cache instead of the API host or the app Docker build context.
     env = {'GRADLE_USER_HOME': '/cache/gradle', 'PYTHONUSERBASE': '/cache/python'}
+    if plan['stack'] == 'node':
+        # Native package archives preserve ownership when extracted as root.
+        # Run npm as the image's unprivileged node user instead of granting
+        # CAP_CHOWN or trusting archive uid/gid on a Windows source mount.
+        env.update(HOME='/cache/node-home', NPM_CONFIG_CACHE='/cache/npm')
     if plan['stack'] == 'python':
         env['PATH'] = '/cache/python/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     env.update(plan['env'])
@@ -171,17 +205,29 @@ def _verify_repository(repository: Path, cache_name: str, request: str, *, timeo
     if plan['build']: phases.append(('build', plan['build']))
     if plan['test']: phases.append(('test', plan['test']))
     deadline = time.monotonic() + timeout
-    for phase, arguments in phases:
+    for index, (phase, arguments) in enumerate(phases):
         if plan['stack'] == 'python' and arguments[:4] == ['python', '-m', 'pip', 'install']:
             arguments = arguments[:4] + ['--user', '--disable-pip-version-check'] + arguments[4:]
         name = 'codereferee-check-' + uuid4().hex[:16]
+        source_mount = f'type=bind,source={repository.resolve()},target=/workspace'
+        workdir = '/workspace/' + plan['workingDirectory']
+        executable = arguments
+        if plan['stack'] == 'node':
+            source_mount = f'type=bind,source={repository.resolve()},target=/source,readonly'
+            workdir = '/cache/workspace/' + plan['workingDirectory']
+            if index == 0:
+                workdir = '/cache'
+                executable = ['sh', '-ec', 'cp -R /source/. /cache/workspace; cd "/cache/workspace/$1"; shift; exec "$@"',
+                              'codereferee-node-copy', plan['workingDirectory'], *arguments]
         command = ['docker', 'run', '--rm', '--name', name, '--cpus', '2', '--memory', '2g',
             '--pids-limit', '512', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
-            '--mount', f'type=bind,source={repository.resolve()},target=/workspace',
+            '--mount', source_mount,
             '--mount', f'type=volume,source={cache_name},target=/cache',
-            '--workdir', '/workspace/' + plan['workingDirectory']]
+            '--workdir', workdir]
+        if plan['stack'] == 'node':
+            command.extend(['--user', '1000:1000'])
         for key, value in env.items(): command.extend(['--env', key + '=' + value])
-        command.extend([plan['image'], *arguments])
+        command.extend([plan['image'], *executable])
         started = time.monotonic()
         timed_out = False
         try:

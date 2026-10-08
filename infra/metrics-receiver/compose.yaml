@@ -1,0 +1,23 @@
+services:
+  receiver:
+    image: prom/prometheus:v3.1.0
+    container_name: codereferee-metrics-receiver
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-remote-write-receiver
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=24h
+    ports:
+      - 127.0.0.1:19091:9090
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - receiver_data:/prometheus
+    networks:
+      - sandbox_transport
+    restart: unless-stopped
+networks:
+  sandbox_transport:
+    external: true
+    name: kind
+volumes:
+  receiver_data:

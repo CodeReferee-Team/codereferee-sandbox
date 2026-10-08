@@ -5,8 +5,8 @@ Prometheus itself must not live here.  Chaos can kill this cluster at any
 moment and the cluster is torn down between requests, so anything that stores
 samples locally loses exactly the window we need.  What runs here is a
 Prometheus *agent*: it scrapes, and immediately forwards over remote_write to
-the long-lived Prometheus outside.  Nothing is stored and nothing is queryable
-on this side.
+the long-lived Prometheus outside. A bounded local WAL buffers pending samples;
+forced shutdown can still lose samples not acknowledged by the receiver.
 
 ``requestId`` is stamped on every sample as an external label.  Without it the
 receiver cannot tell one validation run's samples from another's.
@@ -20,8 +20,12 @@ import re
 import subprocess
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
-from collect_baseline import kubectl_command, kubectl_environment
+try:
+    from .collect_baseline import kubectl_command, kubectl_environment
+except ImportError:
+    from collect_baseline import kubectl_command, kubectl_environment
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,29 +37,50 @@ WORKLOADS = ("daemonset/cadvisor", "daemonset/node-exporter", "deployment/codere
 def main() -> int:
     args = parse_args()
     if args.uninstall:
-        uninstall()
-        print(f"removed namespace {NAMESPACE}")
+        uninstall(observation_namespace(args.request_id, args.target_namespace or ('codereferee-' + args.request_id)))
         return 0
 
-    rendered = render(args.remote_write_url, args.request_id, args.cluster_name)
+    rendered = render(args.remote_write_url, args.request_id, args.cluster_name, args.target_namespace, args.deployment)
+    namespace = observation_namespace(args.request_id, args.target_namespace or ('codereferee-' + args.request_id))
     apply(rendered)
     for workload in WORKLOADS:
-        wait_ready(workload, args.timeout)
-    wait_agent_config(config_hash(rendered), args.timeout)
-    print(f"observability wiring is ready in {NAMESPACE}")
+        wait_ready(workload, args.timeout, namespace)
+    wait_agent_config(config_hash(rendered), args.timeout, namespace)
+    print(f"observability wiring is ready in {namespace}")
     print(f"  requestId    = {args.request_id}")
     print(f"  remote_write = {args.remote_write_url}")
     return 0
 
 
-def render(remote_write_url: str, request_id: str, cluster_name: str) -> str:
+def observation_namespace(request_id: str, target_namespace: str) -> str:
+    return 'codereferee-metrics-' + hashlib.sha256((request_id + ':' + target_namespace).encode()).hexdigest()[:16]
+
+
+def render(remote_write_url: str, request_id: str, cluster_name: str, target_namespace: str | None = None, deployment: str | None = None) -> str:
     """Substitute Sandbox-owned placeholders, as k8s/quickbyte-demo.yaml does."""
+    target_namespace = target_namespace or ('codereferee-' + request_id)
+    remote = urlparse(remote_write_url)
+    if remote.scheme not in {'http', 'https'} or not remote.hostname or remote.username or remote.password or remote.query or remote.fragment or any(c in remote_write_url for c in '\n\r"\\'):
+        raise ValueError('remote-write URL must be an HTTP receiver URL without embedded credentials.')
+    if not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', request_id) or not re.fullmatch(r'[a-z0-9-]{1,63}', cluster_name):
+        raise ValueError('Invalid request or cluster identity.')
+    if not re.fullmatch(r'codereferee-[a-z0-9-]{1,51}', target_namespace):
+        raise ValueError('Observation is restricted to a CodeReferee request namespace.')
+    if deployment and not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,62}', deployment):
+        raise ValueError('Invalid Deployment identity.')
     values = {
         "${REMOTE_WRITE_URL}": remote_write_url,
         "${REQUEST_ID}": request_id,
         "${CLUSTER_NAME}": cluster_name,
+        '${TARGET_NAMESPACE}': target_namespace,
+        '${TARGET_POD_PATTERN}': deployment + '-[a-z0-9]+-[a-z0-9]+' if deployment else '.+',
     }
     rendered = MANIFEST.read_text(encoding="utf-8")
+    # PriorityClass remains a shared cluster prerequisite; namespaced resources
+    # and discovery are private to this request, not a mutable global Agent.
+    rendered = rendered.replace('namespace: codereferee-observability', 'namespace: ' + observation_namespace(request_id, target_namespace))
+    rendered = rendered.replace('name: codereferee-observability\n  labels:', 'name: ' + observation_namespace(request_id, target_namespace) + '\n  labels:')
+    rendered = rendered.replace('names: [codereferee-observability]', 'names: [' + observation_namespace(request_id, target_namespace) + ']')
     for placeholder, value in values.items():
         rendered = rendered.replace(placeholder, value)
     # Substituted last so the hash covers the already-rendered agent config.
@@ -77,16 +102,16 @@ def apply(manifest: str) -> None:
     run(kubectl_command("apply", "-f", "-"), input_text=manifest)
 
 
-def wait_ready(workload: str, timeout: int) -> None:
+def wait_ready(workload: str, timeout: int, namespace: str = NAMESPACE) -> None:
     # Not `kubectl wait` on a pod selector: between apply and the controller
     # creating pods there is a window where no pod matches, and `wait` fails
     # immediately with "no matching resources found" instead of waiting.
     # `rollout status` waits for the controller as well as for readiness.
-    run(kubectl_command("rollout", "status", workload, "--namespace", NAMESPACE,
+    run(kubectl_command("rollout", "status", workload, "--namespace", namespace,
                         f"--timeout={timeout}s"))
 
 
-def wait_agent_config(expected: str, timeout: int) -> None:
+def wait_agent_config(expected: str, timeout: int, namespace: str = NAMESPACE) -> None:
     """Wait until a Ready agent pod is actually running the config we just applied.
 
     `rollout status` has a narrow window right after apply where the old
@@ -98,7 +123,7 @@ def wait_agent_config(expected: str, timeout: int) -> None:
     deadline = time.monotonic() + timeout
     while True:
         completed = run(kubectl_command(
-            "get", "pod", "--namespace", NAMESPACE,
+            "get", "pod", "--namespace", namespace,
             "--selector", "codereferee.io/component=agent", "--output", "json",
         ))
         for pod in json.loads(completed.stdout).get("items", []):
@@ -116,16 +141,15 @@ def wait_agent_config(expected: str, timeout: int) -> None:
         time.sleep(2)
 
 
-def uninstall() -> None:
-    subprocess.run(
-        kubectl_command("delete", "namespace", NAMESPACE, "--ignore-not-found=true", "--wait=false"),
-        text=True, capture_output=True, env=kubectl_environment(),
-    )
+def uninstall(namespace: str) -> None:
+    if not re.fullmatch(r'codereferee-metrics-[a-f0-9]{16}', namespace):
+        raise ValueError('Refusing cleanup outside an exact observation namespace.')
+    run(kubectl_command("delete", "namespace", namespace, "--ignore-not-found=true", "--wait=true", '--timeout=60s'))
 
 
 def run(command: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(command, input=input_text, text=True, capture_output=True,
-                               env=kubectl_environment())
+                               env=kubectl_environment(), timeout=180, encoding='utf-8', errors='replace')
     if completed.returncode:
         message = completed.stderr.strip() or completed.stdout.strip() or "command failed"
         raise RuntimeError(f"{' '.join(command[:3])}: {message}")
@@ -140,6 +164,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-id", default="local",
                         help="Stamped on every sample so the receiver can separate runs.")
     parser.add_argument("--cluster-name", default="codereferee")
+    parser.add_argument('--target-namespace')
+    parser.add_argument('--deployment', help='Keep only this Deployment Pod family in request container metrics.')
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--uninstall", action="store_true")
     return parser.parse_args()

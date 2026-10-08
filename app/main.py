@@ -104,6 +104,7 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="A Chaos v1 experiment is already running.")
 
     request_started = time.monotonic()
+    metrics_session = None
     try:
         deployed: dict[str, Any] | None = None
         deployed_target: ChaosTarget | None = None
@@ -112,6 +113,11 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
                 request = request.model_copy(update={'request_id': str(uuid4())})
             deployed = deploy_repository(request)
             deployed_target = ChaosTarget.model_validate(deployed["target"])
+        metrics_target = deployed_target or request.chaos_target
+        if metrics_target is not None:
+            from scripts.metrics_lifecycle import RequestMetrics
+            metrics_session = RequestMetrics(request.request_id or str(uuid4()), metrics_target.model_dump(by_alias=True))
+            metrics_session.start()
         if request.chaos_mode is None and deployed_target is not None:
             command = [sys.executable, str(SMOKE_SCRIPT), '--namespace', deployed_target.namespace,
                        '--service', deployed_target.service, '--service-port', str(deployed_target.service_port),
@@ -169,6 +175,10 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         )
         return result
     finally:
+        if metrics_session is not None:
+            metrics_report = metrics_session.finish()
+            if 'result' in locals():
+                result.setdefault('source', {})['metrics_observation'] = metrics_report
         if 'deployed_target' in locals() and deployed_target is not None:
             namespace_removed = cleanup_namespace(deployed_target.namespace)
             if deployed and deployed.get('image'):

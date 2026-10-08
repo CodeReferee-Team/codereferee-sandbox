@@ -3,7 +3,8 @@
 # 설계 근거 (2026-10-05 결정):
 # - 저장소는 샌드박스 안에 두지 않는다. 카오스로 강제 종료될 수 있고 비용 때문에
 #   인스턴스를 껐다 켜기 때문이다. 여기 뜨는 Prometheus는 agent 모드라 디스크가 없고,
-#   수집한 샘플을 생성 즉시 remote_write로 밖으로 내보낸다. 죽어도 잃을 데이터가 없다.
+#   샘플은 remote_write로 내보내지만 미전송 WAL은 강제 종료 시 잃을 수 있다.
+#   teardown 전에 수신 여부와 관측 구간의 누락을 확인해야 한다.
 # - kubelet 내장 cAdvisor는 housekeeping 주기가 10초라 1초로 긁어도 같은 값만 나온다.
 #   스파이크를 보려면 독립 cAdvisor를 1초 주기로 띄워야 한다.
 # - 카오스 실험은 app.kubernetes.io/name 라벨로 대상을 고르므로, 이 네임스페이스는
@@ -151,7 +152,8 @@ spec:
       automountServiceAccountToken: false
       priorityClassName: codereferee-observability
       hostPID: true
-      hostNetwork: true
+      # Private pod address avoids request agents competing for host port 9100.
+      hostNetwork: false
       containers:
         - name: node-exporter
           image: quay.io/prometheus/node-exporter:v1.8.2
@@ -237,6 +239,15 @@ data:
             target_label: pod
           - source_labels: [container_label_io_kubernetes_container_name]
             target_label: container
+          # Shared developer clusters also contain other jobs and system pods.
+          # Never stamp their container usage as if it belonged to this request.
+          - source_labels: [namespace]
+            action: keep
+            regex: "${TARGET_NAMESPACE}"
+          # Request summaries must not include observer/Litmus helper/dependency pods.
+          - source_labels: [pod]
+            action: keep
+            regex: "${TARGET_POD_PATTERN}"
           - regex: container_label_io_kubernetes_(pod_namespace|pod_name|container_name)
             action: labeldrop
           # 컨테이너 이름이 없는 집계 시계열(cgroup 상위 노드, pause 컨테이너)은 버린다.
