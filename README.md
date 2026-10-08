@@ -9,6 +9,7 @@ CodeReferee의 Kubernetes 기반 실행 및 카오스 관측 컴포넌트입니�
 - [QuickByte 로컬 Kubernetes·Litmus 재현](docs/local-chaos-quickstart.md)
 - [메트릭 수집 배선](docs/metrics-collection.md)
 - [요청별 메트릭 파이프라인·실측](docs/metrics-request-lifecycle.md)
+- [Mac/Linux 로컬 Sandbox 준비](docs/posix-bootstrap.md)
 - [Runtime Chaos 시나리오·검사 묶음·전체 연동](docs/runtime-chaos-scenarios.md)
 - [범용 레포 실행 설정·자동 탐색](docs/repository-execution-plans.md)
 
