@@ -351,7 +351,9 @@ def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         runtime.mkdir(exist_ok=True)
         # requestId is external metadata, not a filesystem path.
         patch_path = runtime / f"patch-{uuid4().hex}.diff"
-        patch_path.write_text(request.patch_diff, encoding="utf-8")
+        # Preserve diff bytes across Windows/Linux. Platform newline translation
+        # adds CR to LF context lines and makes git apply reject an LF checkout.
+        patch_path.write_text(request.patch_diff, encoding="utf-8", newline="\n")
         command.extend(["--patch-file", str(patch_path)])
     try:
         child_environment = os.environ.copy()

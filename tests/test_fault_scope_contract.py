@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from app.main import ChaosTarget, RepositoryValidationRequest, experiment_command, validate_repository
+from app.main import ChaosTarget, RepositoryValidationRequest, deploy_repository, experiment_command, validate_repository
 from run_litmus_pod_delete import SCENARIOS, apply, fault_environment, scope_evidence, selected_pod_after
 
 
@@ -38,6 +38,20 @@ class FaultScopeContractTests(unittest.TestCase):
         self.assertNotIn('--pods-affected-count', experiment_command(self.request(), self.target()))
         command = experiment_command(self.request(podsAffectedCount=1), self.target())
         self.assertEqual(command[command.index('--pods-affected-count') + 1], '1')
+
+    def test_patch_file_preserves_lf_bytes_for_git_apply_on_windows(self):
+        diff = '--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n'
+        request = self.request(requestId='patch-line-endings', patchDiff=diff)
+        paths = []
+        def execute(command, **kwargs):
+            path = Path(command[command.index('--patch-file') + 1])
+            paths.append(path)
+            self.assertEqual(path.read_bytes(), diff.encode('utf-8'))
+            return subprocess.CompletedProcess(command, 0, json.dumps({'target': {}}), '')
+        with patch('app.main.subprocess.run', side_effect=execute):
+            deploy_repository(request)
+        self.assertTrue(paths)
+        self.assertFalse(paths[0].exists(), 'Temporary patch must be removed.')
 
     def test_scope_is_rejected_before_deployment_for_unsupported_modes(self):
         for mode in (None, 'fixture', 'deployment_scale_down', 'rollout_restart', 'dependency_redis_outage'):
