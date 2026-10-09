@@ -77,6 +77,7 @@ class RepositoryValidationRequest(BaseModel):
     chaos_target: ChaosTarget | None = Field(default=None, alias="chaosTarget")
     deployment_profile: str | None = Field(default=None, alias="deploymentProfile")
     patch_diff: str | None = Field(default=None, alias="patchDiff")
+    pods_affected_count: int | None = Field(default=None, alias="podsAffectedCount", strict=True, ge=1, le=16)
 
 
 @app.get("/health")
@@ -100,6 +101,8 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
             modes = resolve_scenarios(request.chaos_mode)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if request.pods_affected_count is not None and not any(mode.startswith('litmus_') for mode in modes or []):
+        raise HTTPException(status_code=422, detail='podsAffectedCount requires a Litmus scenario; it does not limit scale/routing/dependency faults.')
     if not experiment_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A Chaos v1 experiment is already running.")
 
@@ -313,7 +316,7 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
             status_code=422,
             detail="litmus_pod_delete requires chaosTarget; fixture mode does not accept a target.",
         )
-    return [
+    command = [
         sys.executable, str(LITMUS_SCRIPT),
         "--namespace", target.namespace,
         "--deployment", target.deployment,
@@ -325,6 +328,9 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
         "--baseline-probes", "20",
         "--timeout-seconds", "240",
     ]
+    if request.pods_affected_count is not None:
+        command.extend(['--pods-affected-count', str(request.pods_affected_count)])
+    return command
 
 
 def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
