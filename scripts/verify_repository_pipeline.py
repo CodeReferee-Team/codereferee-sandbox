@@ -24,6 +24,7 @@ def main() -> int:
             "requestId": args.request_id,
             "chaosMode": args.chaos_mode,
             "deploymentProfile": args.deployment_profile,
+            "podsAffectedCount": args.pods_affected_count,
         }
     )
     result = validate_repository(request)
@@ -55,6 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-id", required=True)
     parser.add_argument("--chaos-mode", default="litmus_pod_delete")
     parser.add_argument("--deployment-profile")
+    parser.add_argument('--pods-affected-count', type=int,
+                        help='Optional exact Litmus target count; default retains all-Pod faults.')
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
