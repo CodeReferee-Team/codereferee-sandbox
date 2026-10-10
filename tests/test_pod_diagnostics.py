@@ -19,7 +19,7 @@ def owner(kind, uid):
 
 
 class PodDiagnosticsTests(unittest.TestCase):
-    def collect(self, waiting='CrashLoopBackOff', previous=True):
+    def collect(self, waiting='CrashLoopBackOff', previous=True, include_text=True):
         deployment = {'metadata': {'namespace': 'codereferee-test', 'uid': 'deployment-uid'}}
         rs = {'metadata': {'namespace': 'codereferee-test', 'uid': 'rs-uid',
                           'ownerReferences': owner('Deployment', 'deployment-uid')}}
@@ -54,7 +54,7 @@ class PodDiagnosticsTests(unittest.TestCase):
 
         with patch.object(diagnostics, 'kubectl_command', side_effect=lambda *args: ['kubectl', *args]), \
              patch.object(diagnostics.subprocess, 'run', side_effect=run):
-            result = diagnostics.collect_pod_diagnostics('codereferee-test', 'api')
+            result = diagnostics.collect_pod_diagnostics('codereferee-test', 'api', include_text=include_text)
         return result, commands
 
     def test_crashloop_logs_events_and_owned_scope(self):
@@ -74,6 +74,14 @@ class PodDiagnosticsTests(unittest.TestCase):
     def test_previous_logs_fall_back_to_current(self):
         report, _ = self.collect(previous=False)
         self.assertEqual(report['pods'][0]['containers'][0]['logs_source'], 'current')
+
+    def test_unresolved_secret_withholds_free_text_without_querying_secrets(self):
+        report, commands = self.collect(include_text=False)
+        self.assertIn('secret_redaction_unresolved_text_withheld', report['collection_errors'])
+        self.assertEqual(report['pods'][0]['logs_tail'], '')
+        self.assertEqual(report['pods'][0]['events'][0]['message'], '[WITHHELD]')
+        self.assertEqual(report['pods'][0]['events'][0]['reason'], 'Unhealthy')
+        self.assertFalse(any('logs' in command or 'secret' in command or 'secrets' in command for command in commands))
 
     def test_image_pull_reason_preserved_without_invented_diagnosis(self):
         report, _ = self.collect(waiting='ImagePullBackOff')
@@ -102,7 +110,7 @@ class PodDiagnosticsTests(unittest.TestCase):
             def clone(url, branch, destination):
                 destination.mkdir()
                 (destination / 'Dockerfile').write_text('FROM python:3.12-slim', encoding='utf-8')
-            def collect(*args):
+            def collect(*args, **kwargs):
                 order.append('collect')
                 return {'pods': [{'name': 'failed-pod'}]}
             def cleanup(*args):
