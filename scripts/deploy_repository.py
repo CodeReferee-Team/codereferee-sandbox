@@ -25,6 +25,7 @@ from collect_baseline import kubectl_command, kubectl_environment, load_image_in
 from artifact_cleanup import cleanup_request_image
 from execution_plan import ConfigurationRequired, inside, render_plan, resolve_plan
 from repository_checks import CheckFailure, verify_repository
+from pod_diagnostics import collect_pod_diagnostics, manifest_redaction_values
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +47,7 @@ def main() -> int:
     image = None
     stage = 'clone'
     checks = None
+    pod_diagnostics = None
     started = time.monotonic()
     try:
         repository = workspace / "repository"
@@ -92,7 +94,18 @@ def main() -> int:
         stage = 'run'
         apply(rendered)
         target["namespace"] = namespace
-        wait_rollout(namespace, target["deployment"], args.rollout_timeout_seconds)
+        try:
+            wait_rollout(namespace, target["deployment"], args.rollout_timeout_seconds)
+        except Exception:
+            # Collect while the failed Pods still exist. Failure to collect must
+            # never replace the original deployment failure or prevent cleanup.
+            try:
+                values, unresolved = manifest_redaction_values(rendered, namespace)
+                pod_diagnostics = collect_pod_diagnostics(namespace, target['deployment'], values,
+                                                          include_text=not unresolved)
+            except Exception:
+                pod_diagnostics = {'pods': [], 'collection_errors': ['diagnostics_collection_failed']}
+            raise
         workspace_cleanup = cleanup_workspace(workspace)
         print(json.dumps({
             "repository": {"url": args.repository_url, "branch": args.branch, "commitSha": commit_sha},
@@ -127,6 +140,8 @@ def main() -> int:
         report = dict(checks or {}, schema_version='sandbox-result.v1', outcome='failed', failed_step=stage,
             configuration_required=isinstance(exc, ConfigurationRequired))
         report.setdefault('verification_declared', False)
+        if pod_diagnostics is not None:
+            report['pod_diagnostics'] = pod_diagnostics
         print(json.dumps({'executionFailure': True, 'result': {
             'schemaVersion': 'sandbox-result.v1', 'observationStatus': 'infrastructure_error' if infra else 'observed',
             'infraError': 'execution_infrastructure_error' if infra else None, 'exitCode': code,

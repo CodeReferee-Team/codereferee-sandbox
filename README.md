@@ -11,6 +11,7 @@ CodeReferee의 Kubernetes 기반 실행 및 카오스 관측 컴포넌트입니�
 - [요청별 메트릭 파이프라인·실측](docs/metrics-request-lifecycle.md)
 - [Mac/Linux 로컬 Sandbox 준비](docs/posix-bootstrap.md)
 - [Runtime Chaos 시나리오·검사 묶음·전체 연동](docs/runtime-chaos-scenarios.md)
+- [Litmus 전체·단일 Pod 장애 범위](docs/single-pod-chaos-scope.md)
 - [범용 레포 실행 설정·자동 탐색](docs/repository-execution-plans.md)
 
 ## Kubernetes fixture
@@ -63,3 +64,6 @@ curl -X POST http://127.0.0.1:8100/repositories/validate \
 `chaosMode`를 생략하면 fixture가 아니라 해당 레포를 자동 탐색해 build·배포·HTTP smoke를 수행합니다.
 Chaos까지 실행하려면 `chaosMode`에 검사 묶음이나 시나리오를 지정합니다. 자동 탐색이 모호하면
 설정 필요 사유를 반환하며, `.codereferee/validation.yaml`로 실행 환경을 보완할 수 있습니다.
+
+배포 롤아웃 실패 시 삭제 전 Pod 상태·로그·이벤트를 반환합니다.
+응답 계약과 수집 제한은 [배포 Pod 진단 문서](docs/deployment-pod-diagnostics.md)를 참고하세요.

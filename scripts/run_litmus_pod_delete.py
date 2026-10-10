@@ -19,6 +19,7 @@ from typing import Any
 from collect_baseline import kubectl_command, kubectl_environment
 from in_cluster_probe import InClusterProbe
 from run_pod_kill_experiment import get_target_configuration, get_ready_pod, metrics_from_probes, probe_once
+from pod_selection import owned_pods, select_ready_pods, pod_evidence, validate_count
 
 
 # The Sandbox bootstrap installs only the permissions declared by the Pod
@@ -28,7 +29,8 @@ ROLE = "codereferee-litmus-runner"
 SCENARIOS = ('pod_delete', 'container_kill', 'pod_cpu_hog', 'pod_network_latency', 'pod_network_loss', 'pod_memory_hog', 'pod_memory_oom')
 
 
-def fault_environment(scenario: str, container: str, duration: int, memory_mb: int = 32) -> dict[str, str]:
+def fault_environment(scenario: str, container: str, duration: int, memory_mb: int = 32,
+                      target_pods: list[str] | None = None) -> dict[str, str]:
     if scenario not in SCENARIOS or not 1 <= duration <= 60:
         raise ValueError('Unsupported fault or duration outside 1..60 seconds.')
     env = {'TOTAL_CHAOS_DURATION': str(duration), 'CHAOS_INTERVAL': '60',
@@ -41,7 +43,58 @@ def fault_environment(scenario: str, container: str, duration: int, memory_mb: i
         env.update(NETWORK_INTERFACE='eth0', NETWORK_LATENCY='300', JITTER='0', NETWORK_PACKET_LOSS_PERCENTAGE='50')
     if scenario.startswith('pod_memory_'):
         env.update(MEMORY_CONSUMPTION=str(memory_mb), NUMBER_OF_WORKERS='1')
+    if target_pods is not None:
+        validate_count(len(target_pods))
+        if len(set(target_pods)) != len(target_pods) or any(
+                not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?', name) for name in target_pods):
+            raise ValueError('Explicit fault target names must be distinct Kubernetes Pod names.')
+        # Pinned litmus-go 3.30.0 treats TARGET_PODS as authoritative and skips
+        # percentage selection. Never approximate an exact count by a percent.
+        env['TARGET_PODS'] = ','.join(target_pods)
     return env
+
+
+def read_owned_pods(target: dict[str, Any]) -> list[dict[str, Any]]:
+    def read(*args):
+        completed = subprocess.run(kubectl_command('-n', target['namespace'], *args, '-o', 'json'),
+            text=True, capture_output=True, check=True, env=kubectl_environment(), timeout=30)
+        return json.loads(completed.stdout)
+    deployment = read('get', 'deployment', target['deployment'])
+    replica_sets = read('get', 'replicasets', '-l', target['labelSelector']).get('items', [])
+    pods = read('get', 'pods', '-l', target['labelSelector']).get('items', [])
+    return owned_pods(deployment, replica_sets, pods)
+
+
+def scope_evidence(count: int | None, before: list[dict], after: list[dict],
+                   selected: list[dict], container: str, result: dict) -> dict:
+    before_rows = [pod_evidence(pod, container) for pod in before]
+    after_rows = [pod_evidence(pod, container) for pod in after]
+    selected_names = {pod['metadata']['name'] for pod in selected}
+    history = result.get('raw', {}).get('history', {}).get('targets', [])
+    reported_pods = [t for t in history if str(t.get('kind', '')).lower() == 'pod']
+    unexpected = [t for t in reported_pods if count is not None and t.get('name') not in selected_names]
+    reported_names = {t.get('name') for t in reported_pods}
+    return {'mode': 'count' if count is not None else 'all', 'requested_count': count,
+            'selection_method': 'explicit_TARGET_PODS' if count is not None else 'PODS_AFFECTED_PERC=100',
+            'selected_pods': [pod_evidence(pod, container) for pod in selected],
+            'pods_before': before_rows, 'pods_after': after_rows,
+            'litmus_reported_targets': history, 'unexpected_reported_pods': unexpected,
+            'missing_reported_pods': sorted(selected_names - reported_names) if count is not None else [],
+            # Pod-delete can report Deployment history instead of individual Pods.
+            # Empty history is not proof of zero injection or exact target coverage.
+            'reported_pod_scope_matches': reported_names == selected_names if reported_pods and count is not None else None}
+
+
+def selected_pod_after(selected: list[dict], before: list[dict], after: list[dict], container: str) -> dict:
+    """Do not mistake an unaffected surviving replica for the killed Pod's replacement."""
+    uid = selected[0]['metadata']['uid']
+    same = next((pod for pod in after if pod['metadata']['uid'] == uid), None)
+    if same:
+        return pod_evidence(same, container)
+    old_uids = {pod['metadata']['uid'] for pod in before}
+    replacements = [pod for pod in after if pod['metadata']['uid'] not in old_uids]
+    replacements.sort(key=lambda pod: pod['metadata']['name'])
+    return pod_evidence(replacements[0], container) if replacements else {}
 
 
 def memory_megabytes(value: str) -> int:
@@ -134,20 +187,35 @@ def main() -> int:
         baseline = {'probes': observer.collect(args.baseline_probes)}
         if not all(probe['success'] for probe in baseline['probes']):
             raise RuntimeError('Target baseline is unhealthy; fault injection was skipped.')
+        pods_before = read_owned_pods(target)
+        selected_pods = select_ready_pods(pods_before, args.pods_affected_count, target_container) if args.pods_affected_count is not None else []
+        target_names = [pod['metadata']['name'] for pod in selected_pods] if selected_pods else None
+        if selected_pods:
+            source_pod = pod_evidence(selected_pods[0], target_container)
+        environment = fault_environment(args.scenario, target_container, args.fault_seconds, memory_mb, target_names)
         fault_started_monotonic = time.monotonic()
         fault_started_at = now_utc()
-        apply(target["namespace"], name, target["deployment"], target["labelSelector"], args.scenario, target_container, args.fault_seconds, memory_mb)
+        apply(target["namespace"], name, target["deployment"], target["labelSelector"], args.scenario, target_container,
+              args.fault_seconds, memory_mb, target_pods=target_names)
         result, recovery_probes = wait_for_result(target["namespace"], name, args.timeout_seconds, args.local_port,
                                                    args.request_timeout_seconds, observer=observer)
         recovery_probes.extend(observer.collect(5))
         outcome = recovery_outcome(result, recovery_probes)
+        pods_after = read_owned_pods(target)
+        fault_scope = scope_evidence(args.pods_affected_count, pods_before, pods_after, selected_pods, target_container, result)
+        if fault_scope['unexpected_reported_pods']:
+            outcome = {'observationStatus': 'infrastructure_error', 'recovered': None,
+                       'exitCode': None, 'infraError': 'fault_target_scope_mismatch'}
         recovered = outcome['recovered']
         recovered_at = now_utc() if recovered else None
     observation_status = outcome['observationStatus']
-    try:
-        replacement_pod = get_ready_pod(target["namespace"], target["labelSelector"], target.get("service") or target["deployment"])
-    except RuntimeError:
-        replacement_pod = {}
+    if selected_pods:
+        replacement_pod = selected_pod_after(selected_pods, pods_before, pods_after, target_container)
+    else:
+        try:
+            replacement_pod = get_ready_pod(target["namespace"], target["labelSelector"], target.get("service") or target["deployment"])
+        except RuntimeError:
+            replacement_pod = {}
     final_status = subprocess.run(kubectl_command('-n', target['namespace'], 'get', 'pods', '-l', target['labelSelector'], '-o', 'json'),
         text=True, capture_output=True, env=kubectl_environment())
     terminations = []
@@ -168,7 +236,8 @@ def main() -> int:
                                     "recovered_at": recovered_at, "recovery_seconds": measured_recovery_seconds(recovery_probes) if recovered else None,
                                     'recovery_measurement': 'first_failed_http_request_to_first_success_after_last_failure; 0 when no HTTP outage was sampled',
                                     'experiment_duration_seconds': round(time.monotonic() - fault_started_monotonic, 2),
-                                    'fault_parameters': fault_environment(args.scenario, target_container, args.fault_seconds, memory_mb),
+                                    'fault_parameters': environment,
+                                    'fault_scope': fault_scope,
                                     'last_terminations': terminations,
                                     'oom_observed': oom_during_experiment(terminations, fault_started_at,
                                         source_pod.get('restart_count', 0), replacement_pod.get('restart_count', 0)) if args.scenario == 'pod_memory_oom' else None,
@@ -218,7 +287,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scenario", choices=SCENARIOS, default="pod_delete")
     parser.add_argument("--target-container")
     parser.add_argument('--fault-seconds', type=int, default=15)
+    parser.add_argument('--pods-affected-count', type=validate_count_argument,
+                        help='Exactly 1..16 owned Ready Pods; omitted preserves all-Pod faults.')
     return parser.parse_args()
+
+
+def validate_count_argument(value: str) -> int:
+    try:
+        return validate_count(int(value))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def load_target(args: argparse.Namespace) -> dict[str, Any]:
@@ -228,10 +306,10 @@ def load_target(args: argparse.Namespace) -> dict[str, Any]:
             "service": args.service, "servicePort": args.service_port}
 
 
-def apply(namespace: str, engine: str, deployment: str, selector: str, scenario: str, target_container: str, duration: int = 15, memory_mb: int = 32, overrides: dict[str, str] | None = None) -> None:
+def apply(namespace: str, engine: str, deployment: str, selector: str, scenario: str, target_container: str, duration: int = 15, memory_mb: int = 32, overrides: dict[str, str] | None = None, *, target_pods: list[str] | None = None) -> None:
     experiment = 'pod-memory-hog' if scenario == 'pod_memory_oom' else scenario.replace("_", "-")
     copy_experiment(namespace, experiment)
-    environment = fault_environment(scenario, target_container, duration, memory_mb)
+    environment = fault_environment(scenario, target_container, duration, memory_mb, target_pods)
     environment.update(overrides or {})
     env_yaml = '\n'.join(f'            - name: {key}\n              value: "{value}"' for key, value in environment.items())
     manifest = f'''apiVersion: v1
