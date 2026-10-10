@@ -48,6 +48,9 @@ _codereferee_bootstrap_kind() {
 # 변수명에 스크립트 이름을 붙인다. bootstrap_local.sh 가 이 파일을 dot-source 하므로
 # 같은 이름을 쓰면 안쪽에서 unset 할 때 바깥쪽 복원이 조용히 깨진다.
 _codereferee_opts_kind="$(set +o)"
+# Command substitution clears errexit unless inherit_errexit is enabled.
+# Restore the caller's actual flag, not the subshell's altered snapshot.
+case $- in *e*) _codereferee_opts_kind="$_codereferee_opts_kind; set -e" ;; esac
 set -uo pipefail
 if _codereferee_bootstrap_kind "$@"; then _codereferee_rc_kind=0; else _codereferee_rc_kind=$?; fi
 eval "$_codereferee_opts_kind"
