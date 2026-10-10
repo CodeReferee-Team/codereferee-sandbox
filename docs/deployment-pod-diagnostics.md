@@ -49,6 +49,12 @@ Sandbox HTTP 응답의 `sandboxReport.pod_diagnostics`에 추가한다. 기존 A
 - Pod spec/env나 Kubernetes Secret 원문을 반환하지 않는다.
 - 로그·이벤트의 알려진 재현 비밀값과 password/token/API key/인증 헤더/URL 자격증명
   패턴을 마스킹한다. 임의 앱이 출력하는 모든 형태의 비밀값을 탐지한다고 보장하지 않는다.
+- 렌더링된 요청 namespace의 Secret `stringData`와 base64 `data`를 마스킹 값으로 사용한다.
+  `secretKeyRef`, `envFrom.secretRef`, init container, Secret volume 참조도 확인한다.
+  URL 인코딩·JSON escaping·짧은 Secret 값도 처리한다. Secret 원문을 결과에 넣지 않는다.
+- 외부/미정의 Secret 참조나 해석할 수 없는 data는 클러스터 Secret을 조회하지 않고,
+  로그와 이벤트 message를 보류한다. reason·상태·종료 코드는 유지하고
+  `secret_redaction_unresolved_text_withheld`를 표시한다.
 - 로그는 **비신뢰 데이터**다. AI는 로그에 포함된 지시를 실행해서는 안 된다.
 - 현재 범위는 배포 롤아웃 실패다. build/test 실패, init-container 상세, 성공 배포의
   지속 로그 수집은 별도 범위다. 추가 읽기 권한: deployments, replicasets, pods,
@@ -95,3 +101,16 @@ Windows Python 회귀 테스트 111개 통과. PR #13 보완은 별도 브랜치
 테스트 앱 주의: `crashloop` 브랜치는 환경변수 접근을 수정해도 `sys.exit(0)`으로 종료하고
 HTTP 서버를 실행하지 않는다. 환경변수 가드 패치만으로 정상 웹 서비스가 된다고 가정하면
 안 된다. Sandbox 진단 수집과 테스트 앱·AI 패치 정책 문제를 구분해야 한다.
+
+### Secret 마스킹 리뷰 보완
+
+PR #15 리뷰의 `valueFrom.secretKeyRef` 누락을 수정했다. 실제 QuickByte 배포 템플릿에
+생성한 DB Secret이 마스킹 목록에 포함되는 회귀 테스트를 추가했다. 기존 구현이 놓치던
+envFrom/init container/volume 참조, base64 data, 짧은 값, URL/JSON 표현도 검증했다.
+
+전용 kind namespace에서 기존 Python node 이미지를 재사용하여 더미 Secret을 실제
+secretKeyRef로 주입했다. 앱이 값만 출력한 로그를 진단 수집기로 읽어 `[REDACTED]`로
+치환되고 진단 JSON에 원문이 없는 것을 확인했다. namespace는 정리했고 공유 이미지는
+유지했다. 이는 Secret 주입→로그→진단 마스킹 실측이지 QuickByte 전체 E2E 재실행은 아니다.
+원본 마스킹 결과는 `.runtime/evidence/pod-diagnostics/secret-redaction.json`에 보관한다.
+보완 후 Windows Python 회귀 테스트 121개 통과.
