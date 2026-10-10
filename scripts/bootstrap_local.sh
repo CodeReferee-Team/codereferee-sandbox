@@ -58,6 +58,7 @@ _codereferee_bootstrap_local() {
 }
 
 _codereferee_opts_local="$(set +o)"
+case $- in *e*) _codereferee_opts_local="$_codereferee_opts_local; set -e" ;; esac
 set -uo pipefail
 if _codereferee_bootstrap_local "$@"; then _codereferee_rc_local=0; else _codereferee_rc_local=$?; fi
 eval "$_codereferee_opts_local"
