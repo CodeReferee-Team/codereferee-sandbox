@@ -114,3 +114,17 @@ secretKeyRef로 주입했다. 앱이 값만 출력한 로그를 진단 수집기
 유지했다. 이는 Secret 주입→로그→진단 마스킹 실측이지 QuickByte 전체 E2E 재실행은 아니다.
 원본 마스킹 결과는 `.runtime/evidence/pod-diagnostics/secret-redaction.json`에 보관한다.
 보완 후 Windows Python 회귀 테스트 121개 통과.
+
+Secret 보완 커밋 이후 별도 임시 DB/Redis로 전체 경로를 다시 실행했다.
+
+| 실행 | taskId | Backend 결과 |
+| --- | --- | --- |
+| 정상 앱 | 41da8c5c-c9f6-45b1-a51f-c40b6edf0961 | PASSED |
+| HTTP 500 앱 | 0e420ecd-003d-40bd-899e-8bc3e9f671ad | FAILED, Pod 진단 1개 저장 |
+| Container Kill | bc82bcb7-9425-4af1-8a63-c37b36abc327 | PASSED |
+
+HTTP 500의 예외 로그·probe 500 이벤트가 보존됐고, PostgreSQL 저장 및 프론트 `/api`
+프록시 조회를 재확인했다. 실제 Pod의 미확인 Secret 텍스트 보류도 추가 실측했다.
+이는 해당 경로의 회귀 검증이지 전체 보안 감사·LLM 자동 패치 생성·QuickByte 전체
+E2E 재실행을 의미하지 않는다. 새 원본 결과는 `.runtime/evidence/pod-diagnostics-secret-review`
+및 기존 Secret 마스킹 evidence 경로에 보관한다.
