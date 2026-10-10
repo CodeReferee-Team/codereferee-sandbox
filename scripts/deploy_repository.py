@@ -25,7 +25,7 @@ from collect_baseline import kubectl_command, kubectl_environment, load_image_in
 from artifact_cleanup import cleanup_request_image
 from execution_plan import ConfigurationRequired, inside, render_plan, resolve_plan
 from repository_checks import CheckFailure, verify_repository
-from pod_diagnostics import collect_pod_diagnostics
+from pod_diagnostics import collect_pod_diagnostics, manifest_redaction_values
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,13 +100,9 @@ def main() -> int:
             # Collect while the failed Pods still exist. Failure to collect must
             # never replace the original deployment failure or prevent cleanup.
             try:
-                documents = list(yaml.safe_load_all(rendered))
-                values = tuple(str(value) for document in documents if isinstance(document, dict)
-                    for container in document.get('spec', {}).get('template', {}).get('spec', {}).get('containers', [])
-                    for env in container.get('env', []) if 'value' in env
-                    for value in [env['value']]
-                    if any(key in env.get('name', '').lower() for key in ('password', 'secret', 'token', 'key', 'url')))
-                pod_diagnostics = collect_pod_diagnostics(namespace, target['deployment'], values)
+                values, unresolved = manifest_redaction_values(rendered, namespace)
+                pod_diagnostics = collect_pod_diagnostics(namespace, target['deployment'], values,
+                                                          include_text=not unresolved)
             except Exception:
                 pod_diagnostics = {'pods': [], 'collection_errors': ['diagnostics_collection_failed']}
             raise
