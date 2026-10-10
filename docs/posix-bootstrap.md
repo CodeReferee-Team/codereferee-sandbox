@@ -2,6 +2,17 @@
 
 Docker가 실행 중인 환경에서 Bash로 실행한다. kind와 kubectl은 없으면 부트스트랩이 받는다.
 
+API 의존성은 별도로 설치한다. 아래는 Python 3.11이 설치된 Linux의 예다. Mac에서는
+설치한 Python 3.10 이상 경로로 바꾼다. 선택된 Python이 가상환경을 가리키도록 명시한다.
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+export CODEREFEREE_PYTHON="$PWD/.venv/bin/python"
+```
+
+부트스트랩의 Python 버전 확인은 uvicorn/FastAPI 설치까지 대신하지 않는다.
+
 ```bash
 # source로 실행해야 이후 API가 같은 kind/context 설정을 사용한다.
 source scripts/bootstrap_local.sh codereferee

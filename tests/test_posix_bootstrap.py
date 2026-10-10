@@ -139,6 +139,16 @@ class SourcedBootstrapTests(unittest.TestCase):
                 'echo "context=$CODEREFEREE_KUBECTL_CONTEXT provider=$CODEREFEREE_CLUSTER_PROVIDER"', stubs)
         self.assertIn('context=kind-codereferee provider=kind', result.stdout)
 
+    def test_callers_existing_errexit_is_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, stubs = make_workspace(directory)
+            for script in ('bootstrap_kind.sh', 'bootstrap_local.sh'):
+                result = self.run_shell(
+                    f'cd {root}; set -e; before="$-"; source scripts/{script} codereferee >/dev/null 2>&1; '
+                    'after="$-"; echo "same_flags=$([ "$before" = "$after" ] && echo yes || echo no)"', stubs)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('same_flags=yes', result.stdout, script)
+
     def test_kubectl_is_installed_when_the_host_does_not_have_it(self):
         with tempfile.TemporaryDirectory() as directory:
             root, stubs = make_workspace(directory, tools=('docker', 'kind'))
@@ -146,7 +156,8 @@ class SourcedBootstrapTests(unittest.TestCase):
             marker = root / 'installed'
             installer.write_text(f'#!/usr/bin/env bash\ntouch {marker}\nexit 0\n', encoding='utf-8', newline='\n')
             installer.chmod(0o755)
-            self.run_shell(f'cd {root}; source scripts/bootstrap_local.sh codereferee >/dev/null 2>&1', stubs)
+            self.run_shell(f'cd {root}; source scripts/bootstrap_local.sh codereferee >/dev/null 2>&1',
+                           stubs, extra_path='/usr/bin:/bin')
             self.assertTrue(marker.exists(), 'bootstrap must install kubectl on a host that lacks it')
 
 
