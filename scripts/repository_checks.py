@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -107,6 +108,23 @@ def check_plan(repository: Path) -> dict:
         declared=declared_test is not None, env={k: str(v) for k, v in env.items()}, workingDirectory=working)
 
 
+# 검사 컨테이너는 호스트와 같은 uid 로 돈다.
+#
+# 레포는 호스트 사용자 소유의 디렉터리를 bind 로 붙인다. 컨테이너 기본 사용자가
+# root 라도 cap-drop ALL 이 CAP_DAC_OVERRIDE 를 떼므로, 소유자가 다르면 소스 트리에
+# 쓰지 못한다. Gradle 은 GRADLE_USER_HOME 과 별개로 프로젝트 안에 .gradle 을 만들기
+# 때문에 여기서 막혔다(실측: Amazon Linux 2023, uid 1001 소유 755 디렉터리).
+#
+# Docker Desktop(맥, 윈도우)은 bind 마운트의 소유권을 가상화해서 이 검사가 사실상
+# 적용되지 않는다. 그래서 네이티브 Linux 에서만 드러났다.
+#
+# Windows 에는 getuid 가 없고 소유권 문제도 없으므로 기존 동작을 그대로 둔다.
+CHECK_OWNER = f'{os.getuid()}:{os.getgid()}' if hasattr(os, 'getuid') else None
+# 캐시 볼륨 안에서 쓰기 가능해야 하는 경로. 이미지에 없는 uid 로 돌면 HOME 이
+# 쓰기 불가가 되어 Maven 의 ~/.m2 나 pip 캐시가 같은 이유로 막힌다.
+CACHE_DIRECTORIES = ('/cache/home', '/cache/gradle', '/cache/python', '/cache/workspace', '/cache/npm', '/cache/node-home')
+
+
 def junit_test_count(repository: Path, stack: str) -> int | None:
     pattern = '**/build/test-results/test/TEST-*.xml' if stack == 'gradle' else '**/target/surefire-reports/TEST-*.xml'
     count = 0
@@ -140,34 +158,44 @@ def verify_repository(repository: Path, cache: Path, request: str, *, timeout: i
             'outcome': 'failed', 'test_execution': 'not_attempted', 'verification_declared': plan['declared']})
     report = {}
     try:
-        if plan['stack'] == 'node':
-            # Trusted setup only: fresh cache volume, no source mount, no
-            # network and no submitted commands. Repository code never gets
-            # CAP_CHOWN; all check steps run as uid 1000 with cap-drop ALL.
-            setup_name = 'codereferee-check-setup-' + uuid4().hex[:16]
-            try:
-                initialized = subprocess.run(['docker', 'run', '--rm', '--name', setup_name, '--network', 'none',
-                    '--cpus', '0.5', '--memory', '128m', '--pids-limit', '32',
-                    '--cap-drop', 'ALL', '--cap-add', 'CHOWN', '--security-opt', 'no-new-privileges',
-                    '--mount', f'type=volume,source={volume},target=/cache', plan['image'],
-                    'sh', '-ec', 'mkdir -p /cache/workspace /cache/npm /cache/node-home; chown 1000:1000 /cache /cache/workspace /cache/npm /cache/node-home'], text=True, capture_output=True,
-                    env=environment, timeout=min(120, max(1, timeout - (time.monotonic() - started))))
-                setup_code, setup_error = initialized.returncode, initialized.stderr[-2000:]
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                setup_code, setup_error = None, 'Node workspace setup failed or exceeded its bounded execution window.'
-                if isinstance(exc, subprocess.TimeoutExpired):
-                    report['timed_out'] = True
-                    try:
-                        removed = subprocess.run(['docker', 'rm', '--force', setup_name], text=True,
-                            capture_output=True, env=environment, timeout=30)
-                        report['check_setup_container_cleanup'] = {'removed': removed.returncode == 0}
-                    except (OSError, subprocess.TimeoutExpired):
-                        report['check_setup_container_cleanup'] = {'removed': False}
-            if setup_code != 0:
-                report.update(steps=[{'name': 'prepare', 'stderr': setup_error}],
-                    failed_step='prepare', exit_code=None, infrastructure_error=True,
-                    outcome='failed', test_execution='not_attempted', verification_declared=plan['declared'])
-                raise CheckFailure(report)
+        # 검사 단계가 호스트 uid 로 도므로 레포 디렉터리도 그 uid 가 쓸 수 있어야 한다.
+        # 컨테이너 안에서 확인하면 그 실패가 레포의 빌드 실패와 구분되지 않으므로
+        # 여기서 먼저 본다. 이건 제출된 코드의 문제가 아니라 우리 쪽 문제다.
+        if CHECK_OWNER and not os.access(repository, os.W_OK | os.X_OK):
+            report.update(steps=[{'name': 'prepare',
+                    'stderr': f'Sandbox cannot write to the checked out repository at {repository}.'}],
+                failed_step='prepare', exit_code=None, infrastructure_error=True,
+                outcome='failed', test_execution='not_attempted', verification_declared=plan['declared'])
+            raise CheckFailure(report)
+        # Trusted setup only: fresh cache volume, no source mount, no network
+        # and no submitted commands. Repository code never gets CAP_CHOWN; all
+        # check steps run with cap-drop ALL.
+        setup_name = 'codereferee-check-setup-' + uuid4().hex[:16]
+        owner = CHECK_OWNER or '1000:1000'
+        directories = ' '.join(CACHE_DIRECTORIES)
+        try:
+            initialized = subprocess.run(['docker', 'run', '--rm', '--name', setup_name, '--network', 'none',
+                '--cpus', '0.5', '--memory', '128m', '--pids-limit', '32',
+                '--cap-drop', 'ALL', '--cap-add', 'CHOWN', '--security-opt', 'no-new-privileges',
+                '--mount', f'type=volume,source={volume},target=/cache', plan['image'],
+                'sh', '-ec', f'mkdir -p {directories}; chown {owner} /cache {directories}'], text=True, capture_output=True,
+                env=environment, timeout=min(120, max(1, timeout - (time.monotonic() - started))))
+            setup_code, setup_error = initialized.returncode, initialized.stderr[-2000:]
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            setup_code, setup_error = None, 'Check cache setup failed or exceeded its bounded execution window.'
+            if isinstance(exc, subprocess.TimeoutExpired):
+                report['timed_out'] = True
+                try:
+                    removed = subprocess.run(['docker', 'rm', '--force', setup_name], text=True,
+                        capture_output=True, env=environment, timeout=30)
+                    report['check_setup_container_cleanup'] = {'removed': removed.returncode == 0}
+                except (OSError, subprocess.TimeoutExpired):
+                    report['check_setup_container_cleanup'] = {'removed': False}
+        if setup_code != 0:
+            report.update(steps=[{'name': 'prepare', 'stderr': setup_error}],
+                failed_step='prepare', exit_code=None, infrastructure_error=True,
+                outcome='failed', test_execution='not_attempted', verification_declared=plan['declared'])
+            raise CheckFailure(report)
         report = _verify_repository(repository, volume, request, timeout=max(1, timeout - (time.monotonic() - started)))
         return report
     except CheckFailure as failure:
@@ -193,10 +221,14 @@ def _verify_repository(repository: Path, cache_name: str, request: str, *, timeo
     # Installed packages persist across check steps, but stay in the disposable
     # request cache instead of the API host or the app Docker build context.
     env = {'GRADLE_USER_HOME': '/cache/gradle', 'PYTHONUSERBASE': '/cache/python'}
+    if CHECK_OWNER:
+        # 이미지에 없는 uid 로 돌면 HOME 이 쓰기 불가가 된다. Maven 의 ~/.m2 와
+        # pip 캐시가 거기로 떨어지므로 캐시 볼륨 안을 가리킨다.
+        env['HOME'] = '/cache/home'
     if plan['stack'] == 'node':
         # Native package archives preserve ownership when extracted as root.
-        # Run npm as the image's unprivileged node user instead of granting
-        # CAP_CHOWN or trusting archive uid/gid on a Windows source mount.
+        # Run npm as an unprivileged user instead of granting CAP_CHOWN or
+        # trusting archive uid/gid on a Windows source mount.
         env.update(HOME='/cache/node-home', NPM_CONFIG_CACHE='/cache/npm')
     if plan['stack'] == 'python':
         env['PATH'] = '/cache/python/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -224,7 +256,11 @@ def _verify_repository(repository: Path, cache_name: str, request: str, *, timeo
             '--mount', source_mount,
             '--mount', f'type=volume,source={cache_name},target=/cache',
             '--workdir', workdir]
-        if plan['stack'] == 'node':
+        # 호스트 uid 로 돌아야 bind 마운트한 레포에 쓸 수 있다. 자세한 근거는
+        # CHECK_OWNER 주석 참조. Windows 는 기존대로 node 만 고정 uid 를 쓴다.
+        if CHECK_OWNER:
+            command.extend(['--user', CHECK_OWNER])
+        elif plan['stack'] == 'node':
             command.extend(['--user', '1000:1000'])
         for key, value in env.items(): command.extend(['--env', key + '=' + value])
         command.extend([plan['image'], *executable])

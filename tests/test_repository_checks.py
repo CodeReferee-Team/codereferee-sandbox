@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from execution_plan import ConfigurationRequired
+import repository_checks
 from repository_checks import CheckFailure, check_plan, verify_repository
 
 
@@ -37,7 +38,9 @@ class RepositoryChecksTests(unittest.TestCase):
         self.assertEqual([s['name'] for s in report['steps']], ['install'])
         command = next(c.args[0] for c in run.call_args_list if '--user' in c.args[0])
         self.assertIn('--cap-drop', command)
-        self.assertIn('1000:1000', command)
+        # root 가 아닌 사용자로 돈다는 것이 요지다. 값 자체는 호스트에 따라 다르다.
+        self.assertEqual(repository_checks.CHECK_OWNER or '1000:1000',
+                         command[command.index('--user') + 1])
         self.assertNotIn('--cap-add', command)
         self.assertIn('2g', command)
         self.assertNotIn('docker.sock', ' '.join(command))
@@ -45,6 +48,60 @@ class RepositoryChecksTests(unittest.TestCase):
         setup = next(c.args[0] for c in run.call_args_list if '--cap-add' in c.args[0])
         self.assertIn('none', setup)
         self.assertNotIn('type=bind', ' '.join(setup))
+
+    @patch('repository_checks.subprocess.run')
+    def test_jvm_checks_run_as_the_host_user_so_the_source_mount_is_writable(self, run):
+        """cap-drop ALL 은 컨테이너 root 의 CAP_DAC_OVERRIDE 도 뗀다.
+
+        호스트 사용자 소유의 레포를 bind 로 붙이면 uid 가 다른 순간 소스 트리에
+        쓰지 못한다. Gradle 은 GRADLE_USER_HOME 과 별개로 프로젝트 안에 .gradle 을
+        만들기 때문에 여기서 막혔다. Docker Desktop 은 소유권을 가상화해서 이
+        조건이 드러나지 않으므로 네이티브 Linux 에서만 나는 실패였다.
+        """
+        self.write('build.gradle', 'plugins { id "java" }')
+        self.write('gradlew', '#!/bin/sh\n')
+        run.return_value = subprocess.CompletedProcess([], 0, '', '')
+        verify_repository(self.root, self.cache, 'test')
+
+        step = next(c.args[0] for c in run.call_args_list if '--workdir' in c.args[0])
+        self.assertIn('target=/workspace', ' '.join(step))
+        if repository_checks.CHECK_OWNER:
+            self.assertEqual(repository_checks.CHECK_OWNER, step[step.index('--user') + 1])
+            # 이미지에 없는 uid 로 돌면 HOME 이 쓰기 불가가 된다.
+            self.assertIn('HOME=/cache/home', step)
+        else:
+            self.assertNotIn('--user', step)
+
+    @patch('repository_checks.subprocess.run')
+    def test_cache_volume_is_owned_by_the_user_that_runs_the_checks(self, run):
+        self.write('build.gradle', 'plugins { id "java" }')
+        self.write('gradlew', '#!/bin/sh\n')
+        run.return_value = subprocess.CompletedProcess([], 0, '', '')
+        verify_repository(self.root, self.cache, 'test')
+
+        setup = next(c.args[0] for c in run.call_args_list if '--cap-add' in c.args[0])
+        # 준비 컨테이너만 CHOWN 을 받는다. 제출된 코드는 받지 않는다.
+        self.assertEqual(['CHOWN'], [setup[index + 1] for index, item in enumerate(setup) if item == '--cap-add'])
+        self.assertNotIn('type=bind', ' '.join(setup))
+        self.assertIn('chown ' + (repository_checks.CHECK_OWNER or '1000:1000'), setup[-1])
+        for directory in ('/cache/home', '/cache/gradle', '/cache/python'):
+            self.assertIn(directory, setup[-1])
+
+    @patch('repository_checks.subprocess.run')
+    def test_unwritable_repository_is_reported_as_infrastructure_not_a_repo_failure(self, run):
+        """우리 쪽 권한 문제가 사용자 코드 결함으로 나가면 안 된다."""
+        if not repository_checks.CHECK_OWNER:
+            self.skipTest('POSIX 권한이 있는 환경에서만 의미가 있다')
+        self.write('build.gradle', 'plugins { id "java" }')
+        self.write('gradlew', '#!/bin/sh\n')
+        run.return_value = subprocess.CompletedProcess([], 0, '', '')
+        with patch('repository_checks.os.access', return_value=False):
+            with self.assertRaises(CheckFailure) as raised:
+                verify_repository(self.root, self.cache, 'test')
+        report = raised.exception.report
+        self.assertTrue(report['infrastructure_error'])
+        self.assertEqual('prepare', report['failed_step'])
+        self.assertEqual('not_attempted', report['test_execution'])
 
     @patch('repository_checks.subprocess.run')
     def test_actual_test_failure_preserves_stage_and_exit_code(self, run):
