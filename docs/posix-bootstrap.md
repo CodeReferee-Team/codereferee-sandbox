@@ -73,14 +73,30 @@ kind와 Litmus 버전/커밋 핀은 기존 설치본을 유지한다. 캐시된 
 실행하되 kubectl/curl을 테스트 대역으로 바꿔 검증한다. 이것을 Mac/Linux 실제 클러스터의
 추가 Chaos 실측으로 주장하지 않는다. 최신 실험 목록은 PowerShell 설치본과 회귀 테스트로 비교한다.
 
-### 아직 실측하지 않은 것
+### AWS Linux 실측 (2026-10-11)
 
-**새 Linux 호스트에서 처음부터 완주한 기록이 없다.** 아래는 Amazon Linux 2023 컨테이너에서 확인한
-범위다. 실제 EC2에서 클러스터 생성까지 포함한 완주는 별도 검증이 필요하다.
+**새 EC2에서 처음부터 완주했다.** t3.large, Amazon Linux 2023 kernel-6.18, x86_64, 50 GiB gp3.
 
-- 기본 `python3`가 3.9.25이고 `app/scenarios.py` import가 TypeError로 깨지는 것
-- `kubectl`이 설치되어 있지 않은 것
-- source 실패가 호출한 셸을 종료시키던 것과 `set` 옵션이 남던 것
+| 항목 | 값 |
+|---|---|
+| `source scripts/bootstrap_local.sh codereferee` | **1분 15초** |
+| 설치된 ChaosExperiment | 6종 |
+| kind 노드 | Ready, v1.37.0 |
+| 부트스트랩 직후 디스크 | 4.7 GiB |
+| 검증 요청 1회 완료 후 | 8.6 GiB |
+
+`kubectl`과 `kind` 모두 `.runtime/tools`에서 나왔다. 호스트에 없던 것을 부트스트랩이 받았다는 뜻이다.
+
+구축 중에 걸린 것은 셋이고 전부 이 문서와 스크립트에 반영돼 있다.
+
+- 기본 `python3`가 3.9.25라 `app/scenarios.py` import 가 TypeError 로 깨졌다
+- `kubectl`이 없었다
+- `docker` 그룹 변경 후 재로그인을 하지 않아 부트스트랩이 멈췄다
+
+E2E 는 BE 요청에서 Chaos, AI 판정, Backend 조회까지 관통했고 PASSED 가 나왔다.
+메트릭은 AI 인스턴스의 Prometheus 로 remote_write 되어 **원본 샘플 간격 평균 1.000초**
+(70 샘플, 69 간격 중 67 개가 정확히 1.00)로 수집됐다. 카오스 대상 파드와 교체된 파드가
+각각 별도 시계열로 남았다.
 
 ### Windows Git Bash 실측 (2026-10-08)
 
