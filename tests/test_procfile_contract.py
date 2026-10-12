@@ -78,6 +78,79 @@ class ProcfileContractTests(unittest.TestCase):
             with self.subTest(command=command), self.assertRaises(ConfigurationRequired):
                 self.plan(command)
 
+    def test_incompatible_socket_and_process_modes_require_configuration(self):
+        commands = (
+            'uvicorn entrypoint:app --host 0.0.0.0 --port $PORT --uds /tmp/app.sock',
+            'uvicorn entrypoint:app --host 0.0.0.0 --port $PORT --fd=3',
+            'uvicorn entrypoint:app --host 0.0.0.0 --port $PORT --ssl-certfile cert.pem',
+            'gunicorn entrypoint:app -b 0.0.0.0:$PORT --daemon',
+            'gunicorn entrypoint:app -b 0.0.0.0:$PORT -D',
+            'gunicorn entrypoint:app -b 0.0.0.0:$PORT --check-config',
+            'daphne -b 0.0.0.0 -p $PORT -u/tmp/app.sock entrypoint:app',
+            'waitress-serve --listen=0.0.0.0:$PORT --port=9000 entrypoint:app',
+            'uvicorn entrypoint:app -- --host 0.0.0.0 --port $PORT',
+        )
+        for command in commands:
+            with self.subTest(command=command), self.assertRaises(ConfigurationRequired):
+                self.plan(command)
+
+    def test_runner_paths_and_console_script_module_are_not_guessed(self):
+        for command in ('.venv/bin/gunicorn entrypoint:app -b 0.0.0.0:$PORT',
+                        '/usr/bin/uvicorn entrypoint:app --host 0.0.0.0 --port $PORT',
+                        'python -m waitress-serve --host 0.0.0.0 --port $PORT entrypoint:app'):
+            with self.subTest(command=command), self.assertRaises(ConfigurationRequired):
+                self.plan(command)
+
+    def test_shell_comment_and_environment_changes_are_not_misread(self):
+        for command in ('uvicorn entrypoint:app --host 0.0.0.0 --port $PORT#note',
+                        'uvicorn entrypoint:app --host 0.0.0.0 --port $PORT # note',
+                        'PATH=/nowhere gunicorn entrypoint:app -b 0.0.0.0:$PORT',
+                        'uvicorn entrypoint:app --host 0.0.0.0 --port $PORT $EXTRA',
+                        'gunicorn entrypoint:app -b 0.0.0.0:$PORT > output.log'):
+            with self.subTest(command=command), self.assertRaises(ConfigurationRequired):
+                self.plan(command)
+
+    def test_generated_port_cannot_be_overridden_by_yaml_environment(self):
+        for value in ('8000', '9000'):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'Procfile').write_text('web: uvicorn entrypoint:app --host 0.0.0.0 --port $PORT\n')
+                (root / 'requirements.txt').write_text('uvicorn\n')
+                (root / '.codereferee').mkdir()
+                (root / '.codereferee/validation.yaml').write_text(
+                    'version: 1\nservice:\n  port: 8000\n  env:\n    PORT: "' + value + '"\n')
+                if value == '8000':
+                    self.assertEqual(resolve_plan(root)['env']['PORT'], value)
+                else:
+                    with self.assertRaisesRegex(ConfigurationRequired, 'conflicts'):
+                        resolve_plan(root)
+
+    def test_explicit_dockerfile_keeps_priority_over_unsupported_procfile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'Procfile').write_text('web: .venv/bin/gunicorn entrypoint:app -b 0.0.0.0:$PORT\n')
+            (root / 'Dockerfile').write_text('FROM python:3.12-slim\nEXPOSE 8080\n')
+            self.assertEqual(resolve_plan(root)['source'], 'dockerfile')
+            (root / '.codereferee').mkdir()
+            (root / '.codereferee/validation.yaml').write_text(
+                'version: 1\nservice:\n  dockerfile: Dockerfile\n  port: 8080\n  env: {PORT: "9000"}\n')
+            self.assertEqual(resolve_plan(root)['source'], 'repository_configuration')
+
+    def test_other_supported_direct_runners_and_custom_port(self):
+        for command in ('hypercorn entrypoint:app --bind 0.0.0.0:${PORT}',
+                        'daphne -b 0.0.0.0 -p $PORT entrypoint:app',
+                        'waitress-serve --listen=0.0.0.0:$PORT entrypoint:app',
+                        'waitress-serve --host=0.0.0.0 --port=$PORT entrypoint:app'):
+            with self.subTest(command=command):
+                self.assertEqual(self.plan(command)['port'], 8000)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'Procfile').write_text('web: uvicorn entrypoint:app --host 0.0.0.0 --port $PORT\n')
+            (root / 'requirements.txt').write_text('uvicorn\n')
+            (root / '.codereferee').mkdir()
+            (root / '.codereferee/validation.yaml').write_text('version: 1\nservice: {port: 9000, env: {PORT: "9000"}}\n')
+            self.assertIn('ENV PORT=9000', resolve_plan(root)['generatedDockerfile'])
+
 
 if __name__ == '__main__':
     unittest.main()

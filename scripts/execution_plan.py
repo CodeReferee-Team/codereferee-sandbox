@@ -149,6 +149,10 @@ def normalize_service(repository: Path, service: dict) -> dict:
     if any(not isinstance(v, (str, int, bool)) or '${' in str(v) for v in environment.values()):
         raise ConfigurationRequired('env must contain explicit reproduction values, not host environment interpolation.')
     result['env'] = {k: str(v) for k, v in environment.items()}
+    if generated:
+        declared_port = re.search(r'^ENV PORT=(\d+)(?:\s|$)', generated, re.MULTILINE)
+        if declared_port and 'PORT' in result['env'] and result['env']['PORT'] != declared_port[1]:
+            raise ConfigurationRequired('service.env.PORT conflicts with the generated image port. Align PORT with service.port, or declare a Dockerfile.')
     result['resources'] = normalize_resources(service.get('resources', {}))
     return result
 
@@ -294,7 +298,7 @@ def procfile_python_recipe(repository: Path, port: int | None = None) -> dict | 
         raise ConfigurationRequired('Declare exactly one Procfile web process.')
     web = declarations[0]
     try:
-        tokens = shlex.split(web, comments=True, posix=True)
+        tokens = shlex.split(web, comments=False, posix=True)
     except ValueError as exc:
         raise ConfigurationRequired('Procfile web command has invalid quoting.') from exc
     assignments = []
@@ -304,17 +308,30 @@ def procfile_python_recipe(repository: Path, port: int | None = None) -> dict | 
     base = runner.rsplit('/', 1)[-1]
     if base not in PROCFILE_PYTHON_RUNNERS:
         return None
+    if runner != base:
+        raise ConfigurationRequired('Procfile runner paths are not provisioned by the generated image. Declare a Dockerfile.')
     # Presence of $PORT alone is not a binding contract (comments/name options
     # may mention it). Accept only explicit, reachable runner-specific binding.
-    if (len(web) > 4096 or any(a.startswith('PORT=') for a in assignments)
+    if (len(web) > 4096 or assignments or '#' in web
             or r'\$' in web
-            or re.search(r"[;|&`]|\$\(|'[^']*\$(?:PORT|\{PORT\})", web)):
-        raise ConfigurationRequired('Procfile requires a simple command without PORT overrides; use validation.yaml.')
+            or re.search(r"[;|&`<>]|\$\(|'[^']*\$(?:PORT|\{PORT\})", web)):
+        raise ConfigurationRequired('Procfile requires a simple command without assignments, comments, or shell redirection; use validation.yaml.')
     if base in {'python', 'python3'}:
-        if len(tokens) < 2 or tokens[0] != '-m' or tokens[1] not in PROCFILE_PYTHON_RUNNERS - {'python', 'python3'}:
+        if len(tokens) < 2 or tokens[0] != '-m' or tokens[1] not in {'gunicorn', 'uvicorn', 'hypercorn', 'flask'}:
             raise ConfigurationRequired('Declare an explicit Python HTTP runner in validation.yaml.')
         base = tokens[1]
         tokens = tokens[2:]
+
+    supported_expansions = {'$PORT', '${PORT}', '0.0.0.0:$PORT', '0.0.0.0:${PORT}'}
+    if any('$' in token and token.split('=', 1)[-1] not in supported_expansions for token in tokens):
+        raise ConfigurationRequired('Procfile auto-deployment expands only the declared PORT binding; declare other environment-dependent commands explicitly.')
+
+    incompatible = {'--uds', '--fd', '--unix-socket', '--daemon', '--check-config',
+                    '--print-config', '--ssl-keyfile', '--ssl-certfile', '--keyfile', '--certfile',
+                    '--cert', '--key', '--insecure-bind', '--', '-D'}
+    if any(token.split('=', 1)[0] in incompatible or (base == 'daphne' and token.startswith('-u'))
+           for token in tokens):
+        raise ConfigurationRequired('Procfile requires foreground plain HTTP over the declared TCP port. Declare a Dockerfile and validation.yaml for other modes.')
 
     def options(*names):
         values = []
@@ -333,7 +350,8 @@ def procfile_python_recipe(repository: Path, port: int | None = None) -> dict | 
         valid = len(bindings) == 1 and bindings[0] in ['0.0.0.0:' + p for p in port_refs]
     elif base == 'waitress-serve' and options('--listen'):
         bindings = options('--listen')
-        valid = len(bindings) == 1 and bindings[0] in ['0.0.0.0:' + p for p in port_refs]
+        valid = (len(bindings) == 1 and bindings[0] in ['0.0.0.0:' + p for p in port_refs]
+                 and not options('--host', '--port'))
     else:
         hosts = options('-b', '--bind') if base == 'daphne' else options('--host')
         ports = options('-p', '--port') if base == 'daphne' else options('--port')
