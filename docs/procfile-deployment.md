@@ -1,0 +1,25 @@
+# Procfile 기반 Python 서비스 탐색
+
+등록된 profile, validation.yaml, Compose, Dockerfile이 없는 경우 Procfile의
+단일 `web:` 선언을 기존 스택 추론보다 먼저 확인합니다.
+
+지원 예:
+
+```text
+web: gunicorn autoapp:app -b 0.0.0.0:$PORT -w 3
+web: uvicorn main:app --host 0.0.0.0 --port $PORT
+```
+
+두 줄을 동시에 쓰라는 뜻이 아니라 각기 독립적인 예입니다.
+`requirements.txt`가 있으면 이미지 빌드 중 설치하며 기본 PORT는 8000입니다.
+Gunicorn/Hypercorn의 bind, Uvicorn/Flask의 host와 port, Daphne의 bind와 port,
+Waitress의 listen 또는 host와 port 선언을 확인합니다. `python -m` 실행은
+위 HTTP 실행기를 지정한 경우만 지원합니다.
+
+포트가 주석이나 프로세스 이름에만 등장하는 경우, PORT 재정의, loopback 바인딩,
+여러 web 선언, 복합 shell 명령, 임의 Python 스크립트는 설정을 요구합니다.
+이때 `.codereferee/validation.yaml`과 Dockerfile로 실행 환경을 명시합니다.
+Ruby/Node Procfile은 이 Python 기능의 대상이 아니며 기존 탐색 경로를 유지합니다.
+
+실행 선언 탐색 성공은 빌드·기동 성공을 의미하지 않습니다. Python 버전,
+의존성, 외부 시스템 설정과 실제 HTTP 응답은 후속 실행 단계에서 검증합니다.
