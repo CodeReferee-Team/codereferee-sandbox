@@ -20,6 +20,22 @@ class ProcfileContractTests(unittest.TestCase):
         with self.assertRaises(ConfigurationRequired):
             self.plan('gunicorn autoapp:app -b 0.0.0.0:$PORT_SUFFIX')
 
+    def test_missing_requirements_requires_explicit_installation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'Procfile').write_text('web: uvicorn entrypoint:app --host 0.0.0.0 --port $PORT\n', encoding='utf-8')
+            (root / 'entrypoint.py').write_text('value = 1\n', encoding='utf-8')
+            with self.assertRaisesRegex(ConfigurationRequired, 'requires requirements.txt'):
+                resolve_plan(root)
+
+    def test_pyproject_only_does_not_claim_supported_dependency_installation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'Procfile').write_text('web: gunicorn service:app -b 0.0.0.0:$PORT\n', encoding='utf-8')
+            (root / 'pyproject.toml').write_text('[project]\nname = "example"\nversion = "0.1.0"\n', encoding='utf-8')
+            with self.assertRaisesRegex(ConfigurationRequired, 'requires requirements.txt'):
+                resolve_plan(root)
+
     def test_comment_does_not_declare_binding(self):
         with self.assertRaises(ConfigurationRequired):
             self.plan('gunicorn autoapp:app -b 0.0.0.0:5000 # $PORT')
@@ -52,6 +68,7 @@ class ProcfileContractTests(unittest.TestCase):
             with self.subTest(command=command):
                 plan = self.plan(command)
                 self.assertEqual(plan['port'], 8000)
+                self.assertIn('RUN pip install --no-cache-dir -r requirements.txt', plan['generatedDockerfile'])
 
     def test_shell_or_unproven_script_requires_configuration(self):
         for command in (r'gunicorn service:app -b 0.0.0.0:\$PORT',

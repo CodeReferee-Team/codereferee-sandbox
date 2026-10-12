@@ -343,7 +343,9 @@ def procfile_python_recipe(repository: Path, port: int | None = None) -> dict | 
     python_port = port if port is not None else 8000
     if isinstance(python_port, bool) or not isinstance(python_port, int) or not 1 <= python_port <= 65535:
         raise ConfigurationRequired('service.port must be an integer in 1..65535.')
-    requirements = 'RUN pip install --no-cache-dir -r requirements.txt\n' if inside(repository, 'requirements.txt').is_file() else ''
+    if not inside(repository, 'requirements.txt').is_file():
+        raise ConfigurationRequired('Procfile deployment requires requirements.txt to install Python dependencies. Add requirements.txt, or declare a Dockerfile and .codereferee/validation.yaml for another installation method.')
+    requirements = 'RUN pip install --no-cache-dir -r requirements.txt\n'
     recipe = (f'FROM python:3.12-slim\nWORKDIR /app\nCOPY . .\n{requirements}'
               f'ENV PORT={python_port} HOST=0.0.0.0\nEXPOSE {python_port}\n'
               f'CMD {json.dumps(["sh", "-c", web])}\n')

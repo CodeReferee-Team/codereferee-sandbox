@@ -11,7 +11,10 @@ web: uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
 두 줄을 동시에 쓰라는 뜻이 아니라 각기 독립적인 예입니다.
-`requirements.txt`가 있으면 이미지 빌드 중 설치하며 기본 PORT는 8000입니다.
+이 자동 배포 경로는 루트 `requirements.txt`가 있어야 하며 이미지 빌드 중 설치합니다.
+없으면 ConfigurationRequired로 반환합니다. pyproject/Poetry 등 다른 설치 방식은
+Dockerfile과 validation.yaml로 명시해야 합니다. 기본 PORT는 8000입니다.
+파일이 있다는 사실만으로 실행기와 모든 의존성이 포함됐다고 보장하지는 않습니다.
 Gunicorn/Hypercorn의 bind, Uvicorn/Flask의 host와 port, Daphne의 bind와 port,
 Waitress의 listen 또는 host와 port 선언을 확인합니다. `python -m` 실행은
 위 HTTP 실행기를 지정한 경우만 지원합니다.

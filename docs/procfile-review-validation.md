@@ -60,3 +60,23 @@ WSL Ubuntu repository_checks 테스트 13개 성공(건너뛴 권한 테스트 �
 이번 추가 검증은 Sandbox 내부 E2E입니다. Backend/Redis/AI, LLM 패치 생성,
 브라우저 클릭, AWS, 외부 Prometheus 자원 지표의 전체 E2E는 재실행하지 않았습니다.
 Mac에서 이번 캐시 보완을 직접 실측한 것도 아닙니다.
+
+## 추가 리뷰: 의존성 설치 선언 누락 거부
+
+requirements.txt가 없으면 생성 이미지가 실행기를 설치하지 않는 누락을 수정했습니다.
+Procfile 자동 배포는 requirements.txt를 요구하며, 다른 설치 방식은 Dockerfile과
+validation.yaml로 명시하도록 ConfigurationRequired를 반환합니다.
+pyproject.toml만 있는 경우도 이 자동 생성 경로에서는 지원한다고 간주하지 않습니다.
+
+Windows 최종 회귀 테스트: 139개 실행 성공, POSIX 전용 1개 건너뜀.
+이 변경은 정상 의존성 설치 경로를 변경하지 않고 누락된 선언을 거부하는 조건입니다.
+위 일반 검사·Container Kill 성공 E2E는 직전 코드의 기록이며 이번 조건 추가 후
+전체 Chaos를 재실행한 기록으로 해석하지 않습니다.
+
+실제 Sandbox HTTP API에 requirements.txt를 제거한 Procfile 테스트 레포를 요청했습니다.
+요청 ID: 6efb8b40-16e3-4937-bbd2-6b5c8a438a14.
+configuration_required=true, failed_step=detect, exitCode=89 및 설치 설정 안내를 확인했습니다.
+이 응답은 기존 ConfigurationRequired 결과 계약을 유지하며 HTTP 4xx나 infra ERROR로
+변경한 것은 아닙니다. 배포·HTTP 서비스 검사는 시도하지 않았습니다.
+별도 조회로 요청 namespace·이미지가 없고 clone 작업 폴더가 제거됐음을 확인했습니다.
+원본 JSON은 로컬 evidence에만 저장합니다.
