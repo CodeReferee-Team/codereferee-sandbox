@@ -265,7 +265,49 @@ def compose_plan(repository: Path, data: dict, filename: str) -> dict:
     return plan
 
 
+PROCFILE_PYTHON_RUNNERS = {'gunicorn', 'uvicorn', 'hypercorn', 'waitress-serve',
+                           'daphne', 'flask', 'python', 'python3'}
+
+
+def procfile_python_recipe(repository: Path, port: int | None = None) -> dict | None:
+    """Procfile의 web 프로세스가 python 서비스를 '명시 선언'하면 그 명령으로 배포한다.
+
+    추측이 아니라 선언을 따른다(validation.yaml과 같은 결). 안전장치:
+    - web 명령의 실행기가 python 계열일 때만(node/ruby 등은 스킵 → 다른 경로/ConfigurationRequired).
+    - 명령이 $PORT를 참조할 때만(우리가 정한 포트에 바인딩됨을 보장). 포트를 직접 박았으면 스킵.
+    """
+    procfile = inside(repository, 'Procfile')
+    if not procfile.is_file():
+        return None
+    web = None
+    for line in procfile.read_text(encoding='utf-8').splitlines():
+        m = re.match(r'\s*web\s*:\s*(\S.*\S|\S)\s*$', line, re.IGNORECASE)
+        if m:
+            web = m.group(1).strip()
+            break
+    if not web:
+        return None
+    tokens = web.split()
+    runner = next((t for t in tokens if '=' not in t), '')  # VAR=val 접두 건너뜀
+    base = runner.rsplit('/', 1)[-1]
+    if base not in PROCFILE_PYTHON_RUNNERS:
+        return None
+    if '$PORT' not in web and '${PORT}' not in web:
+        return None
+    python_port = port if port is not None else 8000
+    if isinstance(python_port, bool) or not isinstance(python_port, int) or not 1 <= python_port <= 65535:
+        raise ConfigurationRequired('service.port must be an integer in 1..65535.')
+    requirements = 'RUN pip install --no-cache-dir -r requirements.txt\n' if inside(repository, 'requirements.txt').is_file() else ''
+    recipe = (f'FROM python:3.12-slim\nWORKDIR /app\nCOPY . .\n{requirements}'
+              f'ENV PORT={python_port} HOST=0.0.0.0\nEXPOSE {python_port}\n'
+              f'CMD {json.dumps(["sh", "-c", web])}\n')
+    return {'port': python_port, 'generatedDockerfile': recipe}
+
+
 def stack_recipe(repository: Path, port: int | None = None) -> dict | None:
+    declared = procfile_python_recipe(repository, port)
+    if declared:
+        return declared
     package_path = inside(repository, 'package.json')
     if package_path.is_file():
         try:
