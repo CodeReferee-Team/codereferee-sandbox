@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -274,26 +275,71 @@ def procfile_python_recipe(repository: Path, port: int | None = None) -> dict | 
 
     추측이 아니라 선언을 따른다(validation.yaml과 같은 결). 안전장치:
     - web 명령의 실행기가 python 계열일 때만(node/ruby 등은 스킵 → 다른 경로/ConfigurationRequired).
-    - 명령이 $PORT를 참조할 때만(우리가 정한 포트에 바인딩됨을 보장). 포트를 직접 박았으면 스킵.
+    - 실행기의 바인딩 옵션에 0.0.0.0과 $PORT가 명시되어야 한다.
+      모호한 Python 선언은 다른 실행 명령으로 추측하지 않고 설정을 요구한다.
     """
     procfile = inside(repository, 'Procfile')
     if not procfile.is_file():
         return None
-    web = None
+    if procfile.stat().st_size > 64_000:
+        raise ConfigurationRequired('Procfile exceeds 64 KB.')
+    declarations = []
     for line in procfile.read_text(encoding='utf-8').splitlines():
         m = re.match(r'\s*web\s*:\s*(\S.*\S|\S)\s*$', line, re.IGNORECASE)
         if m:
-            web = m.group(1).strip()
-            break
-    if not web:
+            declarations.append(m.group(1).strip())
+    if not declarations:
         return None
-    tokens = web.split()
-    runner = next((t for t in tokens if '=' not in t), '')  # VAR=val 접두 건너뜀
+    if len(declarations) != 1:
+        raise ConfigurationRequired('Declare exactly one Procfile web process.')
+    web = declarations[0]
+    try:
+        tokens = shlex.split(web, comments=True, posix=True)
+    except ValueError as exc:
+        raise ConfigurationRequired('Procfile web command has invalid quoting.') from exc
+    assignments = []
+    while tokens and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', tokens[0]):
+        assignments.append(tokens.pop(0))
+    runner = tokens.pop(0) if tokens else ''
     base = runner.rsplit('/', 1)[-1]
     if base not in PROCFILE_PYTHON_RUNNERS:
         return None
-    if '$PORT' not in web and '${PORT}' not in web:
-        return None
+    # Presence of $PORT alone is not a binding contract (comments/name options
+    # may mention it). Accept only explicit, reachable runner-specific binding.
+    if (len(web) > 4096 or any(a.startswith('PORT=') for a in assignments)
+            or r'\$' in web
+            or re.search(r"[;|&`]|\$\(|'[^']*\$(?:PORT|\{PORT\})", web)):
+        raise ConfigurationRequired('Procfile requires a simple command without PORT overrides; use validation.yaml.')
+    if base in {'python', 'python3'}:
+        if len(tokens) < 2 or tokens[0] != '-m' or tokens[1] not in PROCFILE_PYTHON_RUNNERS - {'python', 'python3'}:
+            raise ConfigurationRequired('Declare an explicit Python HTTP runner in validation.yaml.')
+        base = tokens[1]
+        tokens = tokens[2:]
+
+    def options(*names):
+        values = []
+        for index, token in enumerate(tokens):
+            if token in names:
+                values.append(tokens[index + 1] if index + 1 < len(tokens) else '')
+            else:
+                for name in names:
+                    if token.startswith(name + '='):
+                        values.append(token[len(name) + 1:])
+        return values
+
+    port_refs = ['$PORT', '${PORT}']
+    if base in {'gunicorn', 'hypercorn'}:
+        bindings = options('-b', '--bind')
+        valid = len(bindings) == 1 and bindings[0] in ['0.0.0.0:' + p for p in port_refs]
+    elif base == 'waitress-serve' and options('--listen'):
+        bindings = options('--listen')
+        valid = len(bindings) == 1 and bindings[0] in ['0.0.0.0:' + p for p in port_refs]
+    else:
+        hosts = options('-b', '--bind') if base == 'daphne' else options('--host')
+        ports = options('-p', '--port') if base == 'daphne' else options('--port')
+        valid = hosts == ['0.0.0.0'] and len(ports) == 1 and ports[0] in port_refs
+    if not valid:
+        raise ConfigurationRequired('Procfile must explicitly bind 0.0.0.0 and $PORT; use validation.yaml for other commands.')
     python_port = port if port is not None else 8000
     if isinstance(python_port, bool) or not isinstance(python_port, int) or not 1 <= python_port <= 65535:
         raise ConfigurationRequired('service.port must be an integer in 1..65535.')
