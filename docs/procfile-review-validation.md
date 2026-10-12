@@ -80,3 +80,49 @@ configuration_required=true, failed_step=detect, exitCode=89 및 설치 설정 �
 변경한 것은 아닙니다. 배포·HTTP 서비스 검사는 시도하지 않았습니다.
 별도 조회로 요청 namespace·이미지가 없고 clone 작업 폴더가 제거됐음을 확인했습니다.
 원본 JSON은 로컬 evidence에만 저장합니다.
+
+## 최종 경계 조건 재검토 및 E2E (2026-10-12)
+
+추가 검토에서 다음 선언이 기존 검사에 통과함을 재현했고 설정 요구로 보완했습니다.
+
+- TCP 포트 선언과 함께 Unix socket 또는 fd 실행을 지정하는 명령.
+- daemon, 설정 검사/출력 후 종료, TLS 등 foreground plain HTTP와 다른 실행 모드.
+- 생성 이미지에서 준비하지 않는 .venv/bin 등의 실행기 경로.
+- console script 이름을 python -m 모듈로 간주하는 경우.
+- 셸 주석/리다이렉션/환경 대입과 PORT 바인딩 외 변수 확장.
+  특히 $PORT#note는 실제 Bash에서 8000#note로 전달되지만 이전 shlex 주석 처리로는
+  $PORT로 잘못 판단됐습니다.
+- 생성 이미지의 PORT와 validation.yaml env.PORT가 충돌하는 경우.
+
+정상적인 직접 실행기, 지원 Python 모듈, 사용자 지정 포트, 같은 PORT 값,
+명시적 Dockerfile/설정 우선순위도 회귀 테스트로 확인했습니다.
+모든 runner의 모든 옵션을 해석하는 shell parser는 아니며, 모호한 명령은
+명시적인 Dockerfile/validation.yaml로 배포해야 합니다.
+
+### 최종 테스트
+
+- Windows: 145개 실행 성공, POSIX 전용 1개 건너뜀.
+- Docker Linux Python 3.12 + requirements.txt 고정 의존성: 전체 157개 성공, 건너뜀 없음.
+  Docker 소켓을 마운트하지 않고 소스는 readonly, 테스트 실행 폴더만 전용 tmpfs로 제공했습니다.
+- 환경 준비 중 WSL에는 FastAPI와 ensurepip가 없어 전체 실행이 실패했습니다.
+  첫 Linux 컨테이너 실행도 .runtime 쓰기 공간이 없어 테스트 1개가 실패했습니다.
+  이 실행들은 성공으로 세지 않았고, 실행 환경을 갖춘 최종 전체 실행 결과가 위 157개입니다.
+
+### 최종 코드 실제 Sandbox API E2E
+
+| 요청 | 결과 |
+|---|---|
+| c0f6543f-ff29-4df1-9dae-fef6b6f74f7a | Procfile 기반 일반 검사: HTTP 200, observed, exitCode 0 |
+| b9e361d3-edc7-4dc4-ba58-82f02ea830d9 | Container Kill: Litmus Pass/Completed, 실제 재시작 0→1, recovered true, HTTP 복구 2.57초, exitCode 0 |
+| 6936cb6f-d8eb-4a0d-ab93-2254e2a218ba | requirements.txt 누락: configuration_required=true, detect 단계 exitCode 89, 배포 미실행 |
+
+정상 두 요청은 actual clone → 요청별 patch → 의존성 검사 → Procfile 기반 이미지 생성
+→ kind 배포 → Service 경유 관측 → 결과 반환을 실행했습니다.
+요청 namespace·호스트/kind 이미지·workspace가 정리됐고 cleanup errors는 없습니다.
+거부 요청은 namespace와 요청 이미지가 없고 workspace가 제거됨을 별도 조회했습니다.
+실측 입력은 이전처럼 비관습적인 entrypoint.py와 Procfile을 사용했습니다.
+원본 JSON은 로컬 .runtime/evidence/procfile-pr17-e2e에 보존합니다.
+
+이 기록은 최종 Procfile 처리 코드의 로컬 Sandbox 내부 검증입니다.
+AWS, Backend/AI 전체 연동, LLM patch 생성, 모든 runner의 실제 서비스 실행,
+모든 공개 레포의 배포 성공을 보장하는 기록으로 확대하지 않습니다.
