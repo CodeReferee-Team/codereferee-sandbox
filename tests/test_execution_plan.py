@@ -33,6 +33,31 @@ class ExecutionPlanTests(unittest.TestCase):
         self.assertEqual(target['deployment'], 'repository-api')
         self.assertIn('automountServiceAccountToken: false', manifest)
 
+    def test_procfile_web_command_declares_python_service(self):
+        # 선언형 신호: Procfile web 라인이 실행 명령을 명시한다(추측 아님). python 신호
+        # (requirements.txt + gunicorn)가 있으면 그 명령으로 배포한다.
+        self.write('Procfile', 'web: gunicorn autoapp:app -b 0.0.0.0:$PORT -w 3\n')
+        self.write('autoapp.py', 'from conduit.app import create_app\napp = create_app()\n')
+        self.write('requirements.txt', 'flask\ngunicorn\n')
+        plan = resolve_plan(self.root)
+        self.assertEqual(plan['source'], 'stack_detection')
+        self.assertEqual(plan['port'], 8000)
+        self.assertIn('gunicorn autoapp:app', plan['generatedDockerfile'])
+        self.assertIn('ENV PORT=8000', plan['generatedDockerfile'])
+
+    def test_procfile_without_python_signal_is_not_guessed(self):
+        # python 신호 없는 Procfile(ruby 등)은 python으로 오배포하지 않고 거부한다.
+        self.write('Procfile', 'web: bundle exec rails server -b 0.0.0.0\n')
+        with self.assertRaises(ConfigurationRequired):
+            resolve_plan(self.root)
+
+    def test_procfile_with_conflicting_hardcoded_port_is_not_guessed(self):
+        # $PORT를 안 쓰고 포트를 직접 박은 명령은 readiness 포트와 어긋날 수 있어 거부한다.
+        self.write('Procfile', 'web: gunicorn autoapp:app -b 0.0.0.0:5000\n')
+        self.write('requirements.txt', 'flask\ngunicorn\n')
+        with self.assertRaises(ConfigurationRequired):
+            resolve_plan(self.root)
+
     def test_ambiguous_ports_and_library_require_configuration(self):
         with self.assertRaises(ConfigurationRequired):
             resolve_plan(self.root)

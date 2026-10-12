@@ -171,7 +171,9 @@ def verify_repository(repository: Path, cache: Path, request: str, *, timeout: i
         # and no submitted commands. Repository code never gets CAP_CHOWN; all
         # check steps run with cap-drop ALL.
         setup_name = 'codereferee-check-setup-' + uuid4().hex[:16]
-        owner = CHECK_OWNER or '1000:1000'
+        # Windows keeps non-Node checks at the image's default root uid. With
+        # cap-drop ALL, root cannot write a cache owned by uid 1000 either.
+        owner = CHECK_OWNER or ('1000:1000' if plan['stack'] == 'node' else '0:0')
         directories = ' '.join(CACHE_DIRECTORIES)
         try:
             initialized = subprocess.run(['docker', 'run', '--rm', '--name', setup_name, '--network', 'none',
