@@ -94,6 +94,10 @@ namespace만으로 악성 코드의 보안 격리가 완성됐다고 보지 않�
 `{{dependency.db.host}}`, `port`, `username`, `database`, `password`로 앱 환경 변수에 연결한다.
 빈 DB에는 기존 서비스 데이터가 없으므로 스키마 생성·seed·검증 API는 프로젝트의 재현 설정에 맞아야 한다.
 여러 DB 중 장애 타깃을 임의로 선택하지 않는다.
+배포는 앱 Deployment에 이어 렌더링된 모든 의존성 Deployment의 rollout도 기다린다. 앱의 healthPath는
+보통 의존성을 쓰지 않아 먼저 Ready가 되므로, 기다리지 않으면 의존성 시나리오가 `No Ready Pod`로 깨진다
+(2026-10-19 실측, postgres 이미지를 캐시한 뒤에도 재현). 의존성 이미지와 설정은 Sandbox가 정하므로
+의존성 rollout 실패는 `failed_step: dependencies`, `infrastructure_error`로 반환한다.
 
 Windows에서도 clone별 `core.autocrlf=false`로 원격 LF를 보존하며 전역 Git 설정은 변경하지 않는다.
 

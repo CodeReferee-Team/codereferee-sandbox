@@ -19,6 +19,11 @@ Whik 최초 재현 시 Windows clone이 원격 LF를 CRLF로 바꾸어 `gradlew`
 clone별 `core.autocrlf=false` 적용 후 재검증했다. 이 실패도 `observed` + `failed_step: build`로
 반환되어 인프라 오류와 구분되는 경로를 확인했다.
 
+설치 단계(`install`)에서 패키지 저장소에 닿지 못한 실패는 레포 결함이 아니므로 `infrastructure_error`로
+반환한다. 판단은 `repository_checks.REGISTRY_UNREACHABLE`의 정확한 문구(TLS 검증 실패, DNS 실패, 연결 거부,
+Docker Hub 429 등)만 본다. 없는 패키지 이름(npm E404, pip `No matching distribution`)은 레포 결함으로 남는다.
+레포가 이 문구를 일부러 출력해도 FAILED가 ERROR(판정 불가)로 바뀔 뿐 합격이 되지는 않는다.
+
 ## Whik 재현에서 명시한 내용
 
 - 원격 레포에는 로컬 JAR를 COPY하는 Dockerfile이 있어 clone 내부에서 Gradle `bootJar`를 수행하는

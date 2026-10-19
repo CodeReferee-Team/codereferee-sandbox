@@ -339,7 +339,7 @@ def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
     if not request.request_id:
         raise HTTPException(status_code=422, detail="deploymentProfile requires requestId.")
     command = [sys.executable, str(DEPLOY_SCRIPT), '--repository-url', request.repository_url,
-               '--request-id', request.request_id,
+               '--request-id=' + request.request_id,
                *(['--profile', request.deployment_profile] if request.deployment_profile else []),
                *(['--branch', request.branch] if request.branch else []),
                *(['--commit-sha', request.commit_sha] if request.commit_sha else [])]

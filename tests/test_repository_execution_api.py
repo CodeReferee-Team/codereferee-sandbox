@@ -23,6 +23,15 @@ class RepositoryExecutionApiTests(unittest.TestCase):
         self.assertNotIn('--profile', run.call_args.args[0])
 
     @patch('app.main.subprocess.run')
+    def test_request_id_starting_with_dash_is_not_read_as_an_option(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, json.dumps({'target': {}}), '')
+        deploy_repository(RepositoryValidationRequest(repositoryUrl='https://github.com/test/repo',
+                          requestId='-2-dep-s09', chaosMode='suite_quick'))
+        command = run.call_args.args[0]
+        self.assertIn('--request-id=-2-dep-s09', command)
+        self.assertNotIn('--request-id', command)
+
+    @patch('app.main.subprocess.run')
     def test_build_failure_is_not_reclassified_as_infrastructure(self, run):
         expected = {'exitCode': 1, 'observationStatus': 'observed',
                     'sandboxReport': {'failed_step': 'build'}}

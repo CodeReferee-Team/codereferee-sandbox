@@ -125,6 +125,19 @@ CHECK_OWNER = f'{os.getuid()}:{os.getgid()}' if hasattr(os, 'getuid') else None
 CACHE_DIRECTORIES = ('/cache/home', '/cache/gradle', '/cache/python', '/cache/workspace', '/cache/npm', '/cache/node-home')
 
 
+# 설치 단계에서 패키지 저장소에 닿지 못했다는 정확한 문구. 레포 결함이 아니라 인프라 문제다.
+# 로그 문구로 분기하는 예외 경로라 성공 로그에도 나오는 낱말은 쓰지 않는다. 레포가 이 문구를
+# 일부러 찍어도 결과는 FAILED가 ERROR(판정 불가)로 바뀔 뿐 합격이 되지는 않는다.
+REGISTRY_UNREACHABLE = ('CERTIFICATE_VERIFY_FAILED', 'Temporary failure in name resolution',
+    'Failed to establish a new connection', 'EAI_AGAIN', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNREFUSED', 'ECONNRESET',
+    'SELF_SIGNED_CERT_IN_CHAIN', 'toomanyrequests', '429 Too Many Requests', 'java.net.UnknownHostException',
+    'Connect timed out')
+
+
+def registry_unreachable(phase: str, stdout: str, stderr: str) -> bool:
+    return phase == 'install' and any(term in stdout or term in stderr for term in REGISTRY_UNREACHABLE)
+
+
 def junit_test_count(repository: Path, stack: str) -> int | None:
     pattern = '**/build/test-results/test/TEST-*.xml' if stack == 'gradle' else '**/target/surefire-reports/TEST-*.xml'
     count = 0
@@ -292,8 +305,9 @@ def _verify_repository(repository: Path, cache_name: str, request: str, *, timeo
             'duration_ms': round((time.monotonic()-started)*1000), 'timed_out': timed_out,
             'stdout': stdout[-4000:], 'stderr': stderr[-4000:]})
         if code != 0:
+            infrastructure = code is None or code == 125 or registry_unreachable(phase, stdout, stderr)
             report.update(outcome='failed', failed_step=phase, exit_code=code,
-                infrastructure_error=code is None or code == 125, timed_out=timed_out)
+                infrastructure_error=infrastructure, timed_out=timed_out)
             if phase == 'test': report['test_execution'] = 'failed'
             elif report['test_execution'] == 'pending': report['test_execution'] = 'not_attempted'
             raise CheckFailure(report)
