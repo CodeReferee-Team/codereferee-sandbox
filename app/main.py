@@ -117,6 +117,7 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
             deployed = deploy_repository(request)
             deployed_target = ChaosTarget.model_validate(deployed["target"])
         metrics_target = deployed_target or request.chaos_target
+        require_declared_dependencies(modes or [], metrics_target)
         if metrics_target is not None:
             from scripts.metrics_lifecycle import RequestMetrics
             metrics_session = RequestMetrics(request.request_id or str(uuid4()), metrics_target.model_dump(by_alias=True))
@@ -263,6 +264,18 @@ def parse_experiment_result(completed: subprocess.CompletedProcess[str]) -> dict
     result.setdefault("exitCode", completed.returncode)
     result.setdefault("timedOut", False)
     return result
+
+
+DEPENDENCY_SCENARIOS = {'dependency_database_outage': 'database', 'dependency_redis_outage': 'redis'}
+
+
+def require_declared_dependencies(modes: list[str], target: ChaosTarget | None) -> None:
+    # The profile is only known after deploy, but checking here, before the first
+    # fault, keeps a suite from running every earlier scenario only to be refused.
+    for mode in modes:
+        dependency = DEPENDENCY_SCENARIOS.get(mode)
+        if dependency and target is not None and not target.dependencies.get(dependency):
+            raise HTTPException(status_code=422, detail=f'Profile must declare the {dependency} dependency and a business probe.')
 
 
 def experiment_command(request: RepositoryValidationRequest, deployed_target: ChaosTarget | None = None) -> list[str]:
