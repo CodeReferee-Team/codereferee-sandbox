@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -27,6 +28,8 @@ DEPENDENCY_SCRIPT = PROJECT_ROOT / 'scripts' / 'run_dependency_experiment.py'
 DEPLOY_SCRIPT = PROJECT_ROOT / "scripts" / "deploy_repository.py"
 SMOKE_SCRIPT = PROJECT_ROOT / 'scripts' / 'run_service_smoke.py'
 EXPERIMENT_TIMEOUT_SECONDS = 300
+DEPLOY_TIMEOUT_SECONDS = 1200
+SMOKE_TIMEOUT_SECONDS = 180
 experiment_lock = threading.Lock()
 
 app = FastAPI(title="CodeReferee Sandbox", version="0.1.0")
@@ -78,6 +81,34 @@ class RepositoryValidationRequest(BaseModel):
     deployment_profile: str | None = Field(default=None, alias="deploymentProfile")
     patch_diff: str | None = Field(default=None, alias="patchDiff")
     pods_affected_count: int | None = Field(default=None, alias="podsAffectedCount", strict=True, ge=1, le=16)
+class StageTimeout(Exception):
+    def __init__(self, stage: str, seconds: float):
+        super().__init__(f'{stage} exceeded {round(seconds)} seconds')
+        self.stage = stage
+        self.seconds = seconds
+
+
+def run_bounded(command: list[str], *, stage: str, seconds: int,
+                env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    """subprocess.run whose timeout also kills grandchildren.
+
+    subprocess.run(timeout=) kills only the direct child. docker build and
+    kubectl kept running after it and fought the next request for the node.
+    """
+    environment = dict(env or os.environ, PYTHONIOENCODING='utf-8')
+    process = subprocess.Popen(command, cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, encoding='utf-8', errors='replace', env=environment,
+                               start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        raise StageTimeout(stage, seconds) from None
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 @app.get("/health")
@@ -107,6 +138,7 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="A Chaos v1 experiment is already running.")
 
     request_started = time.monotonic()
+    stage = 'deploy'
     metrics_session = None
     try:
         deployed: dict[str, Any] | None = None
@@ -123,31 +155,39 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
             metrics_session = RequestMetrics(request.request_id or str(uuid4()), metrics_target.model_dump(by_alias=True))
             metrics_session.start()
         if request.chaos_mode is None and deployed_target is not None:
+            stage = 'smoke'
             command = [sys.executable, str(SMOKE_SCRIPT), '--namespace', deployed_target.namespace,
                        '--service', deployed_target.service, '--service-port', str(deployed_target.service_port),
                        '--probe-path', deployed_target.probe_path]
-            completed = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True, text=True,
-                encoding='utf-8', errors='replace', env=dict(os.environ, PYTHONIOENCODING='utf-8'), timeout=180)
+            completed = run_bounded(command, stage=stage, seconds=SMOKE_TIMEOUT_SECONDS)
             result = parse_experiment_result(completed)
             attach_repository_checks(result, deployed)
             result.update(requestId=request.request_id, repositoryUrl=request.repository_url,
                           commitSha=deployed['repository']['commitSha'], deployment=deployed)
             return result
         scenario_results = []
-        for mode in modes or [request.chaos_mode]:
+        planned = modes or [request.chaos_mode]
+        suite = bool(modes) and (len(modes) > 1 or request.chaos_mode.startswith('suite_'))
+        for mode in planned:
+            stage = f'scenario:{mode}'
             scenario_request = request.model_copy(update={'chaos_mode': mode})
             command = experiment_command(scenario_request, deployed_target)
-            child_environment = os.environ.copy()
-            child_environment['PYTHONIOENCODING'] = 'utf-8'
-            completed = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True,
-                                       text=True, encoding='utf-8', errors='replace',
-                                       env=child_environment, timeout=EXPERIMENT_TIMEOUT_SECONDS)
+            try:
+                completed = run_bounded(command, stage=stage, seconds=EXPERIMENT_TIMEOUT_SECONDS)
+            except StageTimeout as exc:
+                if not suite:
+                    raise
+                scenario_results.append(skipped_scenario(mode, 'sandbox_execution_timeout', str(exc)))
+                continue
             result = parse_experiment_result(completed)
             result['chaosMode'] = mode
             scenario_results.append(result)
-            if result.get('observationStatus') == 'infrastructure_error' or result.get('exitCode') != 0:
+            # A scenario the infrastructure could not run says nothing about the
+            # next one, so the suite goes on. A target that did not recover makes
+            # every later baseline unhealthy, so the suite stops there.
+            if result.get('observationStatus') != 'infrastructure_error' and result.get('exitCode') != 0:
                 break
-        if modes and (len(modes) > 1 or request.chaos_mode.startswith('suite_')):
+        if suite:
             result = aggregate_scenarios(request.chaos_mode, modes, scenario_results)
         # Chaos v1 performs HTTP probes through kubectl port-forward, but it
         # does not start a headless browser.  Make that distinction explicit
@@ -168,15 +208,11 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         return result
     except HTTPException:
         raise
-    except (RuntimeError, KeyError, json.JSONDecodeError) as exc:
-        result = infrastructure_error(str(exc), request, timed_out=False)
+    except StageTimeout as exc:
+        result = infrastructure_error(str(exc), request, timed_out=True, stage=exc.stage)
         return result
-    except subprocess.TimeoutExpired as exc:
-        result = infrastructure_error(
-            f"Chaos v1 experiment exceeded {EXPERIMENT_TIMEOUT_SECONDS} seconds: {exc}",
-            request,
-            timed_out=True,
-        )
+    except (RuntimeError, KeyError, json.JSONDecodeError) as exc:
+        result = infrastructure_error(str(exc), request, timed_out=False, stage=stage)
         return result
     finally:
         if metrics_session is not None:
@@ -214,29 +250,82 @@ def attach_repository_checks(result: dict, deployed: dict) -> None:
 
 
 def aggregate_scenarios(mode: str, planned: list[str], results: list[dict[str, Any]]) -> dict[str, Any]:
-    infra = next((r for r in results if r.get('observationStatus') == 'infrastructure_error'), None)
-    recovered = len(results) == len(planned) and all(r.get('exitCode') == 0 for r in results)
-    count = sum(r.get('metrics', {}).get('probe_count', 0) for r in results)
-    successes = sum(r.get('metrics', {}).get('success_count', 0) for r in results)
-    recovery = [r.get('chaos_observation', {}).get('recovery_seconds') for r in results]
+    """Fold per-scenario results into one suite result.
+
+    Scenarios the infrastructure could not run are listed with the reason, and
+    the scenarios that did run are judged on their own. Only when none ran is
+    the suite an infrastructure error.
+    """
+    observed = [r for r in results if r.get('observationStatus') == 'observed']
+    stopped = [stopped_entry(r) for r in results if r.get('observationStatus') != 'observed']
+    ran = {r.get('chaosMode') for r in results}
+    not_executed = [m for m in planned if m not in ran]
+    first_infra = next((r for r in results if r.get('observationStatus') != 'observed'), None)
+    none_observed = not observed
+    recovered = bool(observed) and all(r.get('exitCode') == 0 for r in observed)
+    count = sum(r.get('metrics', {}).get('probe_count', 0) for r in observed)
+    successes = sum(r.get('metrics', {}).get('success_count', 0) for r in observed)
+    recovery = [r.get('chaos_observation', {}).get('recovery_seconds') for r in observed]
     recovery = [v for v in recovery if isinstance(v, (int, float))]
+    source = observed[0] if observed else (results[0] if results else {})
     return {'schemaVersion': 'chaos-v1', 'scenario': mode,
-            'observationStatus': 'infrastructure_error' if infra else 'observed',
-            'exitCode': None if infra else (0 if recovered else 1),
-            'infraError': infra.get('infraError') if infra else None,
-            'stderr': infra.get('stderr', '') if infra else '',
+            'observationStatus': 'infrastructure_error' if none_observed else 'observed',
+            'exitCode': None if none_observed else (0 if recovered else 1),
+            'infraError': (first_infra or {}).get('infraError') if none_observed else None,
+            'stderr': (first_infra or {}).get('stderr', '') if none_observed else '',
+            'stoppedAt': f"scenario:{first_infra.get('chaosMode')}" if none_observed and first_infra else None,
             'timedOut': any(r.get('timedOut', False) for r in results),
-            'baseline': results[0].get('baseline', {}),
+            'baseline': source.get('baseline', {}),
             'metrics': {'availability': successes/count if count else None,
                         'error_rate': 1-successes/count if count else None,
                         'probe_count': count, 'success_count': successes, 'failure_count': count-successes,
-                        'p95_latency_ms': None, 'error_rate_denominator': 'sum of per-scenario HTTP probe counts; inspect individual scenarios for latency'},
-            'chaos_observation': {'type': 'scenario_suite', 'recovered': recovered,
+                        'p95_latency_ms': None, 'error_rate_denominator': 'sum of per-scenario HTTP probe counts of observed scenarios; inspect individual scenarios for latency'},
+            'chaos_observation': {'type': 'scenario_suite', 'recovered': recovered if observed else None,
+                # The longest outage is what the recovery bound compares against.
                 'recovery_seconds': max(recovery) if recovery else None,
-                'target_configuration': results[0].get('chaos_observation', {}).get('target_configuration', {}),
-                'abort_condition': {'triggered': bool(infra), 'reason': infra.get('infraError') if infra else None},
-                'scenarios': results, 'requested': planned, 'not_executed': planned[len(results):]},
-            'source': {'real_execution_observed': not bool(infra)}}
+                # The error budget is spent by every outage, so it uses the sum.
+                'total_downtime_seconds': round(sum(recovery), 2) if recovery else None,
+                'target_configuration': source.get('chaos_observation', {}).get('target_configuration', {}),
+                'abort_condition': {'triggered': none_observed and bool(results),
+                                    'reason': (first_infra or {}).get('infraError') if none_observed else None},
+                'scenarios': results, 'requested': planned,
+                'executed': [r.get('chaosMode') for r in observed],
+                'stopped': stopped, 'not_executed': not_executed,
+                'partial': bool(observed) and bool(stopped or not_executed)},
+            'source': {'real_execution_observed': not none_observed}}
+
+
+def stopped_entry(result: dict[str, Any]) -> dict[str, Any]:
+    """Where a scenario stopped and why, short enough for a report line."""
+    reason = litmus_failure_reason(result)
+    if reason is None:
+        lines = (result.get('stderr') or '').strip().splitlines()
+        reason = lines[-1] if lines else None
+    return {'chaosMode': result.get('chaosMode'), 'infraError': result.get('infraError'),
+            'timedOut': bool(result.get('timedOut')), 'reason': reason[:300] if reason else None}
+
+
+def litmus_failure_reason(result: dict[str, Any]) -> str | None:
+    """Litmus puts the helper's error in errorOutput.reason, often as nested JSON.
+
+    The runner's stderr only says the experiment failed. M10 stopped on
+    "failed to create tc rules: Error: Specified qdisc kind is unknown." and
+    that sentence was only here.
+    """
+    output = (((result.get('chaosResult') or {}).get('raw') or {}).get('experimentStatus') or {}).get('errorOutput') or {}
+    reason, code = output.get('reason'), output.get('errorCode')
+    if not reason:
+        return None
+    try:
+        nested = json.loads(reason)
+    except (TypeError, ValueError):
+        nested = None
+    if isinstance(nested, dict):
+        reason = nested.get('reason') or reason
+        phase = nested.get('phase')
+        code = ' '.join(str(x) for x in (code, phase) if x)
+    text = ' '.join(str(reason).replace(' :', '').split())
+    return f'{code}: {text}' if code else text
 
 
 def parse_experiment_result(completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
@@ -369,10 +458,7 @@ def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         patch_path.write_text(request.patch_diff, encoding="utf-8", newline="\n")
         command.extend(["--patch-file", str(patch_path)])
     try:
-        child_environment = os.environ.copy()
-        child_environment['PYTHONIOENCODING'] = 'utf-8'
-        completed = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True, text=True,
-                                   encoding='utf-8', errors='replace', env=child_environment, timeout=1200)
+        completed = run_bounded(command, stage='deploy', seconds=DEPLOY_TIMEOUT_SECONDS)
     finally:
         if patch_path:
             patch_path.unlink(missing_ok=True)
@@ -403,15 +489,23 @@ def cleanup_namespace(namespace: str) -> bool:
     return completed.returncode == 0
 
 
+def skipped_scenario(mode: str, code: str, reason: str) -> dict[str, Any]:
+    """A scenario that timed out before it produced an observation."""
+    return {'schemaVersion': 'chaos-v1', 'chaosMode': mode, 'observationStatus': 'infrastructure_error',
+            'exitCode': None, 'infraError': code, 'stderr': reason, 'timedOut': True}
+
+
 def infrastructure_error(
-    message: str, request: RepositoryValidationRequest, *, timed_out: bool
+    message: str, request: RepositoryValidationRequest, *, timed_out: bool, stage: str | None = None,
 ) -> dict[str, Any]:
     return {
         "exitCode": None,
         "stdout": "",
         "stderr": message,
         "timedOut": timed_out,
-        "durationMillis": EXPERIMENT_TIMEOUT_SECONDS * 1000 if timed_out else 0,
+        # Where the request stopped: deploy, smoke, or scenario:<chaosMode>.
+        "stoppedAt": stage,
+        "durationMillis": 0,
         "serverStarted": False,
         "serverUrl": None,
         "httpStatus": None,

@@ -29,6 +29,7 @@ ROLE = "codereferee-litmus-runner"
 # The official charts pull with Always, which asks the registry on every
 # experiment. A Docker Hub 429 then fails a run whose images are already cached.
 IMAGE_PULL_POLICY = 'IfNotPresent'
+MANIFEST_DIR = Path(__file__).resolve().parents[1] / '.runtime' / 'litmus'
 SCENARIOS = ('pod_delete', 'container_kill', 'pod_cpu_hog', 'pod_network_latency', 'pod_network_loss', 'pod_memory_hog', 'pod_memory_oom')
 
 
@@ -365,10 +366,35 @@ spec:
         raise SystemExit(completed.stderr.strip() or completed.stdout.strip())
 
 
+def read_experiment(experiment_name: str) -> subprocess.CompletedProcess:
+    return subprocess.run(kubectl_command("get", "chaosexperiment", experiment_name, "-n", "litmus", "-o", "json"),
+                          text=True, capture_output=True, env=kubectl_environment())
+
+
+def install_experiment(experiment_name: str) -> None:
+    """Reinstall a definition bootstrap_litmus.sh left out, from the chart it already downloaded.
+
+    A bootstrap that stops at the operator rollout installs no experiments, and every scenario
+    then fails on NotFound. The charts are on disk, so the sandbox can fill the gap itself.
+    """
+    charts = sorted(MANIFEST_DIR.glob(f"{experiment_name}-v*.yaml"))
+    if not charts:
+        raise SystemExit(f"ChaosExperiment {experiment_name} is not installed and no chart was found in "
+                         f"{MANIFEST_DIR}; run scripts/bootstrap_litmus.sh.")
+    installed = subprocess.run(kubectl_command("apply", "-n", "litmus", "-f", str(charts[-1])), text=True,
+                               capture_output=True, env=kubectl_environment())
+    if installed.returncode:
+        raise SystemExit(installed.stderr.strip() or installed.stdout.strip())
+
+
 def copy_experiment(namespace: str, experiment_name: str) -> None:
     """Copy the official chart's namespaced Pod Delete definition to the target."""
-    source = subprocess.run(kubectl_command("get", "chaosexperiment", experiment_name, "-n", "litmus", "-o", "json"),
-                            text=True, capture_output=True, env=kubectl_environment(), check=True)
+    source = read_experiment(experiment_name)
+    if source.returncode and "NotFound" in source.stderr:
+        install_experiment(experiment_name)
+        source = read_experiment(experiment_name)
+    if source.returncode:
+        raise SystemExit(source.stderr.strip() or source.stdout.strip())
     experiment = json.loads(source.stdout)
     experiment.pop("status", None)
     metadata = experiment["metadata"]

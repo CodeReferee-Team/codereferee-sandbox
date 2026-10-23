@@ -48,7 +48,7 @@ class FaultScopeContractTests(unittest.TestCase):
             paths.append(path)
             self.assertEqual(path.read_bytes(), diff.encode('utf-8'))
             return subprocess.CompletedProcess(command, 0, json.dumps({'target': {}}), '')
-        with patch('app.main.subprocess.run', side_effect=execute):
+        with patch('app.main.run_bounded', side_effect=execute):
             deploy_repository(request)
         self.assertTrue(paths)
         self.assertFalse(paths[0].exists(), 'Temporary patch must be removed.')

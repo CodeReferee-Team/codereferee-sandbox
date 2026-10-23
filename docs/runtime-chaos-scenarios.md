@@ -4,8 +4,31 @@
 
 kind + Litmus에서 사용자 레포를 한 번 clone/build/배포한 뒤 선택한 시나리오를
 순서대로 실행한다. 각 시나리오는 건강한 baseline을 확인한 후 주입하고, 해제 후
-복구를 확인한다. 실패 또는 인프라 오류가 나면 다음 시나리오는 실행하지 않고
-`not_executed`에 기록한다. 요청 namespace는 마지막에 정리한다.
+복구를 확인한다. 요청 namespace는 마지막에 정리한다.
+
+### 묶음이 중간에 막혔을 때 (2026-10-23 개정)
+
+- **대상이 복구하지 못하면** 거기서 멈추고 남은 시나리오는 `not_executed`에 적는다.
+  복구하지 못한 대상에서는 다음 시나리오의 baseline부터 실패하기 때문이다.
+- **인프라 오류(netem 없음, Litmus helper 실패, 시나리오 300초 초과)는 그 시나리오만
+  `stopped`에 적고 다음 시나리오로 넘어간다.** 한 시나리오를 못 돌린 것은 다음 시나리오에
+  대해 아무것도 말해주지 않는다. 예전에는 여기서 묶음 전체가 끝나 ERROR가 됐다(M10).
+- 하나라도 관측했으면 묶음은 `observed`다. 판정은 관측한 시나리오로만 하고
+  `chaos_observation.partial: true`, `executed`, `stopped`(시나리오, `infraError`,
+  마지막 오류 줄), `not_executed`로 무엇이 빠졌는지 남긴다. AI는 이 목록을 리포트 본문에
+  옮겨 빠진 검사를 통과한 것처럼 읽히지 않게 한다.
+- 하나도 관측하지 못했으면 지금처럼 `infrastructure_error`이고 `stoppedAt`에 처음 막힌
+  시나리오를 적는다.
+- `recovery_seconds`는 가장 긴 복구(복구 상한 비교용), `total_downtime_seconds`는 복구 시간의
+  합(에러 버짓용)이다. 에러 버짓은 장애마다 쓴 시간이 쌓인다.
+- 요청 전체가 인프라 오류로 끝나면 `stoppedAt`이 `deploy`, `smoke`, `scenario:<chaosMode>` 중
+  어디서 멈췄는지 알려준다.
+- 단계 시간 초과는 프로세스 그룹 전체를 죽인다. 예전에는 직계 자식만 죽어서 그 아래
+  `docker build`와 `kubectl`이 남았고, 출력 파이프를 쥔 채로 핸들러를 붙잡았다.
+- 클러스터에 `ChaosExperiment` 정의가 없으면(`NotFound`) `bootstrap_litmus.sh`가 받아둔
+  `.runtime/litmus/<실험>-v*.yaml`로 다시 설치하고 이어서 돈다. 부트스트랩이 operator rollout에서
+  멈추면 정의가 하나도 깔리지 않아 묶음 전체가 인프라 오류가 됐다(2026-10-23 kind 실측).
+  차트 파일도 없거나 `NotFound`가 아닌 kubectl 오류면 그대로 인프라 오류다.
 
 새로 지원하는 `chaosMode`:
 
