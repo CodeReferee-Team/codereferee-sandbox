@@ -15,14 +15,14 @@ class RepositoryExecutionApiTests(unittest.TestCase):
         self.assertTrue(result['sandboxReport']['service_smoke_observed'])
         self.assertNotIn('serverStarted', result)
 
-    @patch('app.main.subprocess.run')
+    @patch('app.main.run_bounded')
     def test_missing_profile_is_omitted_to_enable_repository_discovery(self, run):
         run.return_value = subprocess.CompletedProcess([], 0, json.dumps({'target': {}}), '')
         deploy_repository(RepositoryValidationRequest(repositoryUrl='https://github.com/test/repo',
                           requestId='test', chaosMode='suite_quick'))
         self.assertNotIn('--profile', run.call_args.args[0])
 
-    @patch('app.main.subprocess.run')
+    @patch('app.main.run_bounded')
     def test_request_id_starting_with_dash_is_not_read_as_an_option(self, run):
         run.return_value = subprocess.CompletedProcess([], 0, json.dumps({'target': {}}), '')
         deploy_repository(RepositoryValidationRequest(repositoryUrl='https://github.com/test/repo',
@@ -31,7 +31,7 @@ class RepositoryExecutionApiTests(unittest.TestCase):
         self.assertIn('--request-id=-2-dep-s09', command)
         self.assertNotIn('--request-id', command)
 
-    @patch('app.main.subprocess.run')
+    @patch('app.main.run_bounded')
     def test_build_failure_is_not_reclassified_as_infrastructure(self, run):
         expected = {'exitCode': 1, 'observationStatus': 'observed',
                     'sandboxReport': {'failed_step': 'build'}}
@@ -42,7 +42,7 @@ class RepositoryExecutionApiTests(unittest.TestCase):
         self.assertEqual(failure.exception.result, expected)
 
     @patch('app.main.cleanup_namespace')
-    @patch('app.main.subprocess.run')
+    @patch('app.main.run_bounded')
     @patch('app.main.deploy_repository')
     def test_no_chaos_request_observes_actual_repository_not_fixture(self, deploy, run, cleanup):
         deploy.return_value = {'repository': {'commitSha': 'sha'}, 'target': {
@@ -63,7 +63,7 @@ class UndeclaredDependencyTests(unittest.TestCase):
     """
 
     @patch('app.main.cleanup_namespace', return_value=True)
-    @patch('app.main.subprocess.run')
+    @patch('app.main.run_bounded')
     @patch('app.main.deploy_repository')
     def test_undeclared_dependency_is_refused_before_any_fault_runs(self, deploy, run, cleanup):
         from fastapi import HTTPException
