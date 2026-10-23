@@ -48,5 +48,50 @@ class ImagePullPolicyTests(unittest.TestCase):
         self.assertEqual(engine['spec']['components']['runner']['imagePullPolicy'], 'IfNotPresent')
 
 
+class MissingExperimentTests(unittest.TestCase):
+    """클러스터에서 ChaosExperiment 정의가 빠져 있으면 받아둔 차트로 다시 설치한다.
+
+    부트스트랩이 operator rollout에서 멈추면 실험 정의가 하나도 설치되지 않는다. 그러면
+    묶음의 모든 시나리오가 `kubectl get chaosexperiment` NotFound로 인프라 오류가 된다.
+    차트 파일은 디스크에 있으므로 샌드박스가 스스로 메울 수 있다.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / 'pod-delete-v3.30.0.yaml').write_text('kind: ChaosExperiment\n', encoding='utf-8')
+        self.chart = {'apiVersion': 'litmuschaos.io/v1alpha1', 'kind': 'ChaosExperiment',
+                      'metadata': {'name': 'pod-delete', 'namespace': 'litmus'},
+                      'spec': {'definition': {'image': 'go-runner:3.30.0'}}}
+
+    @patch('run_litmus_pod_delete.subprocess.run')
+    def test_reinstalls_missing_definition_from_cached_chart(self, run):
+        not_found = subprocess.CompletedProcess([], 1, '', 'Error from server (NotFound): chaosexperiments "pod-delete" not found')
+        ok = subprocess.CompletedProcess([], 0, '', '')
+        run.side_effect = [not_found, ok, subprocess.CompletedProcess([], 0, json.dumps(self.chart), ''), ok]
+        with patch.object(litmus, 'MANIFEST_DIR', self.tmp):
+            litmus.copy_experiment('target', 'pod-delete')
+        install = run.call_args_list[1].args[0]
+        self.assertIn(str(self.tmp / 'pod-delete-v3.30.0.yaml'), install)
+        self.assertIn('litmus', install)
+        self.assertEqual(json.loads(run.call_args_list[3].kwargs['input'])['metadata']['namespace'], 'target')
+
+    @patch('run_litmus_pod_delete.subprocess.run')
+    def test_missing_chart_file_reports_what_is_missing(self, run):
+        run.return_value = subprocess.CompletedProcess([], 1, '', 'Error from server (NotFound): not found')
+        with patch.object(litmus, 'MANIFEST_DIR', self.tmp), self.assertRaises(SystemExit) as raised:
+            litmus.copy_experiment('target', 'container-kill')
+        self.assertIn('container-kill', str(raised.exception.code))
+        self.assertEqual(run.call_count, 1)
+
+    @patch('run_litmus_pod_delete.subprocess.run')
+    def test_other_kubectl_errors_are_not_masked(self, run):
+        run.return_value = subprocess.CompletedProcess([], 1, '', 'Unable to connect to the server')
+        with patch.object(litmus, 'MANIFEST_DIR', self.tmp), self.assertRaises(SystemExit) as raised:
+            litmus.copy_experiment('target', 'pod-delete')
+        self.assertIn('Unable to connect', str(raised.exception.code))
+        self.assertEqual(run.call_count, 1)
+
+
 if __name__ == '__main__':
     unittest.main()

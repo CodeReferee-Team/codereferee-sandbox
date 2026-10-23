@@ -25,6 +25,10 @@ kind + Litmus에서 사용자 레포를 한 번 clone/build/배포한 뒤 선택
   어디서 멈췄는지 알려준다.
 - 단계 시간 초과는 프로세스 그룹 전체를 죽인다. 예전에는 직계 자식만 죽어서 그 아래
   `docker build`와 `kubectl`이 남았고, 출력 파이프를 쥔 채로 핸들러를 붙잡았다.
+- 클러스터에 `ChaosExperiment` 정의가 없으면(`NotFound`) `bootstrap_litmus.sh`가 받아둔
+  `.runtime/litmus/<실험>-v*.yaml`로 다시 설치하고 이어서 돈다. 부트스트랩이 operator rollout에서
+  멈추면 정의가 하나도 깔리지 않아 묶음 전체가 인프라 오류가 됐다(2026-10-23 kind 실측).
+  차트 파일도 없거나 `NotFound`가 아닌 kubectl 오류면 그대로 인프라 오류다.
 
 새로 지원하는 `chaosMode`:
 
