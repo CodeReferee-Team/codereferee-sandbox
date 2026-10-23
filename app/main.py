@@ -117,6 +117,7 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
             deployed = deploy_repository(request)
             deployed_target = ChaosTarget.model_validate(deployed["target"])
         metrics_target = deployed_target or request.chaos_target
+        require_declared_dependencies(modes or [], metrics_target)
         if metrics_target is not None:
             from scripts.metrics_lifecycle import RequestMetrics
             metrics_session = RequestMetrics(request.request_id or str(uuid4()), metrics_target.model_dump(by_alias=True))
@@ -265,6 +266,18 @@ def parse_experiment_result(completed: subprocess.CompletedProcess[str]) -> dict
     return result
 
 
+DEPENDENCY_SCENARIOS = {'dependency_database_outage': 'database', 'dependency_redis_outage': 'redis'}
+
+
+def require_declared_dependencies(modes: list[str], target: ChaosTarget | None) -> None:
+    # The profile is only known after deploy, but checking here, before the first
+    # fault, keeps a suite from running every earlier scenario only to be refused.
+    for mode in modes:
+        dependency = DEPENDENCY_SCENARIOS.get(mode)
+        if dependency and target is not None and not target.dependencies.get(dependency):
+            raise HTTPException(status_code=422, detail=f'Profile must declare the {dependency} dependency and a business probe.')
+
+
 def experiment_command(request: RepositoryValidationRequest, deployed_target: ChaosTarget | None = None) -> list[str]:
     if request.chaos_mode in (None, "fixture") and request.chaos_target is None:
         return [sys.executable, str(EXPERIMENT_SCRIPT)]
@@ -339,7 +352,7 @@ def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
     if not request.request_id:
         raise HTTPException(status_code=422, detail="deploymentProfile requires requestId.")
     command = [sys.executable, str(DEPLOY_SCRIPT), '--repository-url', request.repository_url,
-               '--request-id', request.request_id,
+               '--request-id=' + request.request_id,
                *(['--profile', request.deployment_profile] if request.deployment_profile else []),
                *(['--branch', request.branch] if request.branch else []),
                *(['--commit-sha', request.commit_sha] if request.commit_sha else [])]

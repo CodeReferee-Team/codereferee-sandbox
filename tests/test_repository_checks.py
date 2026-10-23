@@ -116,6 +116,32 @@ class RepositoryChecksTests(unittest.TestCase):
         self.assertEqual(failed.exception.report['failed_step'], 'test')
         self.assertFalse(failed.exception.report['infrastructure_error'])
 
+    def install_failure(self, stderr):
+        self.node({'test': 'node --test'})
+        ok = subprocess.CompletedProcess([], 0, '', '')
+        repository_checks.subprocess.run.side_effect = [ok, ok, subprocess.CompletedProcess([], 1, '', stderr), ok, ok]
+        with self.assertRaises(CheckFailure) as failed:
+            verify_repository(self.root, self.cache, 'test')
+        return failed.exception.report
+
+    @patch('repository_checks.subprocess.run')
+    def test_registry_unreachable_during_install_is_infrastructure(self, run):
+        # 패키지 저장소에 닿지 못한 것은 레포 결함이 아니다. FAILED로 내보내면 멀쩡한 코드가 불합격이 된다.
+        for stderr in ('npm ERR! code EAI_AGAIN\nnpm ERR! request to https://registry.npmjs.org/x failed',
+                       "Retrying (Retry(total=4)) after connection broken by 'SSLError(SSLCertVerificationError(1, "
+                       "'[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed'))'",
+                       'toomanyrequests: You have reached your unauthenticated pull rate limit.'):
+            with self.subTest(stderr=stderr[:30]):
+                report = self.install_failure(stderr)
+                self.assertTrue(report['infrastructure_error'])
+                self.assertEqual('install', report['failed_step'])
+
+    @patch('repository_checks.subprocess.run')
+    def test_missing_package_during_install_stays_a_repository_failure(self, run):
+        report = self.install_failure('npm ERR! code E404\nnpm ERR! 404 Not Found - GET https://registry.npmjs.org/no-such-pkg')
+        self.assertFalse(report['infrastructure_error'])
+        self.assertEqual(1, report['exit_code'])
+
     def test_explicit_verification_uses_same_yaml_and_does_not_import_host_env(self):
         self.write('gradlew', 'wrapper')
         self.write('.codereferee/validation.yaml', 'verification:\n  stack: gradle\n  test: [sh, ./gradlew, test]\n  env: {SPRING_PROFILES_ACTIVE: test}\n')

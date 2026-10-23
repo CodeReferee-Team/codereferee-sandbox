@@ -26,6 +26,9 @@ from pod_selection import owned_pods, select_ready_pods, pod_evidence, validate_
 # Delete and Container Kill faults.  A namespaced RoleBinding limits them to
 # each request-scoped target namespace.
 ROLE = "codereferee-litmus-runner"
+# The official charts pull with Always, which asks the registry on every
+# experiment. A Docker Hub 429 then fails a run whose images are already cached.
+IMAGE_PULL_POLICY = 'IfNotPresent'
 SCENARIOS = ('pod_delete', 'container_kill', 'pod_cpu_hog', 'pod_network_latency', 'pod_network_loss', 'pod_memory_hog', 'pod_memory_oom')
 
 
@@ -36,7 +39,8 @@ def fault_environment(scenario: str, container: str, duration: int, memory_mb: i
     env = {'TOTAL_CHAOS_DURATION': str(duration), 'CHAOS_INTERVAL': '60',
            'FORCE': 'true', 'TARGET_CONTAINER': container, 'PODS_AFFECTED_PERC': '100',
            'CONTAINER_RUNTIME': os.getenv('CODEREFEREE_CONTAINER_RUNTIME', 'containerd'),
-           'SOCKET_PATH': os.getenv('CODEREFEREE_RUNTIME_SOCKET', '/run/containerd/containerd.sock')}
+           'SOCKET_PATH': os.getenv('CODEREFEREE_RUNTIME_SOCKET', '/run/containerd/containerd.sock'),
+           'LIB_IMAGE_PULL_POLICY': IMAGE_PULL_POLICY}
     if scenario == 'pod_cpu_hog':
         env.update(CPU_CORES='1', CPU_LOAD='80')
     if scenario.startswith('pod_network_'):
@@ -345,6 +349,9 @@ spec:
   jobCleanUpPolicy: delete
   engineState: active
   chaosServiceAccount: litmus-admin
+  components:
+    runner:
+      imagePullPolicy: {IMAGE_PULL_POLICY}
   experiments:
     - name: {experiment}
       spec:
@@ -368,6 +375,7 @@ def copy_experiment(namespace: str, experiment_name: str) -> None:
     for field in ("creationTimestamp", "generation", "resourceVersion", "uid", "managedFields", "annotations"):
         metadata.pop(field, None)
     metadata["namespace"] = namespace
+    experiment.setdefault("spec", {}).setdefault("definition", {})["imagePullPolicy"] = IMAGE_PULL_POLICY
     copied = subprocess.run(kubectl_command("apply", "-f", "-"), input=json.dumps(experiment), text=True,
                             capture_output=True, env=kubectl_environment())
     if copied.returncode:

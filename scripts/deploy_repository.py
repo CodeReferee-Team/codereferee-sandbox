@@ -106,6 +106,13 @@ def main() -> int:
             except Exception:
                 pod_diagnostics = {'pods': [], 'collection_errors': ['diagnostics_collection_failed']}
             raise
+        # 앱의 healthPath는 보통 의존성을 쓰지 않아 먼저 Ready가 된다. 의존성 Pod를 기다리지 않으면
+        # 의존성 시나리오가 'No Ready Pod'로 깨진다. 의존성 이미지와 설정은 Sandbox가 정하므로
+        # 여기서의 실패는 레포 결함이 아니라 인프라 문제다.
+        stage = 'dependencies'
+        for dependency in deployments_in(rendered):
+            if dependency != target['deployment']:
+                wait_rollout(namespace, dependency, args.rollout_timeout_seconds)
         workspace_cleanup = cleanup_workspace(workspace)
         print(json.dumps({
             "repository": {"url": args.repository_url, "branch": args.branch, "commitSha": commit_sha},
@@ -133,7 +140,7 @@ def main() -> int:
         if isinstance(exc, CheckFailure):
             checks = exc.report
             stage = checks['failed_step']
-        infra = bool((checks or {}).get('infrastructure_error')) or isinstance(exc, (FileNotFoundError, OSError)) or stage == 'prepare' or any(
+        infra = bool((checks or {}).get('infrastructure_error')) or isinstance(exc, (FileNotFoundError, OSError)) or stage in ('prepare', 'dependencies') or any(
             term in message.lower() for term in ('cannot connect to the docker daemon', 'dockerdesktoplinuxengine', 'error during connect'))
         code = None if infra else (89 if isinstance(exc, ConfigurationRequired) else
             (checks or {}).get('exit_code', 1))
@@ -266,6 +273,11 @@ def render_template(template: Path, namespace: str, image: str, profile: dict[st
     for placeholder, value in values.items():
         rendered = rendered.replace(placeholder, value)
     return rendered
+
+
+def deployments_in(rendered: str) -> list[str]:
+    return [item['metadata']['name'] for item in yaml.safe_load_all(rendered)
+            if isinstance(item, dict) and item.get('kind') == 'Deployment']
 
 
 def wait_rollout(namespace: str, deployment: str, timeout: int) -> None:
