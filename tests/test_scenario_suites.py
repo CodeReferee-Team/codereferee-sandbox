@@ -111,3 +111,18 @@ class ScenarioSuiteTests(unittest.TestCase):
         self.assertEqual(stopped['infraError'], 'sandbox_execution_timeout')
         self.assertTrue(stopped['timedOut'])
         self.assertEqual(result['observationStatus'], 'observed')
+
+
+class StoppedReasonTests(unittest.TestCase):
+    def test_litmus_helper_reason_is_preferred_over_the_runner_stderr(self):
+        from app.main import stopped_entry
+        # M10 (2026-10-19): the runner stderr only said "Chaos v1 experiment failed."
+        result = {'chaosMode': 'litmus_pod_network_latency', 'infraError': 'litmus_fault_execution_failed',
+                  'stderr': 'Chaos v1 experiment failed.',
+                  'chaosResult': {'raw': {'experimentStatus': {'errorOutput': {
+                      'errorCode': 'HELPER_ERROR',
+                      'reason': '{"source":"pod-network-latency-helper-qxmhge","errorCode":"HELPER_ERROR",'
+                                '"phase":"ChaosInject","reason":"failed to create tc rules: '
+                                'Error: Specified qdisc kind is unknown.\\n :"}'}}}}}
+        self.assertEqual(stopped_entry(result)['reason'],
+                         'HELPER_ERROR ChaosInject: failed to create tc rules: Error: Specified qdisc kind is unknown.')

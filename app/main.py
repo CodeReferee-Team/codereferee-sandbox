@@ -297,9 +297,35 @@ def aggregate_scenarios(mode: str, planned: list[str], results: list[dict[str, A
 
 def stopped_entry(result: dict[str, Any]) -> dict[str, Any]:
     """Where a scenario stopped and why, short enough for a report line."""
-    reason = (result.get('stderr') or '').strip().splitlines()
+    reason = litmus_failure_reason(result)
+    if reason is None:
+        lines = (result.get('stderr') or '').strip().splitlines()
+        reason = lines[-1] if lines else None
     return {'chaosMode': result.get('chaosMode'), 'infraError': result.get('infraError'),
-            'timedOut': bool(result.get('timedOut')), 'reason': reason[-1][:300] if reason else None}
+            'timedOut': bool(result.get('timedOut')), 'reason': reason[:300] if reason else None}
+
+
+def litmus_failure_reason(result: dict[str, Any]) -> str | None:
+    """Litmus puts the helper's error in errorOutput.reason, often as nested JSON.
+
+    The runner's stderr only says the experiment failed. M10 stopped on
+    "failed to create tc rules: Error: Specified qdisc kind is unknown." and
+    that sentence was only here.
+    """
+    output = (((result.get('chaosResult') or {}).get('raw') or {}).get('experimentStatus') or {}).get('errorOutput') or {}
+    reason, code = output.get('reason'), output.get('errorCode')
+    if not reason:
+        return None
+    try:
+        nested = json.loads(reason)
+    except (TypeError, ValueError):
+        nested = None
+    if isinstance(nested, dict):
+        reason = nested.get('reason') or reason
+        phase = nested.get('phase')
+        code = ' '.join(str(x) for x in (code, phase) if x)
+    text = ' '.join(str(reason).replace(' :', '').split())
+    return f'{code}: {text}' if code else text
 
 
 def parse_experiment_result(completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
