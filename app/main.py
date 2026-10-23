@@ -30,6 +30,17 @@ SMOKE_SCRIPT = PROJECT_ROOT / 'scripts' / 'run_service_smoke.py'
 EXPERIMENT_TIMEOUT_SECONDS = 300
 DEPLOY_TIMEOUT_SECONDS = 1200
 SMOKE_TIMEOUT_SECONDS = 180
+# Namespace and image cleanup run after the budget ends; keep this much back.
+CLEANUP_RESERVE_SECONDS = 90
+# Measured per-scenario durations without deploy, small Python repository,
+# kind on one VM (scenario-tests/REPORT.md, 2026-10-19). A scenario in a suite
+# is not started when the remaining budget cannot hold it. Unmeasured ones use
+# the per-scenario ceiling.
+SCENARIO_ESTIMATE_SECONDS = {
+    'litmus_container_kill': 130, 'litmus_pod_delete': 140, 'litmus_pod_cpu_hog': 115,
+    'litmus_pod_memory_hog': 100, 'deployment_scale_down': 60, 'rollout_restart': 60,
+    'service_selector_blackhole': 30,
+}
 experiment_lock = threading.Lock()
 
 app = FastAPI(title="CodeReferee Sandbox", version="0.1.0")
@@ -81,14 +92,42 @@ class RepositoryValidationRequest(BaseModel):
     deployment_profile: str | None = Field(default=None, alias="deploymentProfile")
     patch_diff: str | None = Field(default=None, alias="patchDiff")
     pods_affected_count: int | None = Field(default=None, alias="podsAffectedCount", strict=True, ge=1, le=16)
+    # Seconds the caller will wait for this response. Without it each stage
+    # keeps its own ceiling, as before.
+    deadline_seconds: int | None = Field(default=None, alias="deadlineSeconds", ge=60, le=7200)
+
+
+class Budget:
+    """One deadline shared by every stage of a request."""
+
+    def __init__(self, deadline_seconds: int | None, started: float):
+        self.started = started
+        self.limit = None if deadline_seconds is None else max(0, deadline_seconds - CLEANUP_RESERVE_SECONDS)
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+    def remaining(self) -> float | None:
+        return None if self.limit is None else self.limit - self.elapsed()
+
+    def timeout_for(self, stage_limit: int) -> tuple[float, bool]:
+        """Seconds to allow and whether the request budget, not the stage, is the bound."""
+        remaining = self.remaining()
+        if remaining is None or remaining >= stage_limit:
+            return stage_limit, False
+        return max(1.0, remaining), True
+
+
 class StageTimeout(Exception):
-    def __init__(self, stage: str, seconds: float):
-        super().__init__(f'{stage} exceeded {round(seconds)} seconds')
+    def __init__(self, stage: str, seconds: float, budget_bound: bool = False):
+        super().__init__(f'{stage} exceeded {round(seconds)} seconds'
+                         + (' (request deadline)' if budget_bound else ''))
         self.stage = stage
         self.seconds = seconds
+        self.budget_bound = budget_bound
 
 
-def run_bounded(command: list[str], *, stage: str, seconds: int,
+def run_bounded(command: list[str], *, stage: str, seconds: float, budget_bound: bool = False,
                 env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """subprocess.run whose timeout also kills grandchildren.
 
@@ -107,7 +146,7 @@ def run_bounded(command: list[str], *, stage: str, seconds: int,
         except ProcessLookupError:
             pass
         process.communicate()
-        raise StageTimeout(stage, seconds) from None
+        raise StageTimeout(stage, seconds, budget_bound) from None
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
@@ -138,6 +177,7 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="A Chaos v1 experiment is already running.")
 
     request_started = time.monotonic()
+    budget = Budget(request.deadline_seconds, request_started)
     stage = 'deploy'
     metrics_session = None
     try:
@@ -146,7 +186,7 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         if request.deployment_profile or (request.chaos_mode != 'fixture' and request.chaos_target is None):
             if not request.request_id:
                 request = request.model_copy(update={'request_id': str(uuid4())})
-            deployed = deploy_repository(request)
+            deployed = deploy_repository(request, budget)
             deployed_target = ChaosTarget.model_validate(deployed["target"])
         metrics_target = deployed_target or request.chaos_target
         require_declared_dependencies(modes or [], metrics_target)
@@ -159,7 +199,8 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
             command = [sys.executable, str(SMOKE_SCRIPT), '--namespace', deployed_target.namespace,
                        '--service', deployed_target.service, '--service-port', str(deployed_target.service_port),
                        '--probe-path', deployed_target.probe_path]
-            completed = run_bounded(command, stage=stage, seconds=SMOKE_TIMEOUT_SECONDS)
+            seconds, bound = budget.timeout_for(SMOKE_TIMEOUT_SECONDS)
+            completed = run_bounded(command, stage=stage, seconds=seconds, budget_bound=bound)
             result = parse_experiment_result(completed)
             attach_repository_checks(result, deployed)
             result.update(requestId=request.request_id, repositoryUrl=request.repository_url,
@@ -172,12 +213,21 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
             stage = f'scenario:{mode}'
             scenario_request = request.model_copy(update={'chaos_mode': mode})
             command = experiment_command(scenario_request, deployed_target)
+            remaining = budget.remaining()
+            needed = SCENARIO_ESTIMATE_SECONDS.get(mode, EXPERIMENT_TIMEOUT_SECONDS)
+            if suite and remaining is not None and remaining < needed:
+                scenario_results.append(skipped_scenario(
+                    mode, 'sandbox_budget_exceeded',
+                    f'{max(0, round(remaining))}s left of the request deadline; this scenario needs about {needed}s.',
+                    timed_out=False))
+                continue
+            seconds, bound = budget.timeout_for(EXPERIMENT_TIMEOUT_SECONDS)
             try:
-                completed = run_bounded(command, stage=stage, seconds=EXPERIMENT_TIMEOUT_SECONDS)
+                completed = run_bounded(command, stage=stage, seconds=seconds, budget_bound=bound)
             except StageTimeout as exc:
                 if not suite:
                     raise
-                scenario_results.append(skipped_scenario(mode, 'sandbox_execution_timeout', str(exc)))
+                scenario_results.append(skipped_scenario(mode, timeout_code(exc), str(exc)))
                 continue
             result = parse_experiment_result(completed)
             result['chaosMode'] = mode
@@ -209,7 +259,7 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
     except HTTPException:
         raise
     except StageTimeout as exc:
-        result = infrastructure_error(str(exc), request, timed_out=True, stage=exc.stage)
+        result = infrastructure_error(str(exc), request, timed_out=True, stage=exc.stage, code=timeout_code(exc))
         return result
     except (RuntimeError, KeyError, json.JSONDecodeError) as exc:
         result = infrastructure_error(str(exc), request, timed_out=False, stage=stage)
@@ -435,7 +485,7 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
     return command
 
 
-def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
+def deploy_repository(request: RepositoryValidationRequest, budget: Budget | None = None) -> dict[str, Any]:
     if request.chaos_mode is not None and request.chaos_mode not in SCENARIOS and request.chaos_mode not in SUITES and not (request.chaos_mode or '').startswith('suite_custom__'):
         raise HTTPException(status_code=422, detail="deploymentProfile requires a supported chaosMode.")
     if not request.request_id:
@@ -458,7 +508,8 @@ def deploy_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         patch_path.write_text(request.patch_diff, encoding="utf-8", newline="\n")
         command.extend(["--patch-file", str(patch_path)])
     try:
-        completed = run_bounded(command, stage='deploy', seconds=DEPLOY_TIMEOUT_SECONDS)
+        seconds, bound = (budget or Budget(None, time.monotonic())).timeout_for(DEPLOY_TIMEOUT_SECONDS)
+        completed = run_bounded(command, stage='deploy', seconds=seconds, budget_bound=bound)
     finally:
         if patch_path:
             patch_path.unlink(missing_ok=True)
@@ -489,14 +540,19 @@ def cleanup_namespace(namespace: str) -> bool:
     return completed.returncode == 0
 
 
-def skipped_scenario(mode: str, code: str, reason: str) -> dict[str, Any]:
-    """A scenario that timed out before it produced an observation."""
+def timeout_code(exc: StageTimeout) -> str:
+    return 'sandbox_budget_exceeded' if exc.budget_bound else 'sandbox_execution_timeout'
+
+
+def skipped_scenario(mode: str, code: str, reason: str, *, timed_out: bool = True) -> dict[str, Any]:
+    """A scenario that produced no observation: it timed out or was not started."""
     return {'schemaVersion': 'chaos-v1', 'chaosMode': mode, 'observationStatus': 'infrastructure_error',
-            'exitCode': None, 'infraError': code, 'stderr': reason, 'timedOut': True}
+            'exitCode': None, 'infraError': code, 'stderr': reason, 'timedOut': timed_out}
 
 
 def infrastructure_error(
     message: str, request: RepositoryValidationRequest, *, timed_out: bool, stage: str | None = None,
+    code: str | None = None,
 ) -> dict[str, Any]:
     return {
         "exitCode": None,
@@ -516,7 +572,7 @@ def infrastructure_error(
         "runCommand": [sys.executable, str(EXPERIMENT_SCRIPT)],
         "schemaVersion": "chaos-v1",
         "observationStatus": "infrastructure_error",
-        "infraError": "sandbox_execution_timeout" if timed_out else "sandbox_execution_failed",
+        "infraError": code or ("sandbox_execution_timeout" if timed_out else "sandbox_execution_failed"),
         "requestId": request.request_id,
         "repositoryUrl": request.repository_url,
         "branch": request.branch,
