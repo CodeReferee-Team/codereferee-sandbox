@@ -83,9 +83,27 @@ class RepositoryChecksTests(unittest.TestCase):
         # 준비 컨테이너만 CHOWN 을 받는다. 제출된 코드는 받지 않는다.
         self.assertEqual(['CHOWN'], [setup[index + 1] for index, item in enumerate(setup) if item == '--cap-add'])
         self.assertNotIn('type=bind', ' '.join(setup))
-        self.assertIn('chown ' + (repository_checks.CHECK_OWNER or '1000:1000'), setup[-1])
+        self.assertIn('chown ' + (repository_checks.CHECK_OWNER or '0:0'), setup[-1])
         for directory in ('/cache/home', '/cache/gradle', '/cache/python'):
             self.assertIn(directory, setup[-1])
+
+    @patch('repository_checks.CHECK_OWNER', None)
+    @patch('repository_checks.subprocess.run')
+    def test_windows_python_cache_matches_default_check_user(self, run):
+        self.write('requirements.txt', 'fastapi\nuvicorn\n')
+        self.write('entrypoint.py', 'value = 1\n')
+        run.return_value = subprocess.CompletedProcess([], 0, '', '')
+        verify_repository(self.root, self.cache, 'test')
+        setup = next(c.args[0] for c in run.call_args_list if '--cap-add' in c.args[0])
+        self.assertIn('chown 0:0 /cache', setup[-1])
+        steps = [c.args[0] for c in run.call_args_list
+                 if c.args[0][:2] == ['docker', 'run'] and '--cap-add' not in c.args[0]]
+        self.assertTrue(steps)
+        for step in steps:
+            # pip install --user is unrelated to docker run --user.
+            self.assertNotIn('--user', step[:step.index('python:3.12-slim')])
+            self.assertIn('--cap-drop', step)
+            self.assertNotIn('--cap-add', step)
 
     @patch('repository_checks.subprocess.run')
     def test_unwritable_repository_is_reported_as_infrastructure_not_a_repo_failure(self, run):
