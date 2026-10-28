@@ -20,6 +20,7 @@ from collect_baseline import kubectl_command, kubectl_environment
 from in_cluster_probe import InClusterProbe
 from run_pod_kill_experiment import get_target_configuration, get_ready_pod, metrics_from_probes, probe_once
 from pod_selection import owned_pods, select_ready_pods, pod_evidence, validate_count
+from target_oom import run_target_oom
 
 
 # The Sandbox bootstrap installs only the permissions declared by the Pod
@@ -31,11 +32,12 @@ ROLE = "codereferee-litmus-runner"
 IMAGE_PULL_POLICY = 'IfNotPresent'
 MANIFEST_DIR = Path(__file__).resolve().parents[1] / '.runtime' / 'litmus'
 SCENARIOS = ('pod_delete', 'container_kill', 'pod_cpu_hog', 'pod_network_latency', 'pod_network_loss', 'pod_memory_hog', 'pod_memory_oom')
+LITMUS_SCENARIOS = tuple(scenario for scenario in SCENARIOS if scenario != 'pod_memory_oom')
 
 
 def fault_environment(scenario: str, container: str, duration: int, memory_mb: int = 32,
                       target_pods: list[str] | None = None) -> dict[str, str]:
-    if scenario not in SCENARIOS or not 1 <= duration <= 60:
+    if scenario not in LITMUS_SCENARIOS or not 1 <= duration <= 60:
         raise ValueError('Unsupported fault or duration outside 1..60 seconds.')
     env = {'TOTAL_CHAOS_DURATION': str(duration), 'CHAOS_INTERVAL': '60',
            'FORCE': 'true', 'TARGET_CONTAINER': container, 'PODS_AFFECTED_PERC': '100',
@@ -184,7 +186,7 @@ def main() -> int:
         limit = memory_megabytes(selected.get('resources', {}).get('limits', {}).get('memory', ''))
         if limit < 32 or limit > 4096:
             raise RuntimeError('Memory faults require a container memory limit between 32Mi and 4Gi.')
-        memory_mb = max(1, int(limit * (1.25 if args.scenario == 'pod_memory_oom' else 0.2)))
+        memory_mb = max(1, int(limit * 0.2))
     target_configuration = get_target_configuration(target["namespace"], target["deployment"])
     with InClusterProbe(target['namespace'], target['service'], int(target['servicePort']),
                         timeout=args.request_timeout_seconds, local_port=args.local_port,
@@ -193,21 +195,35 @@ def main() -> int:
         if not all(probe['success'] for probe in baseline['probes']):
             raise RuntimeError('Target baseline is unhealthy; fault injection was skipped.')
         pods_before = read_owned_pods(target)
-        selected_pods = select_ready_pods(pods_before, args.pods_affected_count, target_container) if args.pods_affected_count is not None else []
+        custom_oom = args.scenario == 'pod_memory_oom'
+        selected_pods = select_ready_pods(pods_before, args.pods_affected_count or len(pods_before), target_container) if args.pods_affected_count is not None or custom_oom else []
         target_names = [pod['metadata']['name'] for pod in selected_pods] if selected_pods else None
         if selected_pods:
             source_pod = pod_evidence(selected_pods[0], target_container)
-        environment = fault_environment(args.scenario, target_container, args.fault_seconds, memory_mb, target_names)
+        environment = {} if custom_oom else fault_environment(args.scenario, target_container, args.fault_seconds, memory_mb, target_names)
         fault_started_monotonic = time.monotonic()
         fault_started_at = now_utc()
-        apply(target["namespace"], name, target["deployment"], target["labelSelector"], args.scenario, target_container,
-              args.fault_seconds, memory_mb, target_pods=target_names)
-        result, recovery_probes = wait_for_result(target["namespace"], name, args.timeout_seconds, args.local_port,
-                                                   args.request_timeout_seconds, observer=observer)
-        recovery_probes.extend(observer.collect(5))
-        outcome = recovery_outcome(result, recovery_probes)
+        if custom_oom:
+            outcome, recovery_probes = run_target_oom(target['namespace'], selected_pods, target_container,
+                                                      observer, args.timeout_seconds, fault_started_at)
+            result = {'mechanism': 'cgroup_v2_memory_max', 'helper_reports': outcome['helper_reports']}
+            environment = {'mechanism': 'cgroup_v2_memory_max', 'target_memory_max_bytes': 1,
+                           'original_limit_restored': all(r.get('restore') in ('restored', 'target_cgroup_removed')
+                                                          for r in outcome['helper_reports']) and bool(outcome['helper_reports']),
+                           'fault_count': 1}
+        else:
+            apply(target["namespace"], name, target["deployment"], target["labelSelector"], args.scenario, target_container,
+                  args.fault_seconds, memory_mb, target_pods=target_names)
+            result, recovery_probes = wait_for_result(target["namespace"], name, args.timeout_seconds, args.local_port,
+                                                       args.request_timeout_seconds, observer=observer)
+            recovery_probes.extend(observer.collect(5))
+            outcome = recovery_outcome(result, recovery_probes)
         pods_after = read_owned_pods(target)
         fault_scope = scope_evidence(args.pods_affected_count, pods_before, pods_after, selected_pods, target_container, result)
+        if custom_oom:
+            fault_scope.update(selection_method='exact_container_cgroup',
+                               target_oom_evidence=outcome['target_oom_evidence'], missing_reported_pods=[],
+                               reported_pod_scope_matches=None)
         if fault_scope['unexpected_reported_pods']:
             outcome = {'observationStatus': 'infrastructure_error', 'recovered': None,
                        'exitCode': None, 'infraError': 'fault_target_scope_mismatch'}
@@ -231,12 +247,18 @@ def main() -> int:
                     termination = status.get('lastState', {}).get('terminated')
                     if termination:
                         terminations.append({k: termination.get(k) for k in ('reason', 'exitCode', 'startedAt', 'finishedAt')})
+    failure_phase = ('cleanup' if outcome['infraError'] == 'oom_helper_cleanup_failed' else
+                     'restoration' if outcome['infraError'] == 'oom_restore_failed' else
+                     'injection' if outcome['infraError'] else 'recovery') if not recovered else None
     output = {"schemaVersion": "chaos-v1", "scenario": args.scenario, "observationStatus": observation_status,
               'exitCode': outcome['exitCode'],
               'infraError': outcome['infraError'],
+              'timedOut': outcome.get('timedOut', False),
+              'failurePhase': failure_phase,
+              'failureKind': ('infrastructure' if outcome['infraError'] else 'resilience') if not recovered else None,
               'probeTransport': 'in_cluster_http',
-              "target": target, "replicas": target_configuration["replicas"], "chaosEngine": name, "chaosResult": result,
-              "chaos_observation": {"type": args.scenario, "kill_method": f"litmus_{args.scenario}", "started_at": fault_started_at,
+              "target": target, "replicas": target_configuration["replicas"], "chaosEngine": None if custom_oom else name, "chaosResult": result,
+              "chaos_observation": {"type": args.scenario, "kill_method": 'cgroup_v2_memory_max' if custom_oom else f"litmus_{args.scenario}", "started_at": fault_started_at,
                                     "recovered": recovered,
                                     "recovered_at": recovered_at, "recovery_seconds": measured_recovery_seconds(recovery_probes) if recovered else None,
                                     'recovery_measurement': 'first_failed_http_request_to_first_success_after_last_failure; 0 when no HTTP outage was sampled',
@@ -244,8 +266,8 @@ def main() -> int:
                                     'fault_parameters': environment,
                                     'fault_scope': fault_scope,
                                     'last_terminations': terminations,
-                                    'oom_observed': oom_during_experiment(terminations, fault_started_at,
-                                        source_pod.get('restart_count', 0), replacement_pod.get('restart_count', 0)) if args.scenario == 'pod_memory_oom' else None,
+                                    'oom_observed': outcome.get('oom_observed') if custom_oom else None,
+                                    'target_oom_evidence': outcome.get('target_oom_evidence', []),
                                     'target_container': target_container,
                                     'target_restart_count': source_pod.get('restart_count'),
                                     'replacement_restart_count': replacement_pod.get('restart_count'),
@@ -258,6 +280,9 @@ def main() -> int:
                                     "abort_condition": {"triggered": result.get("verdict") == "Stopped",
                                       "reason": result.get("verdict") if result.get("verdict") != "Pass" else None}},
               "source": {"real_execution_observed": observation_status == 'observed',
+                         'failure': {'kind': 'infrastructure' if outcome['infraError'] else 'resilience',
+                                     'phase': failure_phase,
+                                     'code': outcome['infraError'] or ('recovery_timeout' if outcome.get('timedOut') else 'recovery_failed')} if not recovered else None,
                          'http_observation_available': True, "target": target.get("deployment")}}
     if baseline is not None:
         probes = [*baseline["probes"], *recovery_probes]
@@ -312,7 +337,9 @@ def load_target(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def apply(namespace: str, engine: str, deployment: str, selector: str, scenario: str, target_container: str, duration: int = 15, memory_mb: int = 32, overrides: dict[str, str] | None = None, *, target_pods: list[str] | None = None) -> None:
-    experiment = 'pod-memory-hog' if scenario == 'pod_memory_oom' else scenario.replace("_", "-")
+    if scenario == 'pod_memory_oom':
+        raise ValueError('OOM uses the target cgroup injector, not the Litmus memory stress helper.')
+    experiment = scenario.replace("_", "-")
     copy_experiment(namespace, experiment)
     environment = fault_environment(scenario, target_container, duration, memory_mb, target_pods)
     environment.update(overrides or {})
