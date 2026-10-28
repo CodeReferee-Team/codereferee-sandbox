@@ -140,19 +140,32 @@ def main() -> int:
         if isinstance(exc, CheckFailure):
             checks = exc.report
             stage = checks['failed_step']
-        infra = bool((checks or {}).get('infrastructure_error')) or isinstance(exc, (FileNotFoundError, OSError)) or stage in ('prepare', 'dependencies') or any(
+        timed_out = isinstance(exc, subprocess.TimeoutExpired) or bool((checks or {}).get('timed_out'))
+        infra = timed_out or bool((checks or {}).get('infrastructure_error')) or isinstance(exc, (FileNotFoundError, OSError)) or stage in ('prepare', 'dependencies') or any(
             term in message.lower() for term in ('cannot connect to the docker daemon', 'dockerdesktoplinuxengine', 'error during connect'))
         code = None if infra else (89 if isinstance(exc, ConfigurationRequired) else
             (checks or {}).get('exit_code', 1))
         report = dict(checks or {}, schema_version='sandbox-result.v1', outcome='failed', failed_step=stage,
             configuration_required=isinstance(exc, ConfigurationRequired))
         report.setdefault('verification_declared', False)
+        if timed_out:
+            report['execution_limit'] = {'stage': stage,
+                'elapsedSeconds': round(time.monotonic()-started, 2),
+                'limitSeconds': getattr(exc, 'timeout', None) or (checks or {}).get('execution_limit_seconds'),
+                'elapsedScope': 'request', 'limitScope': 'stage',
+                'validationSupport': 'unsupported_within_budget'}
         if pod_diagnostics is not None:
             report['pod_diagnostics'] = pod_diagnostics
         print(json.dumps({'executionFailure': True, 'result': {
             'schemaVersion': 'sandbox-result.v1', 'observationStatus': 'infrastructure_error' if infra else 'observed',
-            'infraError': 'execution_infrastructure_error' if infra else None, 'exitCode': code,
-            'timedOut': isinstance(exc, subprocess.TimeoutExpired) or bool((checks or {}).get('timed_out')), 'durationMillis': round((time.monotonic()-started)*1000),
+            'infraError': ('sandbox_execution_timeout' if timed_out else 'execution_infrastructure_error') if infra else None, 'exitCode': code,
+            'failureKind': 'execution_limit' if timed_out else ('infrastructure' if infra else 'repository_execution'),
+            'failurePhase': stage, 'stoppedAt': stage,
+            'validationSupport': 'unsupported_within_budget' if timed_out else None,
+            'budget': {'stage': stage, 'elapsedSeconds': round(time.monotonic()-started, 2),
+                       'limitSeconds': getattr(exc, 'timeout', None) or (checks or {}).get('execution_limit_seconds'),
+                       'elapsedScope': 'request', 'limitScope': 'stage'} if timed_out else None,
+            'timedOut': timed_out, 'durationMillis': round((time.monotonic()-started)*1000),
             'stdout': '', 'stderr': message, 'serverStarted': False, 'serviceCheckAttempted': stage == 'run',
             'browserCheckAttempted': False, 'requestId': args.request_id,
             'sandboxReport': report,

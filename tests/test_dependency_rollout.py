@@ -75,6 +75,18 @@ class DependencyRolloutTest(unittest.TestCase):
         self.assertIsNone(result['exitCode'])
         self.assertEqual(result['sandboxReport']['failed_step'], 'dependencies')
 
+    def test_execution_timeout_is_not_reported_as_a_user_defect(self):
+        def timeout(_deployment):
+            raise subprocess.TimeoutExpired(['kubectl'], 1)
+        _, payload, _ = self.run_deploy(timeout)
+        result = payload['result']
+        self.assertEqual(result['observationStatus'], 'infrastructure_error')
+        self.assertEqual(result['infraError'], 'sandbox_execution_timeout')
+        self.assertIsNone(result['exitCode'])
+        self.assertTrue(result['timedOut'])
+        self.assertEqual(result['validationSupport'], 'unsupported_within_budget')
+        self.assertEqual(result['sandboxReport']['execution_limit']['stage'], 'run')
+
 
 if __name__ == '__main__':
     unittest.main()
