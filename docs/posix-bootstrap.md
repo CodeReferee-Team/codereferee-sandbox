@@ -60,7 +60,7 @@ sudo dnf install -y python3.11 python3.11-pip   # Amazon Linux 2023
 
 - pod-delete, container-kill
 - pod-cpu-hog, pod-network-latency, pod-network-loss
-- pod-memory-hog (OOM 시나리오도 같은 실험 정의를 사용)
+- pod-memory-hog (일반 메모리 부하용. 앱 OOM은 별도 cgroup 주입기를 사용하며 추가 Litmus 정의가 필요하지 않음)
 
 Scale Down·Service Blackhole·Rollout은 별도 Litmus 실험 설치가 아닌 Kubernetes API 경로다.
 kind와 Litmus 버전/커밋 핀은 기존 설치본을 유지한다. 캐시된 파일도 종류·이름·runner 버전을

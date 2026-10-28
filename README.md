@@ -12,6 +12,7 @@ CodeReferee의 Kubernetes 기반 실행 및 카오스 관측 컴포넌트입니�
 - [Mac/Linux 로컬 Sandbox 준비](docs/posix-bootstrap.md)
 - [Runtime Chaos 시나리오·검사 묶음·전체 연동](docs/runtime-chaos-scenarios.md)
 - [Litmus 전체·단일 Pod 장애 범위](docs/single-pod-chaos-scope.md)
+- [앱 OOM 실험·실행 제한 계약](docs/target-app-oom.md)
 - [범용 레포 실행 설정·자동 탐색](docs/repository-execution-plans.md)
 
 ## Kubernetes fixture
