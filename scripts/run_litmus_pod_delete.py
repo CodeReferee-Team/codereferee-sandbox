@@ -268,6 +268,10 @@ def main() -> int:
                                     'last_terminations': terminations,
                                     'oom_observed': outcome.get('oom_observed') if custom_oom else None,
                                     'target_oom_evidence': outcome.get('target_oom_evidence', []),
+                                    # chaosResult is not retained by the AI's single-result parser.
+                                    # Keep injection/restore diagnostics in its supported dict field too.
+                                    'oom_injection': {'helper_reports': outcome.get('helper_reports', []),
+                                                      'helper_cleanup_errors': outcome.get('helper_cleanup_errors', [])} if custom_oom else None,
                                     'target_container': target_container,
                                     'target_restart_count': source_pod.get('restart_count'),
                                     'replacement_restart_count': replacement_pod.get('restart_count'),
