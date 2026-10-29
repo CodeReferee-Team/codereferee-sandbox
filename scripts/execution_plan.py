@@ -94,7 +94,14 @@ def resolve_plan(repository: Path, explicit_profile: str | None = None) -> dict[
     for name in ('compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml'):
         path = inside(repository, name)
         if path.is_file():
-            return compose_plan(repository, read_yaml(path), name)
+            data = read_yaml(path)
+            services = data.get('services', {}) if isinstance(data, dict) else None
+            # A Compose file with no build target (DB-only, or pulling the published
+            # app image) does not describe how to build this source tree.
+            if isinstance(services, dict) and all(
+                    isinstance(config, dict) and 'build' not in config for config in services.values()):
+                break
+            return compose_plan(repository, data, name)
 
     dockerfile = inside(repository, 'Dockerfile')
     if dockerfile.is_file():

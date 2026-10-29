@@ -180,6 +180,15 @@ class RepositoryChecksTests(unittest.TestCase):
         self.write('requirements.txt', '')
         with self.assertRaises(ConfigurationRequired): check_plan(self.root)
 
+    def test_gradle_wrapper_wins_over_a_parallel_maven_build_like_deployment(self):
+        self.write('pom.xml', '<project/>')
+        self.write('build.gradle', '')
+        with self.assertRaises(ConfigurationRequired): check_plan(self.root)
+        self.write('gradlew', 'wrapper')
+        self.assertEqual(check_plan(self.root)['stack'], 'gradle')
+        self.node({})
+        with self.assertRaises(ConfigurationRequired): check_plan(self.root)
+
     def test_shell_expression_is_not_executed_on_the_host(self):
         self.node({})
         self.write('.codereferee/validation.yaml', 'test: "npm test; echo bypass"\n')

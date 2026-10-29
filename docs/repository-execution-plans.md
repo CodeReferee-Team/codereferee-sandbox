@@ -78,10 +78,15 @@ dependencies:
 
 - Compose: build 가능한 HTTP 서비스 하나와 단순 Redis 의존성. 여러 앱 후보이면 대상 선언 필요.
   Compose target 포트와 Dockerfile EXPOSE가 충돌하면 임의로 채택하지 않고 설정을 요청한다.
+  build 대상이 하나도 없는 Compose(DB만 띄우거나 배포된 앱 이미지를 당겨 쓰는 파일)는 이 소스를 어떻게
+  빌드하는지 말하지 않으므로 건너뛰고 아래 Dockerfile·스택 탐색으로 넘어간다. 이때 Compose의 의존성은
+  가져오지 않는다. 앱이 DB 없이 기동하지 못하면 기동 실패로 나온다(2026-10-29 실제 레포 230개 사전 점검에서
+  spring-petclinic-rest, etherpad-lite, uptime-kuma 등 14개가 이 규칙에 막혀 있었다).
 - Dockerfile: 정확히 한 EXPOSE HTTP 포트. EXPOSE는 HTTP임을 보증하지 않아 실제 probe로 검증한다.
 - Node: package.json의 start 또는 dev 스크립트, 기본 PORT=3000. 실제 앱이 이 설정을 따르지 않으면 YAML 필요.
 - Python: 제한된 Flask/FastAPI 진입점. factory/복잡한 패키지는 명시적 Dockerfile 필요.
 - Spring Boot: 단순 루트 Gradle/Maven 실행 가능한 jar 생성. 멀티모듈 산출물·실행 대상은 추가 선언/확장 필요.
+  Gradle wrapper와 pom.xml이 함께 있으면(spring-petclinic) 배포와 검사 모두 Gradle을 쓴다.
 - Kubernetes manifest 자동 변환·멀티레포 그룹·실제 온디맨드 Worker는 아직 이 단일 서비스 단계에 포함되지 않음.
 
 Compose의 bind mount·영속 데이터·호스트 Docker socket은 재사용하지 않는다.

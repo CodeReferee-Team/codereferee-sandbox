@@ -69,6 +69,21 @@ class ExecutionPlanTests(unittest.TestCase):
         with self.assertRaises(ConfigurationRequired):
             resolve_plan(self.root)
 
+    def test_compose_without_build_target_falls_through_to_repository_detection(self):
+        # DB만 띄우는 Compose(spring-petclinic 등)나 배포 이미지를 당겨 쓰는 Compose는
+        # 앱을 어떻게 빌드하는지 말하지 않는다. 그런 파일 때문에 Dockerfile과 스택 탐색을 막지 않는다.
+        self.write('compose.yaml', 'services:\n  mysql: {image: mysql:9}\n  postgres: {image: postgres:17}\n')
+        self.write('pom.xml', '<project><groupId>org.springframework.boot</groupId></project>')
+        plan = resolve_plan(self.root)
+        self.assertEqual(plan['source'], 'stack_detection')
+        self.assertEqual(plan['dependencies'], {})
+        self.write('Dockerfile', 'FROM node:20\nEXPOSE 3001\n')
+        self.write('compose.yaml', 'services:\n  app: {image: louislam/uptime-kuma:1, ports: ["3001:3001"]}\n')
+        plan = resolve_plan(self.root)
+        self.assertEqual((plan['source'], plan['port']), ('dockerfile', 3001))
+        self.write('compose.yaml', 'services: {}\n')
+        self.assertEqual(resolve_plan(self.root)['source'], 'dockerfile')
+
     def test_yaml_postgres_password_is_generated_and_shared_with_app_only(self):
         self.write('Dockerfile', 'FROM python:3.12\n')
         self.write('.codereferee/validation.yaml', 'version: 1\nservice:\n  port: 8000\n  env:\n    DB_PASSWORD: "{{dependency.db.password}}"\ndependencies:\n  db: {type: postgres}\n')
