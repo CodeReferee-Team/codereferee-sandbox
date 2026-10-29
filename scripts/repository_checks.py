@@ -198,6 +198,7 @@ def verify_repository(repository: Path, cache: Path, request: str, *, timeout: i
             setup_code, setup_error = None, 'Check cache setup failed or exceeded its bounded execution window.'
             if isinstance(exc, subprocess.TimeoutExpired):
                 report['timed_out'] = True
+                report['execution_limit_seconds'] = exc.timeout
                 try:
                     removed = subprocess.run(['docker', 'rm', '--force', setup_name], text=True,
                         capture_output=True, env=environment, timeout=30)
@@ -285,6 +286,7 @@ def _verify_repository(repository: Path, cache_name: str, request: str, *, timeo
             code, stdout, stderr = completed.returncode, completed.stdout, completed.stderr
         except subprocess.TimeoutExpired as exc:
             timed_out = True
+            report['execution_limit_seconds'] = exc.timeout
             stdout = exc.stdout or ''
             if isinstance(stdout, bytes): stdout = stdout.decode('utf-8', errors='replace')
             stderr = 'Repository check exceeded its bounded execution window.'

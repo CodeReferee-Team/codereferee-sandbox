@@ -21,7 +21,7 @@ class ImagePullPolicyTests(unittest.TestCase):
     """
 
     def test_helper_pods_reuse_cached_image(self):
-        for scenario in litmus.SCENARIOS:
+        for scenario in litmus.LITMUS_SCENARIOS:
             with self.subTest(scenario=scenario):
                 env = litmus.fault_environment(scenario, 'api', 15)
                 self.assertEqual(env['LIB_IMAGE_PULL_POLICY'], 'IfNotPresent')

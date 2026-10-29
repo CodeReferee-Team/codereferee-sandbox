@@ -54,13 +54,16 @@ AI는 응답을 600초까지 기다리는데 샌드박스는 배포에만 1,200�
 | `litmus_pod_network_latency` | eth0 지연 300ms, 15초 | cluster 내부 HTTP 지연 |
 | `litmus_pod_network_loss` | eth0 packet loss 50%, 15초 | 실제 요청 실패 또는 지연 |
 | `litmus_pod_memory_hog` | 컨테이너 memory limit의 20%, 15초 | HTTP 및 종료 상태 |
-| `litmus_pod_memory_oom` | memory limit의 125%, 15초 | 이번 실험 중 OOMKilled 여부 |
+| `litmus_pod_memory_oom` | 선택한 앱 컨테이너 cgroup의 한도를 일시 축소 후 원복 | 정확한 앱 OOMKilled + HTTP/대상 복구 |
 | `dependency_database_outage` | 선언된 DB Pod의 packet loss 100%, 15초 | 프로필의 업무 API |
 | `dependency_redis_outage` | 선언된 Redis Pod의 packet loss 100%, 15초 | 프로필의 업무 workflow |
 
 메모리 실험은 컨테이너 limit이 32Mi..4Gi로 명시된 경우만 허용한다.
-한도 초과 실험을 실행했다고 반드시 대상 앱이 OOMKilled가 되는 것은 아니다.
-`oom_observed`는 재시작 증가와 이번 실험 이후의 종료 시각·사유가 확인된 경우만 true다.
+OOM은 더 이상 Litmus `pod-memory-hog`를 재사용하지 않는다. 기존 모드명은 호환성을 위해 유지한다.
+대상 Pod UID·원래 컨테이너 ID·이번 실험의 `OOMKilled`/137 근거가 모두 맞아야
+`oom_observed: true`다. 근거가 없으면 `oom_not_triggered`, `infrastructure_error`,
+`exitCode: null`로 반환하며 성공으로 보지 않는다. 지원 조건과 실측 방법은
+[앱 OOM 실험·실행 제한 계약](target-app-oom.md)을 참고한다.
 
 ## 관측 경로
 

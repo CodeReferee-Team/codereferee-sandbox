@@ -98,6 +98,9 @@ class RequestDeadlineTests(unittest.TestCase):
         self.assertEqual(result['observationStatus'], 'infrastructure_error')
         self.assertEqual(result['infraError'], 'sandbox_budget_exceeded')
         self.assertEqual(result['stoppedAt'], 'scenario:litmus_container_kill')
+        self.assertEqual(result['failureKind'], 'execution_limit')
+        self.assertEqual(result['validationSupport'], 'unsupported_within_budget')
+        self.assertEqual(result['source']['execution_limit']['stage'], 'scenario:litmus_container_kill')
 
     def test_deploy_gets_the_request_budget(self, deploy, _cleanup):
         self.deploy_after(deploy, 0)

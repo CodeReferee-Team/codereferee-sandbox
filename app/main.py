@@ -137,12 +137,17 @@ def run_bounded(command: list[str], *, stage: str, seconds: float, budget_bound:
     environment = dict(env or os.environ, PYTHONIOENCODING='utf-8')
     process = subprocess.Popen(command, cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, encoding='utf-8', errors='replace', env=environment,
-                               start_new_session=True)
+                               **({'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == 'nt'
+                                  else {'start_new_session': True}))
     try:
         stdout, stderr = process.communicate(timeout=seconds)
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            if os.name == 'nt':
+                subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                               capture_output=True, timeout=15)
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         process.communicate()
@@ -260,6 +265,11 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         raise
     except StageTimeout as exc:
         result = infrastructure_error(str(exc), request, timed_out=True, stage=exc.stage, code=timeout_code(exc))
+        result['budget'] = {'stage': exc.stage, 'elapsedSeconds': round(budget.elapsed(), 2),
+                            'limitSeconds': budget.limit if exc.budget_bound else exc.seconds,
+                            'elapsedScope': 'request', 'limitScope': 'request' if exc.budget_bound else 'stage'}
+        result.setdefault('source', {})['execution_limit'] = dict(result['budget'],
+            validationSupport='unsupported_within_budget')
         return result
     except (RuntimeError, KeyError, json.JSONDecodeError) as exc:
         result = infrastructure_error(str(exc), request, timed_out=False, stage=stage)
@@ -559,6 +569,9 @@ def infrastructure_error(
         "stdout": "",
         "stderr": message,
         "timedOut": timed_out,
+        "failureKind": "execution_limit" if timed_out else "infrastructure",
+        "failurePhase": stage,
+        "validationSupport": "unsupported_within_budget" if timed_out else None,
         # Where the request stopped: deploy, smoke, or scenario:<chaosMode>.
         "stoppedAt": stage,
         "durationMillis": 0,

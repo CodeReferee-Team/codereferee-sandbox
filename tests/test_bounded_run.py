@@ -1,4 +1,7 @@
 import subprocess
+import os
+import tempfile
+from pathlib import Path
 import sys
 import time
 import unittest
@@ -16,11 +19,21 @@ class BoundedRunTests(unittest.TestCase):
                   'print(p.pid, flush=True)\n'
                   'time.sleep(30)\n')
         started = time.monotonic()
-        with self.assertRaises(StageTimeout) as caught:
-            run_bounded([sys.executable, '-c', script], stage='deploy', seconds=1)
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = Path(directory) / 'pid'
+            script = script.replace('print(p.pid, flush=True)',
+                f'from pathlib import Path; Path({str(pid_file)!r}).write_text(str(p.pid))')
+            with self.assertRaises(StageTimeout) as caught:
+                run_bounded([sys.executable, '-c', script], stage='deploy', seconds=1)
+            pid = int(pid_file.read_text())
         # Killing only the child leaves the grandchild holding stdout for 30 s.
         self.assertLess(time.monotonic() - started, 10)
         self.assertEqual(caught.exception.stage, 'deploy')
+        if os.name == 'nt':
+            listing = subprocess.run(['tasklist', '/FI', f'PID eq {pid}', '/FO', 'CSV', '/NH'],
+                                     capture_output=True).stdout.decode(errors='replace')
+            self.assertNotIn(f'"{pid}"', listing)
+            return
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             listing = subprocess.run(['ps', '-eo', 'stat,args'], capture_output=True, text=True).stdout

@@ -95,7 +95,9 @@ class RuntimeFaultTests(unittest.TestCase):
     def test_memory_faults_are_sized_against_declared_limit(self):
         self.assertEqual(memory_megabytes('1Gi'), 1024)
         self.assertEqual(memory_megabytes('128Mi'), 128)
-        self.assertEqual(fault_environment('pod_memory_oom', 'api', 15, 160)['MEMORY_CONSUMPTION'], '160')
+        self.assertEqual(fault_environment('pod_memory_hog', 'api', 15, 160)['MEMORY_CONSUMPTION'], '160')
+        with self.assertRaises(ValueError):
+            fault_environment('pod_memory_oom', 'api', 15, 160)
         with self.assertRaises(ValueError):
             memory_megabytes('')
     def test_recovery_excludes_runner_setup_and_preserves_unrecovered(self):

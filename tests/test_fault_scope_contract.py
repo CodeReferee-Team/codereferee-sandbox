@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from app.main import ChaosTarget, RepositoryValidationRequest, deploy_repository, experiment_command, validate_repository
-from run_litmus_pod_delete import SCENARIOS, apply, fault_environment, scope_evidence, selected_pod_after
+from run_litmus_pod_delete import LITMUS_SCENARIOS, apply, fault_environment, scope_evidence, selected_pod_after
 
 
 def pod(name, uid, restarts=0):
@@ -63,7 +63,7 @@ class FaultScopeContractTests(unittest.TestCase):
             deploy.assert_not_called()
 
     def test_all_litmus_faults_keep_legacy_percent_and_support_exact_names(self):
-        for scenario in SCENARIOS:
+        for scenario in LITMUS_SCENARIOS:
             legacy = fault_environment(scenario, 'api', 15)
             self.assertEqual(legacy['PODS_AFFECTED_PERC'], '100')
             self.assertNotIn('TARGET_PODS', legacy)

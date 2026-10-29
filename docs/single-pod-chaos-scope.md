@@ -33,7 +33,8 @@
 고정 go-runner 3.30.0은 명시한 `TARGET_PODS`가 있을 때 비율 기반 선택을 우회한다.
 따라서 `PODS_AFFECTED_PERC=100`은 유지하되 선택한 이름을 `TARGET_PODS`로 전달한다.
 설치된 6종 fault 정의는 이미 이 필드를 지원하므로 bootstrap 변경은 필요 없다.
-OOM도 pod-memory-hog를 재사용한다. 컨테이너 런타임/버전은 기존 고정값을 유지한다.
+일반 메모리 부하는 pod-memory-hog를 사용한다. 앱 OOM은 별도 cgroup 주입기가
+선택한 앱 컨테이너만 대상으로 삼는다([계약](target-app-oom.md)). Litmus 버전은 기존 고정값을 유지한다.
 
 공식 고정 소스:
 [GetTargetPods/GetPodList](https://github.com/litmuschaos/litmus-go/blob/72a9ff82a2b46c25d6fefc8d397cb91f8c03b38c/pkg/utils/common/pods.go).
