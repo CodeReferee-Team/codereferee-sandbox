@@ -287,7 +287,7 @@ def normalize_service(repository: Path, service: dict) -> dict:
     if not isinstance(path, str) or not path.startswith('/') or len(path) > 512:
         raise ConfigurationRequired('healthPath must be a relative HTTP path starting with /.')
     result = dict(service, dockerfile=dockerfile, buildContext=context, port=port,
-                  healthPath=path, replicas=replicas)
+                  healthPath=path, replicas=replicas, healthPathDeclared='healthPath' in service)
     for key in ('command', 'args'):
         if key in result and (not isinstance(result[key], list) or not result[key]
                               or any(not isinstance(value, str) for value in result[key])):
@@ -512,6 +512,14 @@ def render_plan(plan: dict, namespace: str, image: str) -> tuple[str, dict]:
         'env': [{'name': key, 'value': value} for key, value in environment.items()],
         'readinessProbe': {'httpGet': {'path': plan['healthPath'], 'port': plan['port']}, 'periodSeconds': 2, 'timeoutSeconds': 2},
         'startupProbe': {'httpGet': {'path': plan['healthPath'], 'port': plan['port']}, 'periodSeconds': 2, 'failureThreshold': 90, 'timeoutSeconds': 2}}
+    accepts_client_errors = not plan.get('healthPathDeclared', True)
+    if accepts_client_errors:
+        # 헬스 경로를 정하지 않은 레포는 GET /가 401·404여도 기동한 것이다(Spring Security, 루트 라우트 없는 API).
+        # 쿠버네티스 httpGet 프로브는 200~399만 인정하므로 포트가 열렸는지로 기동을 보고,
+        # HTTP 응답 여부(5xx 미만)는 관측 프로브가 따로 잰다.
+        for probe in ('readinessProbe', 'startupProbe'):
+            container[probe] = dict(container[probe], tcpSocket={'port': plan['port']})
+            del container[probe]['httpGet']
     for key in ('command', 'args'):
         if key in plan:
             container[key] = plan[key]
@@ -576,5 +584,6 @@ def render_plan(plan: dict, namespace: str, image: str) -> tuple[str, dict]:
                 labelSelector='app.kubernetes.io/name=' + name)
     target = {'name': 'repository-api', 'deployment': 'repository-api', 'service': 'repository-api',
               'servicePort': plan['port'], 'labelSelector': 'app.kubernetes.io/name=repository-api',
-              'probePath': plan['healthPath'], 'dependencies': target_dependencies}
+              'probePath': plan['healthPath'], 'dependencies': target_dependencies,
+              'probeAcceptsClientErrors': accepts_client_errors}
     return yaml.safe_dump_all(objects, sort_keys=False), target

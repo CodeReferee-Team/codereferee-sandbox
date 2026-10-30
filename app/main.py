@@ -74,6 +74,9 @@ class ChaosTarget(BaseModel):
     name: str | None = None
     dependencies: dict[str, Any] = Field(default_factory=dict)
     probe_path: str = Field(default='/', alias='probePath')
+    # 헬스 경로를 선언하지 않은 자동 배포 대상은 4xx도 응답으로 센다(collect_baseline.answered).
+    # 필드가 없으면 pydantic이 조용히 버리므로 여기 자리를 둔다.
+    probe_accepts_client_errors: bool = Field(default=False, alias='probeAcceptsClientErrors')
 
 
 class RepositoryExecutionFailure(Exception):
@@ -130,6 +133,12 @@ class StageTimeout(Exception):
         self.stage = stage
         self.seconds = seconds
         self.budget_bound = budget_bound
+
+
+def probe_environment(target: 'ChaosTarget | None') -> dict[str, str] | None:
+    if target is None or not target.probe_accepts_client_errors:
+        return None
+    return dict(os.environ, CODEREFEREE_PROBE_SUCCESS_BELOW='500')
 
 
 def run_bounded(command: list[str], *, stage: str, seconds: float, budget_bound: bool = False,
@@ -210,7 +219,8 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
                        '--service', deployed_target.service, '--service-port', str(deployed_target.service_port),
                        '--probe-path', deployed_target.probe_path]
             seconds, bound = budget.timeout_for(SMOKE_TIMEOUT_SECONDS)
-            completed = run_bounded(command, stage=stage, seconds=seconds, budget_bound=bound)
+            completed = run_bounded(command, stage=stage, seconds=seconds, budget_bound=bound,
+                                    env=probe_environment(deployed_target))
             result = parse_experiment_result(completed)
             attach_repository_checks(result, deployed)
             result.update(requestId=request.request_id, repositoryUrl=request.repository_url,
@@ -233,7 +243,8 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
                 continue
             seconds, bound = budget.timeout_for(EXPERIMENT_TIMEOUT_SECONDS)
             try:
-                completed = run_bounded(command, stage=stage, seconds=seconds, budget_bound=bound)
+                completed = run_bounded(command, stage=stage, seconds=seconds, budget_bound=bound,
+                                        env=probe_environment(deployed_target or request.chaos_target))
             except StageTimeout as exc:
                 if not suite:
                     raise

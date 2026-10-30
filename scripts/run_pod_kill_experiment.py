@@ -16,7 +16,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
-from collect_baseline import LABEL_SELECTOR, SERVICE, get_ready_pod, kubectl_command, kubectl_environment, percentile
+from collect_baseline import LABEL_SELECTOR, SERVICE, answered, get_ready_pod, kubectl_command, kubectl_environment, percentile
 
 
 NAMESPACE = "codereferee-sandbox"
@@ -328,7 +328,7 @@ def probe_once(local_port: int, timeout_seconds: float) -> dict[str, Any]:
         "at": now_utc(),
         "status_code": status_code,
         "latency_ms": latency_ms,
-        "success": status_code is not None and 200 <= status_code < 400,
+        "success": answered(status_code),
         "error": error,
     }
 

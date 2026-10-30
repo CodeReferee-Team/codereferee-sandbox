@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from urllib.request import ProxyHandler, build_opener
 
-from collect_baseline import kubectl_command, kubectl_environment
+from collect_baseline import kubectl_command, kubectl_environment, probe_success_below
 from run_pod_kill_experiment import stop_process
 
 
@@ -27,6 +27,7 @@ timeout=float(os.environ["PROBE_TIMEOUT"])
 opener=build_opener(ProxyHandler({}))
 spec=json.loads(os.environ.get("PROBE_SPEC","{}"))
 context=json.loads(os.environ.get("PROBE_CONTEXT","{}"))
+SUCCESS_BELOW=int(os.environ.get("PROBE_SUCCESS_BELOW","400"))
 def render(value):
  if isinstance(value,str):
   for key,item in context.items(): value=value.replace("${"+key+"}",str(item))
@@ -61,7 +62,7 @@ class Handler(BaseHTTPRequestHandler):
      status=response.status; response.read(1024)
   except HTTPError as exc: status=exc.code; error=str(exc)
   except Exception as exc: error=str(exc)
-  body=json.dumps({"at":datetime.now(timezone.utc).isoformat(),"status_code":status,"latency_ms":round((time.monotonic()-started)*1000,2),"success":error is None and status is not None and 200<=status<400,"error":error}).encode()
+  body=json.dumps({"at":datetime.now(timezone.utc).isoformat(),"status_code":status,"latency_ms":round((time.monotonic()-started)*1000,2),"success":status is not None and 200<=status<SUCCESS_BELOW and (error is None or status>=400),"error":error}).encode()
   self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(body))); self.send_header("Connection","close"); self.end_headers(); self.wfile.write(body); self.wfile.flush(); self.close_connection=True
  def log_message(self,*args): pass
 HTTPServer(("0.0.0.0",8080),Handler).serve_forever()
@@ -92,7 +93,8 @@ class InClusterProbe:
                 'env': [{'name': 'TARGET_URL', 'value': self.url},
                         {'name': 'PROBE_TIMEOUT', 'value': str(self.timeout)},
                         {'name': 'PROBE_SPEC', 'value': json.dumps(self.spec)},
-                        {'name': 'PROBE_CONTEXT', 'value': json.dumps(self.context)}],
+                        {'name': 'PROBE_CONTEXT', 'value': json.dumps(self.context)},
+                        {'name': 'PROBE_SUCCESS_BELOW', 'value': str(probe_success_below())}],
                 'resources': {'requests': {'cpu': '25m', 'memory': '32Mi'},
                               'limits': {'cpu': '200m', 'memory': '96Mi'}},
                 'readinessProbe': {'tcpSocket': {'port': 8080}, 'periodSeconds': 1}}]}}
