@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 
@@ -21,6 +21,21 @@ NAMESPACE = "codereferee-sandbox"
 SERVICE = "fixture-api"
 LABEL_SELECTOR = "app.kubernetes.io/name=fixture-api"
 
+
+
+# 응답 코드가 이 값보다 작으면 "서버가 답했다"로 센다. 기본은 2xx·3xx(400)다.
+# 헬스 경로를 선언하지 않은 레포는 GET /가 401(로그인 필요)·404(라우트 없음)여도 서버는 살아 있으므로
+# 샌드박스가 500을 넘긴다. 연결 거부·시간 초과·5xx는 그대로 실패다(2026-10-30 윤 결정 대기 카드 1안).
+PROBE_SUCCESS_ENV = 'CODEREFEREE_PROBE_SUCCESS_BELOW'
+
+
+def probe_success_below() -> int:
+    value = os.environ.get(PROBE_SUCCESS_ENV, '400')
+    return 500 if value == '500' else 400
+
+
+def answered(status_code) -> bool:
+    return status_code is not None and 200 <= status_code < probe_success_below()
 
 def kubectl_environment() -> dict[str, str]:
     """Run local Kubernetes commands without a global HTTP proxy.
@@ -163,13 +178,17 @@ def probe_service(
                 with urlopen(f"http://127.0.0.1:{local_port}/", timeout=timeout_seconds) as response:
                     status_codes.append(response.status)
                     response.read()
+            except HTTPError as exc:
+                # 4xx·5xx도 서버가 답한 것이다. 셀지 말지는 answered()가 정한다.
+                status_codes.append(exc.code)
+                errors.append(str(exc))
             except URLError as exc:
                 status_codes.append(None)
                 errors.append(str(exc.reason))
             finally:
                 latencies_ms.append((time.monotonic() - latency_started) * 1000)
 
-        success_count = sum(code is not None and 200 <= code < 400 for code in status_codes)
+        success_count = sum(answered(code) for code in status_codes)
         availability = success_count / probes
         return {
             "metrics": {

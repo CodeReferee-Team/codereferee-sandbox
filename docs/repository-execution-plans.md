@@ -29,6 +29,16 @@ Gradle/Maven XML 결과가 0개이면 `no_tests_collected`로 구분한다. 명�
 deploymentProfile: quickbyte-demo
 ```
 
+운영 값만 바꾸려면 `service`에 `replicas`·`resources`만 적는다. 이때 배포 방식(Compose·Dockerfile·스택 감지),
+포트, 로컬 DB 재현은 선언이 없을 때와 똑같이 자동으로 정하고 그 두 값만 덮어쓴다. 수정안 루프가 배포 파일이 없는
+레포의 "복제본 1개" 문제를 고칠 때 이 파일 하나를 만든다(2026-10-30 spring-petclinic 부하 200명 Fail).
+
+```yaml
+version: 1
+service:
+  replicas: 2
+```
+
 직접 선언할 때는 레포 내부 Dockerfile을 사용한다. Dockerfile이 없으면 지원되는
 단일 서비스 스택은 생성 recipe를 사용할 수 있다. 재현할 포트·환경이 모호하면 보완을 요청한다.
 
@@ -114,6 +124,13 @@ dependencies:
   - MySQL은 `mysql:8.0` + `mysql_native_password`. 예제 레포가 `useSSL=false`로 붙어 MySQL 8 기본 인증이
     `Public Key Retrieval is not allowed`로 끊기고, Node `mysql` 패키지는 기본 인증을 지원하지 않는다.
   - 환경변수로만 주소를 받는 레포(msdocs-nodejs-mongodb의 `MONGODB_URI`)는 아직 재현하지 않는다.
+- 헬스 경로를 선언하지 않은 레포(`healthPath` 없음)는 GET `/`가 401·404여도 기동한 것으로 본다. 2026-10-30 실측에서
+  Spring Security(401)와 루트 라우트 없는 API(404) 6건이 정상 기동하고도 판정 불가로 나왔다.
+  - 쿠버네티스 startup·readiness 프로브는 httpGet 대신 tcpSocket(포트가 열렸는가)이다. httpGet은 200~399만 인정한다.
+  - 관측 프로브(기준선, 카오스 중 가용성, 스모크)는 500 미만 응답을 "답했다"로 센다. 연결 거부·시간 초과·5xx는 그대로 실패다.
+    target의 `probeAcceptsClientErrors`가 실험 프로세스에 `CODEREFEREE_PROBE_SUCCESS_BELOW=500`으로 넘어간다
+    (`collect_baseline.answered`).
+  - `healthPath`를 선언하면 지금처럼 그 경로의 200~399만 인정한다.
 - Kubernetes manifest 자동 변환·멀티레포 그룹·실제 온디맨드 Worker는 아직 이 단일 서비스 단계에 포함되지 않음.
 
 Compose의 bind mount·영속 데이터·호스트 Docker socket은 재사용하지 않는다.

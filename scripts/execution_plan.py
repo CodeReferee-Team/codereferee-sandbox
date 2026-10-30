@@ -158,7 +158,9 @@ def node_entry_port(root: Path, package: dict, script: str) -> int | None:
         if not path.is_file():
             continue
         text = path.read_text(encoding='utf-8', errors='replace')
-        if 'process.env.PORT' in text:
+        # `NODE_ENV === 'production' ? (process.env.PORT || 80) : 4000`은 PORT를 production에서만 읽는다.
+        # 우리는 NODE_ENV를 정하지 않으므로 그 줄의 PORT는 따르지 않는다(cornflourblue 예제 2건 실측).
+        if any('process.env.PORT' in line and 'NODE_ENV' not in line for line in text.splitlines()):
             return None
         ports = {int(n) for line in NODE_PORT_LINES.findall(text) for n in re.findall(r'\b(\d{4,5})\b', line)
                  if 1024 <= int(n) <= 65535}
@@ -206,6 +208,8 @@ def resolve_plan(repository: Path, explicit_profile: str | None = None) -> dict[
             return {'source': 'repository_profile', 'profile': data['deploymentProfile']}
         if data.get('version') != 1 or not isinstance(data.get('service'), dict):
             raise ConfigurationRequired('validation.yaml requires version: 1 and service, or deploymentProfile.')
+        if data['service'] and set(data['service']) <= OVERRIDE_FIELDS and 'dependencies' not in data:
+            return detected_plan_with_overrides(repository, data['service'])
         if 'generatedDockerfile' in data['service']:
             raise ConfigurationRequired('Declare a checked-in Dockerfile, not generatedDockerfile.')
         service = dict(data['service'])
@@ -227,6 +231,28 @@ def resolve_plan(repository: Path, explicit_profile: str | None = None) -> dict[
         plan.update(source='repository_configuration', dependencies=normalize_dependencies(data.get('dependencies', {})))
         return plan
 
+    return detect_plan(repository)
+
+
+# 배포 방식은 그대로 자동 감지에 맡기고 운영 값만 바꾸는 선언. 수정안 루프가 "복제본 1개라 여유가 없다"를
+# 고칠 때 레포에 배포 파일이 없으면 이 파일 하나로 복제본 수를 올린다(spring-petclinic 부하 200명 Fail 실측).
+# 포트·Dockerfile을 함께 적게 하면 감지가 하던 일을 손으로 다시 해야 하고 틀리기 쉽다.
+OVERRIDE_FIELDS = {'replicas', 'resources'}
+
+
+def detected_plan_with_overrides(repository: Path, overrides: dict) -> dict[str, Any]:
+    plan = detect_plan(repository)
+    replicas = overrides.get('replicas', plan['replicas'])
+    if isinstance(replicas, bool) or not isinstance(replicas, int) or not 1 <= replicas <= 4:
+        raise ConfigurationRequired('replicas must be in 1..4 for this local runner.')
+    plan['replicas'] = replicas
+    if 'resources' in overrides:
+        plan['resources'] = normalize_resources(overrides['resources'])
+    plan['overrides'] = sorted(overrides)
+    return plan
+
+
+def detect_plan(repository: Path) -> dict[str, Any]:
     for name in ('compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml'):
         path = inside(repository, name)
         if path.is_file():
@@ -285,7 +311,7 @@ def normalize_service(repository: Path, service: dict) -> dict:
     if not isinstance(path, str) or not path.startswith('/') or len(path) > 512:
         raise ConfigurationRequired('healthPath must be a relative HTTP path starting with /.')
     result = dict(service, dockerfile=dockerfile, buildContext=context, port=port,
-                  healthPath=path, replicas=replicas)
+                  healthPath=path, replicas=replicas, healthPathDeclared='healthPath' in service)
     for key in ('command', 'args'):
         if key in result and (not isinstance(result[key], list) or not result[key]
                               or any(not isinstance(value, str) for value in result[key])):
@@ -510,6 +536,14 @@ def render_plan(plan: dict, namespace: str, image: str) -> tuple[str, dict]:
         'env': [{'name': key, 'value': value} for key, value in environment.items()],
         'readinessProbe': {'httpGet': {'path': plan['healthPath'], 'port': plan['port']}, 'periodSeconds': 2, 'timeoutSeconds': 2},
         'startupProbe': {'httpGet': {'path': plan['healthPath'], 'port': plan['port']}, 'periodSeconds': 2, 'failureThreshold': 90, 'timeoutSeconds': 2}}
+    accepts_client_errors = not plan.get('healthPathDeclared', True)
+    if accepts_client_errors:
+        # 헬스 경로를 정하지 않은 레포는 GET /가 401·404여도 기동한 것이다(Spring Security, 루트 라우트 없는 API).
+        # 쿠버네티스 httpGet 프로브는 200~399만 인정하므로 포트가 열렸는지로 기동을 보고,
+        # HTTP 응답 여부(5xx 미만)는 관측 프로브가 따로 잰다.
+        for probe in ('readinessProbe', 'startupProbe'):
+            container[probe] = dict(container[probe], tcpSocket={'port': plan['port']})
+            del container[probe]['httpGet']
     for key in ('command', 'args'):
         if key in plan:
             container[key] = plan[key]
@@ -574,5 +608,6 @@ def render_plan(plan: dict, namespace: str, image: str) -> tuple[str, dict]:
                 labelSelector='app.kubernetes.io/name=' + name)
     target = {'name': 'repository-api', 'deployment': 'repository-api', 'service': 'repository-api',
               'servicePort': plan['port'], 'labelSelector': 'app.kubernetes.io/name=repository-api',
-              'probePath': plan['healthPath'], 'dependencies': target_dependencies}
+              'probePath': plan['healthPath'], 'dependencies': target_dependencies,
+              'probeAcceptsClientErrors': accepts_client_errors}
     return yaml.safe_dump_all(objects, sort_keys=False), target
