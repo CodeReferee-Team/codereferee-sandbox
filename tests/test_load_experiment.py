@@ -22,8 +22,25 @@ def stage(users, requests, failed):
 class LoadSummaryTests(unittest.TestCase):
     def test_capacity_is_the_last_clean_stage_before_the_first_failing_one(self):
         summary = load.summarize([stage(10, 60, 0), stage(50, 300, 0), stage(100, 600, 12), stage(200, 900, 0)])
-        self.assertEqual(summary, {'max_users_without_errors': 50, 'first_users_with_errors': 100,
-                                   'all_stages_clean': False})
+        self.assertEqual({k: summary[k] for k in ('max_users_without_errors', 'first_users_with_errors',
+                                                  'all_stages_clean')},
+                         {'max_users_without_errors': 50, 'first_users_with_errors': 100, 'all_stages_clean': False})
+
+    def test_latency_growth_compares_the_first_and_the_last_answered_stage(self):
+        stages = [dict(stage(10, 60, 0), p95_latency_ms=20.0), dict(stage(100, 600, 0), p95_latency_ms=45.0),
+                  dict(stage(200, 900, 900), p95_latency_ms=None)]
+        self.assertEqual(load.summarize(stages)['latency_growth'],
+                         {'from_users': 10, 'from_p95_ms': 20.0, 'to_users': 100, 'to_p95_ms': 45.0, 'ratio': 2.2})
+        self.assertIsNone(load.summarize(stages[:1])['latency_growth'])
+
+    def test_overload_behavior_names_how_the_first_failing_stage_failed(self):
+        shed = dict(stage(100, 600, 50), status_counts={'200': 550, '503': 40, '429': 10}, error_counts={})
+        hung = dict(stage(200, 300, 120), status_counts={'200': 180}, error_counts={'TimeoutError': 100,
+                                                                                    'ConnectionResetError': 20})
+        self.assertEqual(load.summarize([stage(10, 60, 0), shed, hung])['overload_behavior'],
+                         {'users': 100, 'kind': 'rejected', 'rejected': 50, 'timed_out': 0, 'connection_failed': 0})
+        self.assertEqual(load.overload_behavior(hung)['kind'], 'timed_out')
+        self.assertIsNone(load.summarize([stage(10, 60, 0)])['overload_behavior'])
 
     def test_a_stage_without_requests_is_not_counted_as_clean(self):
         self.assertEqual(load.summarize([stage(10, 0, 0)])['max_users_without_errors'], None)
@@ -73,6 +90,7 @@ class GeneratorTests(unittest.TestCase):
         self.assertEqual(small['failed_requests'], 0)
         self.assertGreater(small['requests'], 0)
         self.assertGreater(large['failed_requests'], 0)
+        self.assertEqual(load.overload_behavior(large)['kind'], 'rejected')
         self.assertIn('503', large['status_counts'])
         (private,) = run('/private', '5')
         self.assertEqual(private['failed_requests'], 0)

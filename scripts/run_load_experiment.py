@@ -157,13 +157,48 @@ def main() -> int:
 def summarize(stages: list[dict[str, Any]]) -> dict[str, Any]:
     """Where the service stopped answering everyone. No latency threshold is applied here."""
     clean = [s['users'] for s in stages if s.get('requests') and s.get('failed_requests') == 0]
-    failing = next((s['users'] for s in stages if s.get('failed_requests')), None)
+    failing = next((s for s in stages if s.get('failed_requests')), None)
+    first_failing = failing['users'] if failing else None
     return {
         # Highest stage below the first failing one. A clean stage after a failing one does not count.
-        'max_users_without_errors': max((u for u in clean if failing is None or u < failing), default=None),
-        'first_users_with_errors': failing,
+        'max_users_without_errors': max((u for u in clean if first_failing is None or u < first_failing),
+                                        default=None),
+        'first_users_with_errors': first_failing,
         'all_stages_clean': failing is None and bool(clean),
+        'latency_growth': latency_growth(stages),
+        'overload_behavior': overload_behavior(failing),
     }
+
+
+def latency_growth(stages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """p95 at the first stage against the last stage that still got answers. A fact, not a verdict."""
+    answered = [s for s in stages if s.get('p95_latency_ms') is not None]
+    if len(answered) < 2:
+        return None
+    first, last = answered[0], answered[-1]
+    ratio = round(last['p95_latency_ms'] / first['p95_latency_ms'], 1) if first['p95_latency_ms'] else None
+    return {'from_users': first['users'], 'from_p95_ms': first['p95_latency_ms'],
+            'to_users': last['users'], 'to_p95_ms': last['p95_latency_ms'], 'ratio': ratio}
+
+
+def overload_behavior(stage: dict[str, Any] | None) -> dict[str, Any] | None:
+    """How the first failing stage failed.
+
+    A service that answers 429 or 503 quickly is shedding load and comes back when the
+    load drops. One that holds requests until they time out, or stops accepting
+    connections, makes every user wait or fail. The difference is what to fix.
+    """
+    if not stage:
+        return None
+    statuses = stage.get('status_counts') or {}
+    errors = stage.get('error_counts') or {}
+    counts = {
+        'rejected': sum(n for code, n in statuses.items() if code == '429' or code.startswith('5')),
+        'timed_out': sum(n for name, n in errors.items() if 'timeout' in name.lower()),
+        'connection_failed': sum(n for name, n in errors.items() if 'timeout' not in name.lower()),
+    }
+    kind = max(counts, key=lambda key: counts[key]) if any(counts.values()) else None
+    return {'users': stage['users'], 'kind': kind, **counts}
 
 
 def run_generator(args: argparse.Namespace, url: str, stages: list[int]) -> dict[str, Any]:
