@@ -209,6 +209,12 @@ class ExecutionPlanTests(unittest.TestCase):
         self.assertEqual(plan['port'], 4000)
         self.assertIn('EXPOSE 4000', plan['generatedDockerfile'])
 
+    def test_node_port_read_only_in_production_is_not_followed(self):
+        # node-mongo-registration-login-api: PORT는 NODE_ENV=production일 때만 읽는다.
+        self.write('package.json', json.dumps({'scripts': {'start': 'node ./server.js'}}))
+        self.write('server.js', "const port = process.env.NODE_ENV === 'production' ? (process.env.PORT || 80) : 4000;\n")
+        self.assertEqual(resolve_plan(self.root)['port'], 4000)
+
     def test_node_port_stays_3000_when_the_app_reads_PORT_or_is_ambiguous(self):
         self.write('package.json', json.dumps({'main': 'index.js', 'scripts': {'start': 'node .'}}))
         self.write('index.js', 'app.listen(process.env.PORT || 5000);\n')

@@ -158,7 +158,9 @@ def node_entry_port(root: Path, package: dict, script: str) -> int | None:
         if not path.is_file():
             continue
         text = path.read_text(encoding='utf-8', errors='replace')
-        if 'process.env.PORT' in text:
+        # `NODE_ENV === 'production' ? (process.env.PORT || 80) : 4000`은 PORT를 production에서만 읽는다.
+        # 우리는 NODE_ENV를 정하지 않으므로 그 줄의 PORT는 따르지 않는다(cornflourblue 예제 2건 실측).
+        if any('process.env.PORT' in line and 'NODE_ENV' not in line for line in text.splitlines()):
             return None
         ports = {int(n) for line in NODE_PORT_LINES.findall(text) for n in re.findall(r'\b(\d{4,5})\b', line)
                  if 1024 <= int(n) <= 65535}
