@@ -50,6 +50,10 @@ def check_plan(repository: Path) -> dict:
     if any(inside(root, p).is_file() for p in ('gradlew', 'build.gradle', 'build.gradle.kts')): candidates.append('gradle')
     if inside(root, 'pom.xml').is_file(): candidates.append('maven')
     stack = declaration.get('stack')
+    if stack is None and candidates[-2:] == ['gradle', 'maven'] and inside(root, 'gradlew').is_file():
+        # spring-petclinic 같은 레포는 Gradle과 Maven 빌드를 함께 둔다. 같은 JVM 소스이고
+        # 배포 레시피(execution_plan.stack_recipe)가 gradlew를 먼저 쓰므로 검사도 그쪽으로 맞춘다.
+        candidates.remove('maven')
     if stack is None:
         if len(candidates) > 1:
             raise ConfigurationRequired('Multiple language manifests: declare verification.stack/workingDirectory.')
