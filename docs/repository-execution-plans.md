@@ -39,6 +39,11 @@ service:
   replicas: 2
 ```
 
+`patchDiff`가 이 파일의 `replicas`·`resources`만 바꾸고 다른 파일은 건드리지 않으면, 빌드·테스트 검사 단계를
+건너뛴다. 패치 루프는 카오스나 부하에서 Fail이 난 뒤에만 돌고, 거기까지 왔다면 같은 코드가 이미 검사를 통과했다.
+petclinic 기준 회차마다 5분쯤 줄어든다. 결과의 `sandboxReport`에는 `test_execution: reused_from_unpatched_commit`이
+남는다. 코드, 검증 명령(`verification`), 포트 같은 다른 설정이 하나라도 바뀌면 검사를 다시 돌린다.
+
 직접 선언할 때는 레포 내부 Dockerfile을 사용한다. Dockerfile이 없으면 지원되는
 단일 서비스 스택은 생성 recipe를 사용할 수 있다. 재현할 포트·환경이 모호하면 보완을 요청한다.
 

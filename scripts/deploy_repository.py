@@ -23,7 +23,7 @@ import yaml
 
 from collect_baseline import kubectl_command, kubectl_environment, load_image_into_cluster
 from artifact_cleanup import cleanup_request_image
-from execution_plan import ConfigurationRequired, inside, render_plan, resolve_plan
+from execution_plan import OVERRIDE_FIELDS, ConfigurationRequired, inside, read_yaml, render_plan, resolve_plan
 from repository_checks import CheckFailure, verify_repository
 from pod_diagnostics import collect_pod_diagnostics, manifest_redaction_values
 
@@ -58,11 +58,17 @@ def main() -> int:
             run(['git', 'fetch', '--depth', '1', 'origin', args.commit_sha], cwd=repository)
             run(['git', 'checkout', '--detach', args.commit_sha], cwd=repository)
         stage = 'patch'
+        config_only = False
         if args.patch_file:
+            before = validation_config(repository)
             apply_patch(repository, args.patch_file)
+            config_only = only_scaling_changed(repository, before)
         commit_sha = run(["git", "rev-parse", "HEAD"], cwd=repository).stdout.strip()
         stage = 'verify'
-        checks = verify_repository(repository, workspace / 'check-cache', request)
+        if config_only:
+            checks = skipped_checks(before)
+        else:
+            checks = verify_repository(repository, workspace / 'check-cache', request)
         stage = 'detect'
         plan = resolve_plan(repository, args.profile)
         profile_name = plan.get('profile')
@@ -264,6 +270,56 @@ def apply_patch(repository: Path, patch_file: Path) -> None:
         raise RuntimeError("Patch changes a protected path.")
     run(["git", "apply", "--check", str(patch_file)], cwd=repository)
     run(["git", "apply", str(patch_file)], cwd=repository)
+
+
+VALIDATION_CONFIG = '.codereferee/validation.yaml'
+
+
+def validation_config(repository: Path) -> dict | None:
+    path = repository / VALIDATION_CONFIG
+    if not path.is_file():
+        return None
+    try:
+        return read_yaml(path)
+    except ConfigurationRequired:
+        return {'unreadable': True}
+
+
+def _without_scaling(config: dict | None) -> dict:
+    data = dict(config or {})
+    data.pop('version', None)
+    service = data.pop('service', None)
+    if isinstance(service, dict):
+        rest = {key: value for key, value in service.items() if key not in OVERRIDE_FIELDS}
+        if rest:
+            data['service'] = rest
+    elif service is not None:
+        data['service'] = service
+    return data
+
+
+def only_scaling_changed(repository: Path, before: dict | None) -> bool:
+    """패치가 validation.yaml의 replicas·resources만 바꿨는가.
+
+    패치 루프는 카오스나 부하에서 Fail이 난 뒤에만 돈다. 그 Fail까지 가려면 같은 코드가
+    빌드와 테스트를 이미 통과했어야 한다. 코드가 그대로면 다시 돌려도 같은 결과라서
+    검사 단계(petclinic 기준 5분)를 건너뛴다. 검증 명령이나 다른 설정이 바뀌면 다시 돈다.
+    """
+    status = run(['git', 'status', '--porcelain', '--untracked-files=all'], cwd=repository).stdout
+    changed = {line[3:].strip().strip('"') for line in status.splitlines() if line.strip()}
+    if changed != {VALIDATION_CONFIG}:
+        return False
+    after = validation_config(repository)
+    if after is None or after.get('unreadable') or (before or {}).get('unreadable'):
+        return False
+    return _without_scaling(before) == _without_scaling(after)
+
+
+def skipped_checks(before: dict | None) -> dict:
+    return {'outcome': 'skipped', 'skipped_reason': 'scaling_only_patch', 'steps': [],
+            'test_execution': 'reused_from_unpatched_commit',
+            # repository_checks.check_plan과 같은 기준: 선언된 test 명령이 있는가.
+            'verification_declared': 'test' in ((before or {}).get('verification') or {}) or 'test' in (before or {})}
 
 
 def apply(manifest: str) -> None:
