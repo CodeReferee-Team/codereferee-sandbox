@@ -16,6 +16,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from app.scenarios import ALIASES, SCENARIOS, SUITES, resolve_scenarios
+from scripts.disk_guard import DiskLow, ensure_free_disk
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -287,6 +288,10 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         result.setdefault('source', {})['execution_limit'] = dict(result['budget'],
             validationSupport='unsupported_within_budget')
         return result
+    except DiskLow as exc:
+        result = infrastructure_error(str(exc), request, timed_out=False, stage=stage, code='sandbox_disk_low')
+        result.setdefault('source', {})['disk_guard'] = exc.report
+        return result
     except (RuntimeError, KeyError, json.JSONDecodeError) as exc:
         result = infrastructure_error(str(exc), request, timed_out=False, stage=stage)
         return result
@@ -522,6 +527,7 @@ def deploy_repository(request: RepositoryValidationRequest, budget: Budget | Non
         raise HTTPException(status_code=422, detail="deploymentProfile requires a supported chaosMode.")
     if not request.request_id:
         raise HTTPException(status_code=422, detail="deploymentProfile requires requestId.")
+    ensure_free_disk()
     command = [sys.executable, str(DEPLOY_SCRIPT), '--repository-url', request.repository_url,
                '--request-id=' + request.request_id,
                *(['--profile', request.deployment_profile] if request.deployment_profile else []),

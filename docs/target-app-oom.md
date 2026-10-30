@@ -52,6 +52,7 @@ Litmus 부하의 지속 시간이며 OOM은 대상별 1회 주입이다.
 | 기존 한도 복원 실패 | infrastructure_error | null | false | oom_restore_failed |
 | helper 삭제 실패 | infrastructure_error | null | false | oom_helper_cleanup_failed |
 | 준비 명령/요청 전체의 실행 상한 초과 | infrastructure_error | null | true | sandbox_execution_timeout 또는 sandbox_budget_exceeded |
+| 샌드박스 호스트 디스크 부족 | infrastructure_error | null | false | sandbox_disk_low |
 
 `exitCode: 0`은 Sandbox가 확인한 복구 결과이며 서비스 SLO의 최종 PASS는 AI가 정한다.
 `oom_observed: false`는 OOM이 없었다는 단정이 아니라 **정확한 대상 OOM을 증명하지 못했다**는 뜻이다.
