@@ -36,6 +36,12 @@ class ScenarioSuiteTests(unittest.TestCase):
         command = experiment_command(request, target)
         self.assertTrue(command[1].endswith('run_load_experiment.py'))
         self.assertEqual(command[command.index('--probe-path') + 1], '/health')
+        self.assertNotIn('--target-users', command)
+        targeted = request.model_copy(update={'target_users': 150})
+        command = experiment_command(targeted, target)
+        self.assertEqual(command[command.index('--target-users') + 1], '150')
+        with self.assertRaises(ValueError):
+            RepositoryValidationRequest(repositoryUrl='https://github.com/test/repo', targetUsers=501)
 
     def test_suite_order_and_additional_modes_are_deduplicated(self):
         self.assertEqual(resolve_scenarios('suite_quick', ['litmus_pod_cpu_hog', 'litmus_container_kill']),

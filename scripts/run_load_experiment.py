@@ -84,7 +84,7 @@ def main() -> int:
     args = parse_args()
     target = {'namespace': args.namespace, 'deployment': args.deployment, 'service': args.service,
               'servicePort': args.service_port, 'labelSelector': args.label_selector}
-    stages = parse_stages(args.stages)
+    stages = with_target(parse_stages(args.stages), args.target_users)
     configuration = get_target_configuration(args.namespace, args.deployment)
     restarts_before = restart_count(args.namespace, args.label_selector)
     url = f'http://{args.service}.{args.namespace}.svc.cluster.local:{args.service_port}{args.probe_path}'
@@ -102,7 +102,7 @@ def main() -> int:
             args.recovery_timeout_seconds, args.recovery_probes)
     restarts_after = restart_count(args.namespace, args.label_selector)
 
-    summary = summarize(load['stages'])
+    summary = summarize(load['stages'], args.target_users)
     denominator = 'in-cluster HTTP probes before and after the load; load requests are reported per stage'
     baseline_metrics = metrics_from_probes(baseline['probes'])
     baseline_metrics['error_rate_denominator'] = 'HTTP probes collected before the load'
@@ -154,8 +154,17 @@ def main() -> int:
     return 0 if recovered else 1
 
 
-def summarize(stages: list[dict[str, Any]]) -> dict[str, Any]:
-    """Where the service stopped answering everyone. No latency threshold is applied here."""
+def with_target(stages: list[int], target: int | None) -> list[int]:
+    """The requester's expected users are always measured exactly, not interpolated between stages."""
+    return sorted({*stages, target}) if target else stages
+
+
+def summarize(stages: list[dict[str, Any]], target_users: int | None = None) -> dict[str, Any]:
+    """Where the service stopped answering everyone. No latency threshold is applied here.
+
+    With target_users, target_met says whether every stage up to that many users answered
+    everyone. The requester set that number, so the AI may turn a miss into a Fail.
+    """
     clean = [s['users'] for s in stages if s.get('requests') and s.get('failed_requests') == 0]
     failing = next((s for s in stages if s.get('failed_requests')), None)
     first_failing = failing['users'] if failing else None
@@ -167,6 +176,9 @@ def summarize(stages: list[dict[str, Any]]) -> dict[str, Any]:
         'all_stages_clean': failing is None and bool(clean),
         'latency_growth': latency_growth(stages),
         'overload_behavior': overload_behavior(failing),
+        'target_users': target_users,
+        'target_met': (None if not target_users or not any(s['users'] == target_users for s in stages)
+                       else first_failing is None or first_failing > target_users),
     }
 
 
@@ -269,6 +281,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--label-selector', required=True)
     parser.add_argument('--probe-path', default='/')
     parser.add_argument('--stages', default='10,50,100,200')
+    parser.add_argument('--target-users', type=int, default=None)
     parser.add_argument('--stage-seconds', type=int, default=20)
     parser.add_argument('--think-seconds', type=float, default=1.0)
     parser.add_argument('--load-timeout-seconds', type=float, default=5.0)

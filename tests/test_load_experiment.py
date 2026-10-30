@@ -46,6 +46,18 @@ class LoadSummaryTests(unittest.TestCase):
         self.assertEqual(load.summarize([stage(10, 0, 0)])['max_users_without_errors'], None)
         self.assertTrue(load.summarize([stage(10, 5, 0), stage(50, 9, 0)])['all_stages_clean'])
 
+    def test_target_users_are_measured_exactly_and_judged_up_to_that_stage(self):
+        self.assertEqual(load.with_target([10, 50, 100, 200], 150), [10, 50, 100, 150, 200])
+        self.assertEqual(load.with_target([10, 50], None), [10, 50])
+        stages = [stage(10, 60, 0), stage(100, 600, 0), stage(150, 900, 30), stage(200, 900, 90)]
+        self.assertTrue(load.summarize(stages, 100)['target_met'])
+        missed = load.summarize(stages, 150)
+        self.assertFalse(missed['target_met'])
+        self.assertEqual(missed['target_users'], 150)
+        # 기준이 없거나 그 인원을 재지 못했으면 판단하지 않는다.
+        self.assertIsNone(load.summarize(stages)['target_met'])
+        self.assertIsNone(load.summarize(stages, 120)['target_met'])
+
     def test_stages_must_increase(self):
         self.assertEqual(load.parse_stages('10,50,100'), [10, 50, 100])
         for value in ('50,10', '0,10', '10,10', '', '10,600'):
@@ -102,7 +114,7 @@ class LoadRunnerTests(unittest.TestCase):
         return SimpleNamespace(namespace='test', deployment='api', service='api', service_port=80,
             label_selector='app=api', probe_path='/', stages='10,50', stage_seconds=1, think_seconds=1.0,
             load_timeout_seconds=5.0, baseline_probes=2, recovery_probes=5, request_timeout_seconds=2,
-            recovery_timeout_seconds=1, local_port=18082)
+            recovery_timeout_seconds=1, local_port=18082, target_users=None)
 
     def probes(self, success=True):
         return [{'at': f'2026-10-30T00:00:0{i}Z', 'success': success, 'status_code': 200 if success else None,

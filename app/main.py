@@ -98,6 +98,8 @@ class RepositoryValidationRequest(BaseModel):
     # Seconds the caller will wait for this response. Without it each stage
     # keeps its own ceiling, as before.
     deadline_seconds: int | None = Field(default=None, alias="deadlineSeconds", ge=60, le=7200)
+    # 요청자가 예상하는 동시 사용자 수. 부하 시나리오가 이 인원을 단계에 꼭 넣어 잰다.
+    target_users: int | None = Field(default=None, alias="targetUsers", ge=1, le=500)
 
 
 class Budget:
@@ -457,7 +459,8 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
         return [sys.executable, str(LOAD_SCRIPT), '--namespace', target.namespace,
                 '--deployment', target.deployment, '--service', target.service,
                 '--service-port', str(target.service_port), '--label-selector', target.label_selector,
-                '--probe-path', target.probe_path]
+                '--probe-path', target.probe_path,
+                *(['--target-users', str(request.target_users)] if request.target_users else [])]
     if request.chaos_mode == "service_selector_blackhole" and target is not None:
         return [
             sys.executable, str(SERVICE_SELECTOR_SCRIPT),
