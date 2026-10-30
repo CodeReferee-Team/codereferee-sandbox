@@ -245,6 +245,21 @@ class ExecutionPlanTests(unittest.TestCase):
         self.write('rest/src/main/java/App.java', 'class App {}')
         with self.assertRaisesRegex(ConfigurationRequired, 'multi-module'): resolve_plan(self.root)
 
+    def test_replica_override_keeps_detection_and_local_databases(self):
+        # 수정안 루프가 배포 파일 없는 레포의 복제본 수를 올릴 때 쓰는 최소 선언이다.
+        self.write('pom.xml', '<project><artifactId>spring-boot-starter-parent</artifactId></project>')
+        self.write('src/main/resources/application.properties', 'spring.datasource.url=jdbc:mysql://localhost:3306/app\n'
+                   'spring.datasource.username=root\nspring.datasource.password=pw\n')
+        detected = resolve_plan(self.root)
+        self.write('.codereferee/validation.yaml', 'version: 1\nservice:\n  replicas: 2\n')
+        plan = resolve_plan(self.root)
+        self.assertEqual(plan['replicas'], 2)
+        self.assertEqual((plan['source'], plan['port'], plan['generatedDockerfile'], plan['dependencies']),
+                         (detected['source'], detected['port'], detected['generatedDockerfile'], detected['dependencies']))
+        self.assertFalse(plan['healthPathDeclared'])
+        self.write('.codereferee/validation.yaml', 'version: 1\nservice:\n  replicas: 9\n')
+        with self.assertRaises(ConfigurationRequired): resolve_plan(self.root)
+
     def test_explicit_multimodule_jar_is_selected_not_guessed(self):
         self.write('modules/api/build/libs/application.jar', 'jar')
         self.write('modules/other/build/libs/other.jar', 'jar')

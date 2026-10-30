@@ -208,6 +208,8 @@ def resolve_plan(repository: Path, explicit_profile: str | None = None) -> dict[
             return {'source': 'repository_profile', 'profile': data['deploymentProfile']}
         if data.get('version') != 1 or not isinstance(data.get('service'), dict):
             raise ConfigurationRequired('validation.yaml requires version: 1 and service, or deploymentProfile.')
+        if data['service'] and set(data['service']) <= OVERRIDE_FIELDS and 'dependencies' not in data:
+            return detected_plan_with_overrides(repository, data['service'])
         if 'generatedDockerfile' in data['service']:
             raise ConfigurationRequired('Declare a checked-in Dockerfile, not generatedDockerfile.')
         service = dict(data['service'])
@@ -229,6 +231,28 @@ def resolve_plan(repository: Path, explicit_profile: str | None = None) -> dict[
         plan.update(source='repository_configuration', dependencies=normalize_dependencies(data.get('dependencies', {})))
         return plan
 
+    return detect_plan(repository)
+
+
+# 배포 방식은 그대로 자동 감지에 맡기고 운영 값만 바꾸는 선언. 수정안 루프가 "복제본 1개라 여유가 없다"를
+# 고칠 때 레포에 배포 파일이 없으면 이 파일 하나로 복제본 수를 올린다(spring-petclinic 부하 200명 Fail 실측).
+# 포트·Dockerfile을 함께 적게 하면 감지가 하던 일을 손으로 다시 해야 하고 틀리기 쉽다.
+OVERRIDE_FIELDS = {'replicas', 'resources'}
+
+
+def detected_plan_with_overrides(repository: Path, overrides: dict) -> dict[str, Any]:
+    plan = detect_plan(repository)
+    replicas = overrides.get('replicas', plan['replicas'])
+    if isinstance(replicas, bool) or not isinstance(replicas, int) or not 1 <= replicas <= 4:
+        raise ConfigurationRequired('replicas must be in 1..4 for this local runner.')
+    plan['replicas'] = replicas
+    if 'resources' in overrides:
+        plan['resources'] = normalize_resources(overrides['resources'])
+    plan['overrides'] = sorted(overrides)
+    return plan
+
+
+def detect_plan(repository: Path) -> dict[str, Any]:
     for name in ('compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml'):
         path = inside(repository, name)
         if path.is_file():

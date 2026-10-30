@@ -29,6 +29,16 @@ Gradle/Maven XML 결과가 0개이면 `no_tests_collected`로 구분한다. 명�
 deploymentProfile: quickbyte-demo
 ```
 
+운영 값만 바꾸려면 `service`에 `replicas`·`resources`만 적는다. 이때 배포 방식(Compose·Dockerfile·스택 감지),
+포트, 로컬 DB 재현은 선언이 없을 때와 똑같이 자동으로 정하고 그 두 값만 덮어쓴다. 수정안 루프가 배포 파일이 없는
+레포의 "복제본 1개" 문제를 고칠 때 이 파일 하나를 만든다(2026-10-30 spring-petclinic 부하 200명 Fail).
+
+```yaml
+version: 1
+service:
+  replicas: 2
+```
+
 직접 선언할 때는 레포 내부 Dockerfile을 사용한다. Dockerfile이 없으면 지원되는
 단일 서비스 스택은 생성 recipe를 사용할 수 있다. 재현할 포트·환경이 모호하면 보완을 요청한다.
 
