@@ -189,10 +189,38 @@ class RepositoryChecksTests(unittest.TestCase):
         self.node({})
         with self.assertRaises(ConfigurationRequired): check_plan(self.root)
 
+    def test_maven_check_image_matches_declared_java_release(self):
+        self.write('pom.xml', '<project><properties><maven.compiler.release>25</maven.compiler.release></properties></project>')
+        self.assertEqual(check_plan(self.root)['image'], 'maven:3.9.11-eclipse-temurin-25')
+
     def test_shell_expression_is_not_executed_on_the_host(self):
         self.node({})
         self.write('.codereferee/validation.yaml', 'test: "npm test; echo bypass"\n')
         with self.assertRaises(ConfigurationRequired): check_plan(self.root)
+
+    def test_python_checks_use_an_image_that_can_compile_native_wheels(self):
+        # microblog의 multidict는 gcc, cheat.sh의 PyICU는 pkg-config가 있어야 설치된다(실측).
+        self.write('requirements.txt', 'multidict\n')
+        self.assertEqual(check_plan(self.root)['image'], 'python:3.12-bookworm')
+
+    def test_poetry_non_package_project_installs_its_dependencies_not_itself(self):
+        # fly-apps/hello-fastapi: package-mode = false라 `pip install .`이 메타데이터 단계에서 죽었다.
+        self.write('pyproject.toml', '[tool.poetry]\nname = "app"\npackage-mode = false\n\n'
+            '[tool.poetry.dependencies]\npython = "^3.10"\nfastapi = "^0.111.0"\nhttpx = {version = "~1.2", extras = ["http2"]}\n'
+            'click = "8.1.7"\nanyio = "*"\n\n[tool.poetry.group.dev.dependencies]\npytest = ">=8"\n')
+        install = check_plan(self.root)['install']
+        self.assertNotIn(['python', '-m', 'pip', 'install', '.'], install)
+        self.assertEqual(install, [['python', '-m', 'pip', 'install', 'fastapi>=0.111.0,<0.112.0',
+            'httpx[http2]>=1.2,<1.3', 'click==8.1.7', 'anyio', 'pytest>=8']])
+
+    def test_poetry_dependency_from_git_or_path_needs_configuration(self):
+        self.write('pyproject.toml', '[tool.poetry]\npackage-mode = false\n[tool.poetry.dependencies]\n'
+            'lib = {git = "https://example.com/lib.git"}\n')
+        with self.assertRaises(ConfigurationRequired): check_plan(self.root)
+
+    def test_packaged_pyproject_is_still_installed_as_a_package(self):
+        self.write('pyproject.toml', '[project]\nname = "app"\nversion = "0.1"\n')
+        self.assertIn(['python', '-m', 'pip', 'install', '.'], check_plan(self.root)['install'])
 
     def test_multimodule_tests_are_not_missed_when_root_has_no_src_test(self):
         self.write('gradlew', 'wrapper')

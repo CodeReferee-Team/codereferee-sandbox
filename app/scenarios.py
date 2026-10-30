@@ -17,12 +17,14 @@ SCENARIOS = {
     'dependency_redis_outage': {'label': 'Redis Dependency Outage', 'runtime': False},
     'litmus_pod_memory_hog': {'label': 'Memory Pressure', 'runtime': True},
     'litmus_pod_memory_oom': {'label': 'Memory Limit Exceeded', 'runtime': True},
+    'load_concurrent_users': {'label': 'Concurrent Users', 'runtime': False},
 }
 
 SUITES = {
     'suite_quick': ('litmus_container_kill',),
-    'suite_standard': ('litmus_container_kill', 'litmus_pod_cpu_hog', 'litmus_pod_network_latency'),
-    'suite_deep': ('litmus_container_kill', 'litmus_pod_delete', 'litmus_pod_cpu_hog',
+    # 동시 사용자 부하를 먼저 둔다. 장애를 넣기 전 깨끗한 배포에서 몇 명까지 버티는지가 기획의 질문이다.
+    'suite_standard': ('load_concurrent_users', 'litmus_container_kill', 'litmus_pod_cpu_hog', 'litmus_pod_network_latency'),
+    'suite_deep': ('load_concurrent_users', 'litmus_container_kill', 'litmus_pod_delete', 'litmus_pod_cpu_hog',
                    'litmus_pod_network_latency', 'litmus_pod_network_loss',
                    'service_selector_blackhole', 'deployment_scale_down', 'rollout_restart'),
 }
@@ -30,7 +32,8 @@ ALIASES = {'ck': 'litmus_container_kill', 'pd': 'litmus_pod_delete', 'cpu': 'lit
            'lat': 'litmus_pod_network_latency', 'loss': 'litmus_pod_network_loss',
            'route': 'service_selector_blackhole', 'scale': 'deployment_scale_down', 'roll': 'rollout_restart',
            'db': 'dependency_database_outage', 'redis': 'dependency_redis_outage',
-           'mem': 'litmus_pod_memory_hog', 'oom': 'litmus_pod_memory_oom'}
+           'mem': 'litmus_pod_memory_hog', 'oom': 'litmus_pod_memory_oom',
+           'load': 'load_concurrent_users'}
 CUSTOM_V1 = tuple(ALIASES.values())
 
 

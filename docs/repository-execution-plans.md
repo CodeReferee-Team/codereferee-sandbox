@@ -83,10 +83,23 @@ dependencies:
   가져오지 않는다. 앱이 DB 없이 기동하지 못하면 기동 실패로 나온다(2026-10-29 실제 레포 230개 사전 점검에서
   spring-petclinic-rest, etherpad-lite, uptime-kuma 등 14개가 이 규칙에 막혀 있었다).
 - Dockerfile: 정확히 한 EXPOSE HTTP 포트. EXPOSE는 HTTP임을 보증하지 않아 실제 probe로 검증한다.
-- Node: package.json의 start 또는 dev 스크립트, 기본 PORT=3000. 실제 앱이 이 설정을 따르지 않으면 YAML 필요.
+- Node: package.json의 start 또는 dev 스크립트, 기본 PORT=3000. 엔트리 파일(start 스크립트의 `node`/`nodemon` 대상,
+  `main`, `server.js`·`app.js`·`index.js` 순)이 `process.env.PORT`를 읽지 않고 1024 이상 포트를 정확히 하나 박아 두었으면
+  그 포트를 쓴다(node-role-based-authorization-api의 4000). 둘 이상이면 고르지 않고 3000으로 두며, 그때는 YAML 필요.
+  Node 이미지는 `.nvmrc`(또는 `.node-version`)의 주 버전, 없으면 `engines.node`의 하한을 따른다. 20보다 낮추지 않고 26을 넘지 않는다.
 - Python: 제한된 Flask/FastAPI 진입점. factory/복잡한 패키지는 명시적 Dockerfile 필요.
+  Flask는 `--app` 대신 `FLASK_APP`으로 넘겨 레포가 고정한 Flask 1.x에서도 기동한다.
+  설치할 의존성이 있으면 `build-essential pkg-config`를 먼저 깐다. 휠이 없는 패키지(multidict, PyICU)가 slim에서 설치되지
+  않았다. 검사 단계는 root가 아니라 apt를 못 쓰므로 `python:3.12-bookworm`을 쓴다(Node 검사와 같은 계열).
+  Poetry `package-mode = false` 프로젝트는 패키지가 아니라 `pip install .`이 실패한다. `[tool.poetry.dependencies]`를
+  pip 요구사항으로 바꿔 설치한다(`^`·`~`는 Poetry 상한 규칙대로). 검사 단계는 group 의존성(pytest 등)도 깐다.
+  git·path 의존성은 바꾸지 않고 설정을 요청한다.
 - Spring Boot: 단순 루트 Gradle/Maven 실행 가능한 jar 생성. 멀티모듈 산출물·실행 대상은 추가 선언/확장 필요.
+  루트 pom에 `<modules>`가 있고 루트 `src/main`이 없으면(spring-guides/tut-rest) 빌드 뒤 jar를 못 찾는 대신
+  처음부터 설정을 요청한다. 모듈마다 앱이 있을 때 어느 것을 띄울지 고르지 않는다.
   Gradle wrapper와 pom.xml이 함께 있으면(spring-petclinic) 배포와 검사 모두 Gradle을 쓴다.
+  JDK는 레포가 선언한 Java 버전(build 파일, `gradle/libs.versions.toml`, `gradle.properties`)에서 가장 높은 값을
+  17·21·25 중 그 이상인 가장 낮은 버전으로 맞춘다. Gradle toolchain은 정확히 같은 JDK가 있어야 빌드된다.
 - Kubernetes manifest 자동 변환·멀티레포 그룹·실제 온디맨드 Worker는 아직 이 단일 서비스 단계에 포함되지 않음.
 
 Compose의 bind mount·영속 데이터·호스트 Docker socket은 재사용하지 않는다.

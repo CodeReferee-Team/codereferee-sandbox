@@ -8,10 +8,16 @@ from __future__ import annotations
 import json
 import re
 import secrets
+import shlex
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 호스트. Poetry 비패키지 감지만 빠진다.
+    tomllib = None
 
 
 class ConfigurationRequired(ValueError):
@@ -26,6 +32,135 @@ def inside(repository: Path, relative: str) -> Path:
     if not path.is_relative_to(root) or '.git' in [part.lower() for part in Path(relative).parts]:
         raise ConfigurationRequired('Execution paths must stay inside the repository clone.')
     return path
+
+
+# 레포가 선언한 Java 버전. Gradle toolchain은 정확히 같은 JDK가 있어야 빌드되므로
+# 버전 카탈로그(gradle/libs.versions.toml)와 gradle.properties까지 본다(1chz realworld 실측).
+JAVA_DECLARATIONS = re.compile(
+    r'JavaLanguageVersion\.of\(\s*(\d+)|jvmToolchain\(\s*(\d+)|JavaVersion\.VERSION_(?:1_)?(\d+)'
+    r'|(?:source|target)Compatibility\s*=\s*[\'"]?(?:1\.)?(\d+)'
+    r'|<(?:java\.version|maven\.compiler\.(?:release|source|target)|release)>\s*(?:1\.)?(\d+)'
+    r'|^\s*(?:java|javaVersion|java\.version|jdk)\s*=\s*"?(\d+)"?\s*$', re.MULTILINE)
+SUPPORTED_JAVA = (17, 21, 25)
+MAVEN_IMAGES = {'17': 'maven:3.9.9-eclipse-temurin-17', '21': 'maven:3.9.9-eclipse-temurin-21',
+                '25': 'maven:3.9.11-eclipse-temurin-25'}
+
+
+def java_release(root: Path) -> str:
+    texts = [inside(root, name).read_text(encoding='utf-8', errors='replace') for name in
+             ('build.gradle', 'build.gradle.kts', 'pom.xml', 'gradle/libs.versions.toml', 'gradle.properties')
+             if inside(root, name).is_file()]
+    declared = [int(v) for text in texts for match in JAVA_DECLARATIONS.findall(text) for v in match if v]
+    wanted = max(declared, default=17)
+    return str(next((v for v in SUPPORTED_JAVA if v >= wanted), SUPPORTED_JAVA[-1]))
+
+
+def node_major(root: Path, package: dict | None = None) -> str:
+    """레포가 요구하는 Node 주 버전. .nvmrc가 정확한 값이고, 없으면 engines.node의 하한을 쓴다.
+
+    json-server처럼 engines가 22 이상을 요구하는 레포가 20에서 `bad option`으로 죽었다.
+    지금까지의 기본값 20보다 낮추지는 않는다.
+    """
+    wanted = None
+    for name in ('.nvmrc', '.node-version'):
+        if inside(root, name).is_file():
+            match = re.match(r'\s*v?(\d+)', inside(root, name).read_text(encoding='utf-8', errors='replace'))
+            if match:
+                wanted = int(match[1])
+                break
+    if wanted is None and isinstance(package, dict) and isinstance(package.get('engines'), dict):
+        engine = package['engines'].get('node')
+        if isinstance(engine, str):
+            bounds = [int(m[1]) for part in engine.split('||') if (m := re.search(r'(\d+)', part))]
+            wanted = min(bounds) if bounds else None
+    return str(min(max(wanted or 20, 20), 26))
+
+
+def _poetry_spec(name: str, constraint) -> str:
+    """Poetry 제약을 pip 요구사항 한 줄로 바꾼다. ^와 ~는 Poetry 문서의 상한 규칙을 따른다."""
+    extras = ''
+    if isinstance(constraint, dict):
+        if set(constraint) & {'git', 'path', 'url', 'file', 'source'}:
+            raise ConfigurationRequired(f'Poetry dependency {name} comes from git/path/url; declare verification in validation.yaml.')
+        if constraint.get('extras'):
+            extras = '[' + ','.join(constraint['extras']) + ']'
+        constraint = constraint.get('version', '*')
+    if not isinstance(constraint, str):
+        raise ConfigurationRequired(f'Poetry dependency {name} uses multiple constraints; declare verification in validation.yaml.')
+    constraint = constraint.strip()
+    match = re.fullmatch(r'([\^~])\s*(\d+(?:\.\d+)*)', constraint)
+    if match:
+        parts = [int(p) for p in match[2].split('.')]
+        if match[1] == '^':
+            index = next((i for i, p in enumerate(parts) if p), len(parts) - 1)
+        else:
+            index = 0 if len(parts) == 1 else 1
+        upper = parts[:index + 1]
+        upper[-1] += 1
+        upper += [0] * (len(parts) - len(upper))
+        constraint = f'>={match[2]},<' + '.'.join(map(str, upper))
+    elif constraint == '*':
+        constraint = ''
+    elif re.fullmatch(r'\d+(?:\.\d+)*', constraint):
+        constraint = '==' + constraint
+    return name + extras + constraint
+
+
+def poetry_requirements(root: Path, *, include_groups: bool) -> list[str] | None:
+    """`package-mode = false`인 Poetry 프로젝트의 의존성. 패키지가 아니라 `pip install .`이 실패한다.
+
+    fly-apps/hello-fastapi에서 실측했다. 그 밖의 pyproject는 None을 돌려 기존처럼 패키지로 설치한다.
+    """
+    path = inside(root, 'pyproject.toml')
+    if tomllib is None or not path.is_file():
+        return None
+    try:
+        data = tomllib.loads(path.read_text(encoding='utf-8'))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        raise ConfigurationRequired('pyproject.toml is not valid TOML.') from exc
+    poetry = data.get('tool', {}).get('poetry', {})
+    if not isinstance(poetry, dict) or poetry.get('package-mode', True) is not False:
+        return None
+    tables = [poetry.get('dependencies', {})]
+    if include_groups:
+        tables.append(poetry.get('dev-dependencies', {}))
+        tables += [group.get('dependencies', {}) for group in poetry.get('group', {}).values() if isinstance(group, dict)]
+    specs = [_poetry_spec(name, constraint) for table in tables if isinstance(table, dict)
+             for name, constraint in table.items() if name.lower() != 'python']
+    project = data.get('project', {})
+    if isinstance(project, dict) and isinstance(project.get('dependencies'), list):
+        specs += [spec for spec in project['dependencies'] if isinstance(spec, str)]
+    return specs
+
+
+# 엔트리 파일이 PORT를 읽지 않고 포트를 박아 둔 Node 앱. node-role-based-authorization-api는
+# `NODE_ENV === 'production' ? 80 : 4000`이라 3000을 보던 프로브가 계속 실패했다(실측).
+NODE_PORT_LINES = re.compile(r'\.listen\([^)\n]*|\bport\b\s*[:=][^;\n]*', re.IGNORECASE)
+
+
+def node_entry_port(root: Path, package: dict, script: str) -> int | None:
+    """엔트리 파일에 박힌 포트가 하나뿐일 때만 그 값을 쓴다. 둘 이상이면 고르지 않는다."""
+    command = package.get('scripts', {}).get(script, '')
+    named = re.search(r'(?:^|\s)(?:node|nodemon)\s+(?:--\S+\s+)*(\S+)', command)
+    candidates = [named[1]] if named and named[1] != '.' else []
+    if isinstance(package.get('main'), str):
+        candidates.append(package['main'])
+    candidates += ['server.js', 'app.js', 'index.js']
+    for name in candidates:
+        name = name.removeprefix('./')
+        try:
+            path = inside(root, name if name.endswith(('.js', '.cjs', '.mjs')) else name + '.js')
+        except ConfigurationRequired:
+            continue
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding='utf-8', errors='replace')
+        if 'process.env.PORT' in text:
+            return None
+        ports = {int(n) for line in NODE_PORT_LINES.findall(text) for n in re.findall(r'\b(\d{4,5})\b', line)
+                 if 1024 <= int(n) <= 65535}
+        return ports.pop() if len(ports) == 1 else None
+    return None
 
 
 def read_yaml(path: Path) -> dict:
@@ -76,9 +211,7 @@ def resolve_plan(repository: Path, explicit_profile: str | None = None) -> dict[
             artifact = inside(repository, service.pop('artifactPath'))
             if not artifact.is_file() or artifact.suffix != '.jar' or not artifact.is_relative_to(context):
                 raise ConfigurationRequired('artifactPath must identify an existing built JAR inside buildContext.')
-            manifest = ''.join(inside(repository, name).read_text(encoding='utf-8') for name in
-                ('build.gradle', 'build.gradle.kts', 'pom.xml') if inside(repository, name).is_file())
-            java = '21' if re.search(r'(?:JavaLanguageVersion\.of\(|<java.version>\s*)21', manifest) else '17'
+            java = java_release(repository)
             service['generatedDockerfile'] = (f'FROM eclipse-temurin:{java}-jre\n'
                 f'COPY {json.dumps([artifact.relative_to(context).as_posix(), "/app.jar"])}\n'
                 f'ENV SERVER_PORT={service.get("port", 8080)}\n'
@@ -286,10 +419,10 @@ def stack_recipe(repository: Path, port: int | None = None) -> dict | None:
         if script is None:
             return None
         install = 'npm ci' if inside(repository, 'package-lock.json').is_file() else 'npm install'
-        node_port = port if port is not None else 3000
+        node_port = port if port is not None else (node_entry_port(repository, package, script) or 3000)
         if isinstance(node_port, bool) or not isinstance(node_port, int) or not 1 <= node_port <= 65535:
             raise ConfigurationRequired('service.port must be an integer in 1..65535.')
-        recipe = ("FROM node:20-bookworm-slim\nWORKDIR /app\n"
+        recipe = (f"FROM node:{node_major(repository, package)}-bookworm-slim\nWORKDIR /app\n"
                   "RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*\n"
                   f"COPY . .\nRUN {install}\nENV PORT={node_port} HOST=0.0.0.0\nEXPOSE {node_port}\nCMD {json.dumps(['npm', 'run', script], separators=(',', ':'))}\n")
         return {'port': node_port, 'generatedDockerfile': recipe}
@@ -305,13 +438,22 @@ def stack_recipe(repository: Path, port: int | None = None) -> dict | None:
             module = entry.removesuffix('.py').replace('/', '.')
             command = ['python', '-m', 'uvicorn', module + ':app', '--host', '0.0.0.0', '--port', str(python_port)]
             extra = 'fastapi uvicorn'
+            app_env = ''
         elif 'Flask(' in source and entry in {'app.py', 'main.py'}:
-            command = ['python', '-m', 'flask', '--app', entry.removesuffix('.py'), 'run', '--host', '0.0.0.0', '--port', str(python_port)]
+            # --app은 Flask 2.2부터다. 레포가 고정한 Flask 1.x에서도 돌도록 FLASK_APP으로 넘긴다.
+            command = ['python', '-m', 'flask', 'run', '--host', '0.0.0.0', '--port', str(python_port)]
             extra = 'flask'
+            app_env = f'ENV FLASK_APP={entry.removesuffix(".py")}\n'
         else:
             continue
         requirements = 'RUN pip install --no-cache-dir -r requirements.txt\n' if inside(repository, 'requirements.txt').is_file() else ''
-        recipe = f'FROM python:3.12-slim\nWORKDIR /app\nCOPY . .\n{requirements}RUN pip install --no-cache-dir {extra}\nEXPOSE {python_port}\nCMD {json.dumps(command)}\n'
+        poetry = poetry_requirements(repository, include_groups=False)
+        if poetry:
+            requirements += f'RUN pip install --no-cache-dir {shlex.join(poetry)}\n'
+        # slim에는 컴파일러가 없어 소스 배포만 있는 패키지(multidict, PyICU)가 설치되지 않는다(microblog, cheat.sh 실측).
+        tools = ('RUN apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config '
+                 '&& rm -rf /var/lib/apt/lists/*\n') if requirements else ''
+        recipe = f'FROM python:3.12-slim\nWORKDIR /app\n{tools}COPY . .\n{requirements}RUN pip install --no-cache-dir {extra}\n{app_env}EXPOSE {python_port}\nCMD {json.dumps(command)}\n'
         return {'port': python_port, 'generatedDockerfile': recipe}
     manifest = ''.join(path.read_text(encoding='utf-8') for path in
         (inside(repository, 'build.gradle'), inside(repository, 'build.gradle.kts'), inside(repository, 'pom.xml')) if path.is_file())
@@ -319,12 +461,16 @@ def stack_recipe(repository: Path, port: int | None = None) -> dict | None:
         spring_port = port if port is not None else 8080
         if isinstance(spring_port, bool) or not isinstance(spring_port, int) or not 1 <= spring_port <= 65535:
             raise ConfigurationRequired('service.port must be an integer in 1..65535.')
-        java = '21' if re.search(r'(?:JavaLanguageVersion\.of\(|<java.version>\s*)21', manifest) else '17'
+        java = java_release(repository)
         if inside(repository, 'gradlew').is_file():
             builder = f'eclipse-temurin:{java}-jdk'
             build = "RUN sh ./gradlew bootJar --no-daemon && mkdir /output && find build/libs -maxdepth 1 -name '*.jar' ! -name '*-plain.jar' -exec cp {} /output/app.jar \\;\n"
         elif inside(repository, 'pom.xml').is_file():
-            builder = f'maven:3.9.9-eclipse-temurin-{java}'
+            if '<modules>' in manifest and not inside(repository, 'src/main').is_dir():
+                # spring-guides/tut-rest처럼 모듈마다 앱이 따로 있으면 어느 것을 띄울지 고르지 않는다.
+                raise ConfigurationRequired('Maven multi-module project without a root application: '
+                                            'add a Dockerfile or .codereferee/validation.yaml for the module to run.')
+            builder = MAVEN_IMAGES[java]
             build = "RUN mvn -B package -DskipTests && mkdir /output && find target -maxdepth 1 -name '*.jar' ! -name 'original-*' -exec cp {} /output/app.jar \\;\n"
         else:
             return None

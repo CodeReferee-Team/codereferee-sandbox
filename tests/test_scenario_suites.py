@@ -18,18 +18,39 @@ class ScenarioSuiteTests(unittest.TestCase):
             self.assertIn(mode.removeprefix('litmus_'), command)
 
     def test_compact_custom_selection_matches_frontend_64_character_contract(self):
-        self.assertEqual(resolve_scenarios('suite_custom__v1_fff'), list(CUSTOM_V1))
+        # 프론트가 보내는 12비트 선택은 그대로 해석되고, 부하(13번째)는 새 비트를 쓴다.
+        self.assertEqual(resolve_scenarios('suite_custom__v1_fff'), list(CUSTOM_V1[:12]))
+        self.assertEqual(resolve_scenarios('suite_custom__v1_1fff'), list(CUSTOM_V1))
+        self.assertEqual(CUSTOM_V1[12], 'load_concurrent_users')
         self.assertEqual(resolve_scenarios('suite_custom__ck__cpu'),
                          ['litmus_container_kill', 'litmus_pod_cpu_hog'])
         with self.assertRaises(ValueError):
-            resolve_scenarios('suite_custom__v1_1000')
+            resolve_scenarios('suite_custom__v1_2000')
+    def test_standard_suites_measure_concurrent_users_before_injecting_faults(self):
+        self.assertEqual(resolve_scenarios('suite_standard')[0], 'load_concurrent_users')
+        self.assertEqual(resolve_scenarios('suite_deep')[0], 'load_concurrent_users')
+        self.assertEqual(resolve_scenarios('suite_custom__load'), ['load_concurrent_users'])
+        target = ChaosTarget(namespace='test', deployment='api', service='api', servicePort=8080,
+                             labelSelector='app=api', probePath='/health')
+        request = RepositoryValidationRequest(repositoryUrl='https://github.com/test/repo', chaosMode='load_concurrent_users')
+        command = experiment_command(request, target)
+        self.assertTrue(command[1].endswith('run_load_experiment.py'))
+        self.assertEqual(command[command.index('--probe-path') + 1], '/health')
+        self.assertNotIn('--target-users', command)
+        targeted = request.model_copy(update={'target_users': 150})
+        command = experiment_command(targeted, target)
+        self.assertEqual(command[command.index('--target-users') + 1], '150')
+        with self.assertRaises(ValueError):
+            RepositoryValidationRequest(repositoryUrl='https://github.com/test/repo', targetUsers=501)
+
     def test_suite_order_and_additional_modes_are_deduplicated(self):
         self.assertEqual(resolve_scenarios('suite_quick', ['litmus_pod_cpu_hog', 'litmus_container_kill']),
                          ['litmus_container_kill', 'litmus_pod_cpu_hog'])
         with self.assertRaises(ValueError):
             resolve_scenarios('suite_quick', ['unknown'])
 
-    def run_suite(self, deploy, run, outcomes, mode='suite_standard', **extra):
+    # 묶음 동작만 보는 테스트라 표준 묶음 구성(2026-10-30 부하 추가)에 묶이지 않게 명시 선택을 쓴다.
+    def run_suite(self, deploy, run, outcomes, mode='suite_custom__ck__cpu__lat', **extra):
         import json
         deploy.return_value = {'target': {'namespace': 'test', 'deployment': 'api', 'service': 'api',
                                'servicePort': 8080, 'labelSelector': 'app=api'}}

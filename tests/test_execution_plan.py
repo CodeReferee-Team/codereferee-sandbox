@@ -5,7 +5,7 @@ import unittest
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from execution_plan import ConfigurationRequired, inside, normalize_resources, render_plan, resolve_plan
+from execution_plan import ConfigurationRequired, inside, java_release, node_major, normalize_resources, render_plan, resolve_plan
 
 
 class ExecutionPlanTests(unittest.TestCase):
@@ -83,6 +83,38 @@ class ExecutionPlanTests(unittest.TestCase):
         self.assertEqual((plan['source'], plan['port']), ('dockerfile', 3001))
         self.write('compose.yaml', 'services: {}\n')
         self.assertEqual(resolve_plan(self.root)['source'], 'dockerfile')
+
+    def test_java_release_follows_declarations_outside_the_main_build_file(self):
+        self.assertEqual(java_release(self.root), '17')
+        self.write('pom.xml', '<project><properties><java.version>1.8</java.version></properties></project>')
+        self.assertEqual(java_release(self.root), '17')
+        # Gradle toolchain은 정확히 같은 JDK가 있어야 하므로 버전 카탈로그 값까지 본다.
+        (self.root / 'pom.xml').unlink()
+        self.write('build.gradle.kts', 'java { toolchain { languageVersion.set(JavaLanguageVersion.of(libs.versions.java.get())) } }')
+        self.write('gradle/libs.versions.toml', '[versions]\njava = "21"\nspring = "3.2.0"\n')
+        self.assertEqual(java_release(self.root), '21')
+        self.write('build.gradle.kts', 'java { sourceCompatibility = JavaVersion.VERSION_25 }\nplugins { id("org.springframework.boot") }')
+        (self.root / 'gradle/libs.versions.toml').unlink()
+        self.write('gradlew', '')
+        self.assertEqual(java_release(self.root), '25')
+        self.assertIn('FROM eclipse-temurin:25-jdk AS builder', resolve_plan(self.root)['generatedDockerfile'])
+
+    def test_generated_flask_command_works_with_flask_1(self):
+        self.write('requirements.txt', 'Flask==1.1.2\n')
+        self.write('app.py', 'from flask import Flask\napp = Flask(__name__)\n')
+        recipe = resolve_plan(self.root)['generatedDockerfile']
+        self.assertIn('ENV FLASK_APP=app\n', recipe)
+        self.assertNotIn('--app', recipe)
+
+    def test_node_image_follows_engines_and_nvmrc_but_never_drops_below_20(self):
+        self.assertEqual(node_major(self.root, {}), '20')
+        self.assertEqual(node_major(self.root, {'engines': {'node': '>=10'}}), '20')
+        self.assertEqual(node_major(self.root, {'engines': {'node': '>=22.12.0'}}), '22')
+        self.assertEqual(node_major(self.root, {'engines': {'node': '^22.22.2 || ^24.15.0 || >=26.0.0'}}), '22')
+        self.write('.nvmrc', 'v24.16.0\n')
+        self.assertEqual(node_major(self.root, {'engines': {'node': '>=22'}}), '24')
+        self.write('package.json', json.dumps({'scripts': {'start': 'node index.js'}}))
+        self.assertIn('FROM node:24-bookworm-slim', resolve_plan(self.root)['generatedDockerfile'])
 
     def test_yaml_postgres_password_is_generated_and_shared_with_app_only(self):
         self.write('Dockerfile', 'FROM python:3.12\n')
@@ -168,6 +200,44 @@ class ExecutionPlanTests(unittest.TestCase):
         plan = resolve_plan(self.root)
         self.assertEqual(plan['port'], 5000)
         self.assertIn('ENV PORT=5000', plan['generatedDockerfile'])
+
+    def test_node_port_comes_from_the_entry_file_when_it_ignores_PORT(self):
+        # node-role-based-authorization-api: `NODE_ENV === 'production' ? 80 : 4000`이라 3000을 보던 프로브가 실패했다.
+        self.write('package.json', json.dumps({'scripts': {'start': 'nodemon ./server.js'}}))
+        self.write('server.js', "const port = process.env.NODE_ENV === 'production' ? 80 : 4000;\napp.listen(port);\n")
+        plan = resolve_plan(self.root)
+        self.assertEqual(plan['port'], 4000)
+        self.assertIn('EXPOSE 4000', plan['generatedDockerfile'])
+
+    def test_node_port_stays_3000_when_the_app_reads_PORT_or_is_ambiguous(self):
+        self.write('package.json', json.dumps({'main': 'index.js', 'scripts': {'start': 'node .'}}))
+        self.write('index.js', 'app.listen(process.env.PORT || 5000);\n')
+        self.assertEqual(resolve_plan(self.root)['port'], 3000)
+        self.write('index.js', 'app.listen(5000);\nadmin.listen(5001);\n')
+        self.assertEqual(resolve_plan(self.root)['port'], 3000)
+        self.write('index.js', 'app.listen(5000);\n')
+        self.assertEqual(resolve_plan(self.root)['port'], 5000)
+
+    def test_python_recipe_can_build_native_requirements(self):
+        self.write('app.py', 'app = Flask(__name__)\n')
+        self.write('requirements.txt', 'multidict\n')
+        recipe = resolve_plan(self.root)['generatedDockerfile']
+        self.assertIn('build-essential pkg-config', recipe)
+
+    def test_python_recipe_installs_poetry_non_package_dependencies(self):
+        self.write('app.py', 'app = FastAPI()\n')
+        self.write('pyproject.toml', '[tool.poetry]\npackage-mode = false\n[tool.poetry.dependencies]\n'
+            'python = "^3.10"\nsqlmodel = "^0.0.16"\n[tool.poetry.group.dev.dependencies]\npytest = "*"\n')
+        recipe = resolve_plan(self.root)['generatedDockerfile']
+        self.assertIn("'sqlmodel>=0.0.16,<0.0.17'", recipe)
+        self.assertNotIn('pytest', recipe)
+
+    def test_maven_multimodule_without_a_root_application_needs_configuration(self):
+        # spring-guides/tut-rest: 모듈 네 개가 각각 앱이다. 어느 것을 띄울지 고르지 않는다.
+        self.write('pom.xml', '<project><parent><artifactId>spring-boot-starter-parent</artifactId></parent>'
+            '<modules><module>rest</module><module>links</module></modules></project>')
+        self.write('rest/src/main/java/App.java', 'class App {}')
+        with self.assertRaisesRegex(ConfigurationRequired, 'multi-module'): resolve_plan(self.root)
 
     def test_explicit_multimodule_jar_is_selected_not_guessed(self):
         self.write('modules/api/build/libs/application.jar', 'jar')

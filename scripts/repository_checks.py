@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from collect_baseline import kubectl_environment
-from execution_plan import ConfigurationRequired, inside, read_yaml
+from execution_plan import MAVEN_IMAGES, ConfigurationRequired, inside, java_release, node_major, poetry_requirements, read_yaml
 
 
 class CheckFailure(RuntimeError):
@@ -74,14 +74,19 @@ def check_plan(repository: Path) -> dict:
             raise ConfigurationRequired('Valid package.json is required for Node verification.') from exc
         scripts = package.get('scripts', {}) if isinstance(package, dict) else None
         if not isinstance(scripts, dict): raise ConfigurationRequired('package.json scripts must be an object.')
-        image = 'node:20-bookworm'
+        image = f'node:{node_major(root, package)}-bookworm'
         install = [['npm', 'ci' if inside(root, 'package-lock.json').is_file() else 'install']]
         if scripts.get('build'): build = ['npm', 'run', 'build']
         if scripts.get('test'): test = ['npm', 'test']
     elif stack == 'python':
-        image = 'python:3.12-slim'
+        # slim에는 gcc·pkg-config가 없어 휠이 없는 패키지(multidict, PyICU)가 설치되지 않는다.
+        # 검사 컨테이너는 root가 아니라 apt를 못 쓰므로 빌드 도구가 든 이미지를 쓴다. Node 검사와 같은 bookworm이다.
+        image = 'python:3.12-bookworm'
         if inside(root, 'requirements.txt').is_file(): install.append(['python', '-m', 'pip', 'install', '-r', 'requirements.txt'])
-        if any(inside(root, p).is_file() for p in ('pyproject.toml', 'setup.py')):
+        poetry = poetry_requirements(root, include_groups=True)
+        if poetry:
+            install.append(['python', '-m', 'pip', 'install', *poetry])
+        elif poetry is None and any(inside(root, p).is_file() for p in ('pyproject.toml', 'setup.py')):
             install.append(['python', '-m', 'pip', 'install', '.'])
         deps = data.get('testDependencies')
         if deps:
@@ -92,16 +97,14 @@ def check_plan(repository: Path) -> dict:
             install.append(['python', '-m', 'pip', 'install', 'pytest'])
             test = ['python', '-m', 'pytest', '-q']
     elif stack in {'gradle', 'maven'}:
-        manifest = ''.join(inside(root, name).read_text(encoding='utf-8') for name in
-            ('build.gradle', 'build.gradle.kts', 'pom.xml') if inside(root, name).is_file())
-        java = '21' if re.search(r'(?:JavaLanguageVersion\.of\(|<java.version>\s*)21', manifest) else '17'
+        java = java_release(root)
         if stack == 'gradle':
             if not inside(root, 'gradlew').is_file(): raise ConfigurationRequired('Gradle wrapper is required for verification.')
             image = f'eclipse-temurin:{java}-jdk'
             build = ['sh', './gradlew', 'classes', '--no-daemon']
             test = ['sh', './gradlew', 'test', '--no-daemon'] if any(p.is_dir() for p in root.glob('**/src/test')) else None
         else:
-            image = f'maven:3.9.9-eclipse-temurin-{java}'
+            image = MAVEN_IMAGES[java]
             build = ['mvn', '-B', '-Dmaven.repo.local=/cache/maven', '-DskipTests', 'package']
             test = ['mvn', '-B', '-Dmaven.repo.local=/cache/maven', 'test'] if any(p.is_dir() for p in root.glob('**/src/test')) else None
     if 'build' in declaration: build = argument_array(declaration['build'])
