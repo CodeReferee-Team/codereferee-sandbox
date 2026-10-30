@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from collect_baseline import kubectl_environment
-from execution_plan import MAVEN_IMAGES, ConfigurationRequired, inside, java_release, node_major, read_yaml
+from execution_plan import MAVEN_IMAGES, ConfigurationRequired, inside, java_release, node_major, poetry_requirements, read_yaml
 
 
 class CheckFailure(RuntimeError):
@@ -79,9 +79,14 @@ def check_plan(repository: Path) -> dict:
         if scripts.get('build'): build = ['npm', 'run', 'build']
         if scripts.get('test'): test = ['npm', 'test']
     elif stack == 'python':
-        image = 'python:3.12-slim'
+        # slim에는 gcc·pkg-config가 없어 휠이 없는 패키지(multidict, PyICU)가 설치되지 않는다.
+        # 검사 컨테이너는 root가 아니라 apt를 못 쓰므로 빌드 도구가 든 이미지를 쓴다. Node 검사와 같은 bookworm이다.
+        image = 'python:3.12-bookworm'
         if inside(root, 'requirements.txt').is_file(): install.append(['python', '-m', 'pip', 'install', '-r', 'requirements.txt'])
-        if any(inside(root, p).is_file() for p in ('pyproject.toml', 'setup.py')):
+        poetry = poetry_requirements(root, include_groups=True)
+        if poetry:
+            install.append(['python', '-m', 'pip', 'install', *poetry])
+        elif poetry is None and any(inside(root, p).is_file() for p in ('pyproject.toml', 'setup.py')):
             install.append(['python', '-m', 'pip', 'install', '.'])
         deps = data.get('testDependencies')
         if deps:

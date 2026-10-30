@@ -201,6 +201,44 @@ class ExecutionPlanTests(unittest.TestCase):
         self.assertEqual(plan['port'], 5000)
         self.assertIn('ENV PORT=5000', plan['generatedDockerfile'])
 
+    def test_node_port_comes_from_the_entry_file_when_it_ignores_PORT(self):
+        # node-role-based-authorization-api: `NODE_ENV === 'production' ? 80 : 4000`이라 3000을 보던 프로브가 실패했다.
+        self.write('package.json', json.dumps({'scripts': {'start': 'nodemon ./server.js'}}))
+        self.write('server.js', "const port = process.env.NODE_ENV === 'production' ? 80 : 4000;\napp.listen(port);\n")
+        plan = resolve_plan(self.root)
+        self.assertEqual(plan['port'], 4000)
+        self.assertIn('EXPOSE 4000', plan['generatedDockerfile'])
+
+    def test_node_port_stays_3000_when_the_app_reads_PORT_or_is_ambiguous(self):
+        self.write('package.json', json.dumps({'main': 'index.js', 'scripts': {'start': 'node .'}}))
+        self.write('index.js', 'app.listen(process.env.PORT || 5000);\n')
+        self.assertEqual(resolve_plan(self.root)['port'], 3000)
+        self.write('index.js', 'app.listen(5000);\nadmin.listen(5001);\n')
+        self.assertEqual(resolve_plan(self.root)['port'], 3000)
+        self.write('index.js', 'app.listen(5000);\n')
+        self.assertEqual(resolve_plan(self.root)['port'], 5000)
+
+    def test_python_recipe_can_build_native_requirements(self):
+        self.write('app.py', 'app = Flask(__name__)\n')
+        self.write('requirements.txt', 'multidict\n')
+        recipe = resolve_plan(self.root)['generatedDockerfile']
+        self.assertIn('build-essential pkg-config', recipe)
+
+    def test_python_recipe_installs_poetry_non_package_dependencies(self):
+        self.write('app.py', 'app = FastAPI()\n')
+        self.write('pyproject.toml', '[tool.poetry]\npackage-mode = false\n[tool.poetry.dependencies]\n'
+            'python = "^3.10"\nsqlmodel = "^0.0.16"\n[tool.poetry.group.dev.dependencies]\npytest = "*"\n')
+        recipe = resolve_plan(self.root)['generatedDockerfile']
+        self.assertIn("'sqlmodel>=0.0.16,<0.0.17'", recipe)
+        self.assertNotIn('pytest', recipe)
+
+    def test_maven_multimodule_without_a_root_application_needs_configuration(self):
+        # spring-guides/tut-rest: 모듈 네 개가 각각 앱이다. 어느 것을 띄울지 고르지 않는다.
+        self.write('pom.xml', '<project><parent><artifactId>spring-boot-starter-parent</artifactId></parent>'
+            '<modules><module>rest</module><module>links</module></modules></project>')
+        self.write('rest/src/main/java/App.java', 'class App {}')
+        with self.assertRaisesRegex(ConfigurationRequired, 'multi-module'): resolve_plan(self.root)
+
     def test_explicit_multimodule_jar_is_selected_not_guessed(self):
         self.write('modules/api/build/libs/application.jar', 'jar')
         self.write('modules/other/build/libs/other.jar', 'jar')
