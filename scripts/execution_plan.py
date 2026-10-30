@@ -28,6 +28,27 @@ def inside(repository: Path, relative: str) -> Path:
     return path
 
 
+# 레포가 선언한 Java 버전. Gradle toolchain은 정확히 같은 JDK가 있어야 빌드되므로
+# 버전 카탈로그(gradle/libs.versions.toml)와 gradle.properties까지 본다(1chz realworld 실측).
+JAVA_DECLARATIONS = re.compile(
+    r'JavaLanguageVersion\.of\(\s*(\d+)|jvmToolchain\(\s*(\d+)|JavaVersion\.VERSION_(?:1_)?(\d+)'
+    r'|(?:source|target)Compatibility\s*=\s*[\'"]?(?:1\.)?(\d+)'
+    r'|<(?:java\.version|maven\.compiler\.(?:release|source|target)|release)>\s*(?:1\.)?(\d+)'
+    r'|^\s*(?:java|javaVersion|java\.version|jdk)\s*=\s*"?(\d+)"?\s*$', re.MULTILINE)
+SUPPORTED_JAVA = (17, 21, 25)
+MAVEN_IMAGES = {'17': 'maven:3.9.9-eclipse-temurin-17', '21': 'maven:3.9.9-eclipse-temurin-21',
+                '25': 'maven:3.9.11-eclipse-temurin-25'}
+
+
+def java_release(root: Path) -> str:
+    texts = [inside(root, name).read_text(encoding='utf-8', errors='replace') for name in
+             ('build.gradle', 'build.gradle.kts', 'pom.xml', 'gradle/libs.versions.toml', 'gradle.properties')
+             if inside(root, name).is_file()]
+    declared = [int(v) for text in texts for match in JAVA_DECLARATIONS.findall(text) for v in match if v]
+    wanted = max(declared, default=17)
+    return str(next((v for v in SUPPORTED_JAVA if v >= wanted), SUPPORTED_JAVA[-1]))
+
+
 def read_yaml(path: Path) -> dict:
     if path.stat().st_size > 256_000:
         raise ConfigurationRequired('Configuration exceeds 256 KB.')
@@ -76,9 +97,7 @@ def resolve_plan(repository: Path, explicit_profile: str | None = None) -> dict[
             artifact = inside(repository, service.pop('artifactPath'))
             if not artifact.is_file() or artifact.suffix != '.jar' or not artifact.is_relative_to(context):
                 raise ConfigurationRequired('artifactPath must identify an existing built JAR inside buildContext.')
-            manifest = ''.join(inside(repository, name).read_text(encoding='utf-8') for name in
-                ('build.gradle', 'build.gradle.kts', 'pom.xml') if inside(repository, name).is_file())
-            java = '21' if re.search(r'(?:JavaLanguageVersion\.of\(|<java.version>\s*)21', manifest) else '17'
+            java = java_release(repository)
             service['generatedDockerfile'] = (f'FROM eclipse-temurin:{java}-jre\n'
                 f'COPY {json.dumps([artifact.relative_to(context).as_posix(), "/app.jar"])}\n'
                 f'ENV SERVER_PORT={service.get("port", 8080)}\n'
@@ -319,12 +338,12 @@ def stack_recipe(repository: Path, port: int | None = None) -> dict | None:
         spring_port = port if port is not None else 8080
         if isinstance(spring_port, bool) or not isinstance(spring_port, int) or not 1 <= spring_port <= 65535:
             raise ConfigurationRequired('service.port must be an integer in 1..65535.')
-        java = '21' if re.search(r'(?:JavaLanguageVersion\.of\(|<java.version>\s*)21', manifest) else '17'
+        java = java_release(repository)
         if inside(repository, 'gradlew').is_file():
             builder = f'eclipse-temurin:{java}-jdk'
             build = "RUN sh ./gradlew bootJar --no-daemon && mkdir /output && find build/libs -maxdepth 1 -name '*.jar' ! -name '*-plain.jar' -exec cp {} /output/app.jar \\;\n"
         elif inside(repository, 'pom.xml').is_file():
-            builder = f'maven:3.9.9-eclipse-temurin-{java}'
+            builder = MAVEN_IMAGES[java]
             build = "RUN mvn -B package -DskipTests && mkdir /output && find target -maxdepth 1 -name '*.jar' ! -name 'original-*' -exec cp {} /output/app.jar \\;\n"
         else:
             return None

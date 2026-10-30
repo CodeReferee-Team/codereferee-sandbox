@@ -87,6 +87,8 @@ dependencies:
 - Python: 제한된 Flask/FastAPI 진입점. factory/복잡한 패키지는 명시적 Dockerfile 필요.
 - Spring Boot: 단순 루트 Gradle/Maven 실행 가능한 jar 생성. 멀티모듈 산출물·실행 대상은 추가 선언/확장 필요.
   Gradle wrapper와 pom.xml이 함께 있으면(spring-petclinic) 배포와 검사 모두 Gradle을 쓴다.
+  JDK는 레포가 선언한 Java 버전(build 파일, `gradle/libs.versions.toml`, `gradle.properties`)에서 가장 높은 값을
+  17·21·25 중 그 이상인 가장 낮은 버전으로 맞춘다. Gradle toolchain은 정확히 같은 JDK가 있어야 빌드된다.
 - Kubernetes manifest 자동 변환·멀티레포 그룹·실제 온디맨드 Worker는 아직 이 단일 서비스 단계에 포함되지 않음.
 
 Compose의 bind mount·영속 데이터·호스트 Docker socket은 재사용하지 않는다.

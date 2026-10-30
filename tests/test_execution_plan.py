@@ -5,7 +5,7 @@ import unittest
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from execution_plan import ConfigurationRequired, inside, normalize_resources, render_plan, resolve_plan
+from execution_plan import ConfigurationRequired, inside, java_release, normalize_resources, render_plan, resolve_plan
 
 
 class ExecutionPlanTests(unittest.TestCase):
@@ -83,6 +83,21 @@ class ExecutionPlanTests(unittest.TestCase):
         self.assertEqual((plan['source'], plan['port']), ('dockerfile', 3001))
         self.write('compose.yaml', 'services: {}\n')
         self.assertEqual(resolve_plan(self.root)['source'], 'dockerfile')
+
+    def test_java_release_follows_declarations_outside_the_main_build_file(self):
+        self.assertEqual(java_release(self.root), '17')
+        self.write('pom.xml', '<project><properties><java.version>1.8</java.version></properties></project>')
+        self.assertEqual(java_release(self.root), '17')
+        # Gradle toolchain은 정확히 같은 JDK가 있어야 하므로 버전 카탈로그 값까지 본다.
+        (self.root / 'pom.xml').unlink()
+        self.write('build.gradle.kts', 'java { toolchain { languageVersion.set(JavaLanguageVersion.of(libs.versions.java.get())) } }')
+        self.write('gradle/libs.versions.toml', '[versions]\njava = "21"\nspring = "3.2.0"\n')
+        self.assertEqual(java_release(self.root), '21')
+        self.write('build.gradle.kts', 'java { sourceCompatibility = JavaVersion.VERSION_25 }\nplugins { id("org.springframework.boot") }')
+        (self.root / 'gradle/libs.versions.toml').unlink()
+        self.write('gradlew', '')
+        self.assertEqual(java_release(self.root), '25')
+        self.assertIn('FROM eclipse-temurin:25-jdk AS builder', resolve_plan(self.root)['generatedDockerfile'])
 
     def test_yaml_postgres_password_is_generated_and_shared_with_app_only(self):
         self.write('Dockerfile', 'FROM python:3.12\n')

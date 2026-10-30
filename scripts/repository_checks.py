@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from collect_baseline import kubectl_environment
-from execution_plan import ConfigurationRequired, inside, read_yaml
+from execution_plan import MAVEN_IMAGES, ConfigurationRequired, inside, java_release, read_yaml
 
 
 class CheckFailure(RuntimeError):
@@ -92,16 +92,14 @@ def check_plan(repository: Path) -> dict:
             install.append(['python', '-m', 'pip', 'install', 'pytest'])
             test = ['python', '-m', 'pytest', '-q']
     elif stack in {'gradle', 'maven'}:
-        manifest = ''.join(inside(root, name).read_text(encoding='utf-8') for name in
-            ('build.gradle', 'build.gradle.kts', 'pom.xml') if inside(root, name).is_file())
-        java = '21' if re.search(r'(?:JavaLanguageVersion\.of\(|<java.version>\s*)21', manifest) else '17'
+        java = java_release(root)
         if stack == 'gradle':
             if not inside(root, 'gradlew').is_file(): raise ConfigurationRequired('Gradle wrapper is required for verification.')
             image = f'eclipse-temurin:{java}-jdk'
             build = ['sh', './gradlew', 'classes', '--no-daemon']
             test = ['sh', './gradlew', 'test', '--no-daemon'] if any(p.is_dir() for p in root.glob('**/src/test')) else None
         else:
-            image = f'maven:3.9.9-eclipse-temurin-{java}'
+            image = MAVEN_IMAGES[java]
             build = ['mvn', '-B', '-Dmaven.repo.local=/cache/maven', '-DskipTests', 'package']
             test = ['mvn', '-B', '-Dmaven.repo.local=/cache/maven', 'test'] if any(p.is_dir() for p in root.glob('**/src/test')) else None
     if 'build' in declaration: build = argument_array(declaration['build'])

@@ -189,6 +189,10 @@ class RepositoryChecksTests(unittest.TestCase):
         self.node({})
         with self.assertRaises(ConfigurationRequired): check_plan(self.root)
 
+    def test_maven_check_image_matches_declared_java_release(self):
+        self.write('pom.xml', '<project><properties><maven.compiler.release>25</maven.compiler.release></properties></project>')
+        self.assertEqual(check_plan(self.root)['image'], 'maven:3.9.11-eclipse-temurin-25')
+
     def test_shell_expression_is_not_executed_on_the_host(self):
         self.node({})
         self.write('.codereferee/validation.yaml', 'test: "npm test; echo bypass"\n')
