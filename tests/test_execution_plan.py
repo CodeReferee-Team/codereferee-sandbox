@@ -5,7 +5,7 @@ import unittest
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from execution_plan import ConfigurationRequired, inside, java_release, normalize_resources, render_plan, resolve_plan
+from execution_plan import ConfigurationRequired, inside, java_release, node_major, normalize_resources, render_plan, resolve_plan
 
 
 class ExecutionPlanTests(unittest.TestCase):
@@ -98,6 +98,23 @@ class ExecutionPlanTests(unittest.TestCase):
         self.write('gradlew', '')
         self.assertEqual(java_release(self.root), '25')
         self.assertIn('FROM eclipse-temurin:25-jdk AS builder', resolve_plan(self.root)['generatedDockerfile'])
+
+    def test_generated_flask_command_works_with_flask_1(self):
+        self.write('requirements.txt', 'Flask==1.1.2\n')
+        self.write('app.py', 'from flask import Flask\napp = Flask(__name__)\n')
+        recipe = resolve_plan(self.root)['generatedDockerfile']
+        self.assertIn('ENV FLASK_APP=app\n', recipe)
+        self.assertNotIn('--app', recipe)
+
+    def test_node_image_follows_engines_and_nvmrc_but_never_drops_below_20(self):
+        self.assertEqual(node_major(self.root, {}), '20')
+        self.assertEqual(node_major(self.root, {'engines': {'node': '>=10'}}), '20')
+        self.assertEqual(node_major(self.root, {'engines': {'node': '>=22.12.0'}}), '22')
+        self.assertEqual(node_major(self.root, {'engines': {'node': '^22.22.2 || ^24.15.0 || >=26.0.0'}}), '22')
+        self.write('.nvmrc', 'v24.16.0\n')
+        self.assertEqual(node_major(self.root, {'engines': {'node': '>=22'}}), '24')
+        self.write('package.json', json.dumps({'scripts': {'start': 'node index.js'}}))
+        self.assertIn('FROM node:24-bookworm-slim', resolve_plan(self.root)['generatedDockerfile'])
 
     def test_yaml_postgres_password_is_generated_and_shared_with_app_only(self):
         self.write('Dockerfile', 'FROM python:3.12\n')

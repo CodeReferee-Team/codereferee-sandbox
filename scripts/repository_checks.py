@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from collect_baseline import kubectl_environment
-from execution_plan import MAVEN_IMAGES, ConfigurationRequired, inside, java_release, read_yaml
+from execution_plan import MAVEN_IMAGES, ConfigurationRequired, inside, java_release, node_major, read_yaml
 
 
 class CheckFailure(RuntimeError):
@@ -74,7 +74,7 @@ def check_plan(repository: Path) -> dict:
             raise ConfigurationRequired('Valid package.json is required for Node verification.') from exc
         scripts = package.get('scripts', {}) if isinstance(package, dict) else None
         if not isinstance(scripts, dict): raise ConfigurationRequired('package.json scripts must be an object.')
-        image = 'node:20-bookworm'
+        image = f'node:{node_major(root, package)}-bookworm'
         install = [['npm', 'ci' if inside(root, 'package-lock.json').is_file() else 'install']]
         if scripts.get('build'): build = ['npm', 'run', 'build']
         if scripts.get('test'): test = ['npm', 'test']

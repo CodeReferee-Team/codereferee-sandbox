@@ -84,7 +84,9 @@ dependencies:
   spring-petclinic-rest, etherpad-lite, uptime-kuma 등 14개가 이 규칙에 막혀 있었다).
 - Dockerfile: 정확히 한 EXPOSE HTTP 포트. EXPOSE는 HTTP임을 보증하지 않아 실제 probe로 검증한다.
 - Node: package.json의 start 또는 dev 스크립트, 기본 PORT=3000. 실제 앱이 이 설정을 따르지 않으면 YAML 필요.
+  Node 이미지는 `.nvmrc`(또는 `.node-version`)의 주 버전, 없으면 `engines.node`의 하한을 따른다. 20보다 낮추지 않고 26을 넘지 않는다.
 - Python: 제한된 Flask/FastAPI 진입점. factory/복잡한 패키지는 명시적 Dockerfile 필요.
+  Flask는 `--app` 대신 `FLASK_APP`으로 넘겨 레포가 고정한 Flask 1.x에서도 기동한다.
 - Spring Boot: 단순 루트 Gradle/Maven 실행 가능한 jar 생성. 멀티모듈 산출물·실행 대상은 추가 선언/확장 필요.
   Gradle wrapper와 pom.xml이 함께 있으면(spring-petclinic) 배포와 검사 모두 Gradle을 쓴다.
   JDK는 레포가 선언한 Java 버전(build 파일, `gradle/libs.versions.toml`, `gradle.properties`)에서 가장 높은 값을

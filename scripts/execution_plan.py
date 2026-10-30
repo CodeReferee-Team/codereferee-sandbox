@@ -49,6 +49,27 @@ def java_release(root: Path) -> str:
     return str(next((v for v in SUPPORTED_JAVA if v >= wanted), SUPPORTED_JAVA[-1]))
 
 
+def node_major(root: Path, package: dict | None = None) -> str:
+    """레포가 요구하는 Node 주 버전. .nvmrc가 정확한 값이고, 없으면 engines.node의 하한을 쓴다.
+
+    json-server처럼 engines가 22 이상을 요구하는 레포가 20에서 `bad option`으로 죽었다.
+    지금까지의 기본값 20보다 낮추지는 않는다.
+    """
+    wanted = None
+    for name in ('.nvmrc', '.node-version'):
+        if inside(root, name).is_file():
+            match = re.match(r'\s*v?(\d+)', inside(root, name).read_text(encoding='utf-8', errors='replace'))
+            if match:
+                wanted = int(match[1])
+                break
+    if wanted is None and isinstance(package, dict) and isinstance(package.get('engines'), dict):
+        engine = package['engines'].get('node')
+        if isinstance(engine, str):
+            bounds = [int(m[1]) for part in engine.split('||') if (m := re.search(r'(\d+)', part))]
+            wanted = min(bounds) if bounds else None
+    return str(min(max(wanted or 20, 20), 26))
+
+
 def read_yaml(path: Path) -> dict:
     if path.stat().st_size > 256_000:
         raise ConfigurationRequired('Configuration exceeds 256 KB.')
@@ -308,7 +329,7 @@ def stack_recipe(repository: Path, port: int | None = None) -> dict | None:
         node_port = port if port is not None else 3000
         if isinstance(node_port, bool) or not isinstance(node_port, int) or not 1 <= node_port <= 65535:
             raise ConfigurationRequired('service.port must be an integer in 1..65535.')
-        recipe = ("FROM node:20-bookworm-slim\nWORKDIR /app\n"
+        recipe = (f"FROM node:{node_major(repository, package)}-bookworm-slim\nWORKDIR /app\n"
                   "RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*\n"
                   f"COPY . .\nRUN {install}\nENV PORT={node_port} HOST=0.0.0.0\nEXPOSE {node_port}\nCMD {json.dumps(['npm', 'run', script], separators=(',', ':'))}\n")
         return {'port': node_port, 'generatedDockerfile': recipe}
@@ -324,13 +345,16 @@ def stack_recipe(repository: Path, port: int | None = None) -> dict | None:
             module = entry.removesuffix('.py').replace('/', '.')
             command = ['python', '-m', 'uvicorn', module + ':app', '--host', '0.0.0.0', '--port', str(python_port)]
             extra = 'fastapi uvicorn'
+            app_env = ''
         elif 'Flask(' in source and entry in {'app.py', 'main.py'}:
-            command = ['python', '-m', 'flask', '--app', entry.removesuffix('.py'), 'run', '--host', '0.0.0.0', '--port', str(python_port)]
+            # --app은 Flask 2.2부터다. 레포가 고정한 Flask 1.x에서도 돌도록 FLASK_APP으로 넘긴다.
+            command = ['python', '-m', 'flask', 'run', '--host', '0.0.0.0', '--port', str(python_port)]
             extra = 'flask'
+            app_env = f'ENV FLASK_APP={entry.removesuffix(".py")}\n'
         else:
             continue
         requirements = 'RUN pip install --no-cache-dir -r requirements.txt\n' if inside(repository, 'requirements.txt').is_file() else ''
-        recipe = f'FROM python:3.12-slim\nWORKDIR /app\nCOPY . .\n{requirements}RUN pip install --no-cache-dir {extra}\nEXPOSE {python_port}\nCMD {json.dumps(command)}\n'
+        recipe = f'FROM python:3.12-slim\nWORKDIR /app\nCOPY . .\n{requirements}RUN pip install --no-cache-dir {extra}\n{app_env}EXPOSE {python_port}\nCMD {json.dumps(command)}\n'
         return {'port': python_port, 'generatedDockerfile': recipe}
     manifest = ''.join(path.read_text(encoding='utf-8') for path in
         (inside(repository, 'build.gradle'), inside(repository, 'build.gradle.kts'), inside(repository, 'pom.xml')) if path.is_file())
