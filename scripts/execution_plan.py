@@ -14,6 +14,9 @@ from typing import Any
 
 import yaml
 
+from local_databases import (FORWARDER, IMAGES as LOCAL_DATABASE_IMAGES, container_arguments,
+                             container_environment, detect_local_databases)
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10 호스트. Poetry 비패키지 감지만 빠진다.
@@ -242,15 +245,21 @@ def resolve_plan(repository: Path, explicit_profile: str | None = None) -> dict[
         if len(ports) != 1:
             raise ConfigurationRequired('Dockerfile must expose exactly one HTTP port, or declare service.port in validation.yaml.')
         plan = normalize_service(repository, {'port': ports.pop(), 'dockerfile': 'Dockerfile'})
-        plan.update(source='dockerfile', dependencies={})
+        plan.update(source='dockerfile', dependencies=local_dependencies(repository))
         return plan
 
     generated = stack_recipe(repository)
     if generated:
         plan = normalize_service(repository, generated)
-        plan.update(source='stack_detection', dependencies={})
+        plan.update(source='stack_detection', dependencies=local_dependencies(repository))
         return plan
     raise ConfigurationRequired('No unambiguous executable HTTP service found. Add .codereferee/validation.yaml; libraries and ambiguous multi-service projects are not auto-deployed.')
+
+
+def local_dependencies(repository: Path) -> dict:
+    """설정 파일이 가리키는 로컬 DB. 선언이 없는 레포에만 쓴다(local_databases 참조)."""
+    return {'local-' + kind: {'type': kind, 'local': database}
+            for kind, database in detect_local_databases(repository).items()}
 
 
 def normalize_service(repository: Path, service: dict) -> dict:
@@ -479,10 +488,13 @@ def stack_recipe(repository: Path, port: int | None = None) -> dict | None:
     return None
 
 
+DEPENDENCY_PORTS = {'redis': 6379, 'postgres': 5432, 'mysql': 3306, 'mongo': 27017}
+
+
 def render_plan(plan: dict, namespace: str, image: str) -> tuple[str, dict]:
     dependency_values = {}
     for name, dependency in plan['dependencies'].items():
-        dependency_values[name] = {'host': name, 'port': {'redis': '6379', 'postgres': '5432', 'mysql': '3306'}[dependency['type']],
+        dependency_values[name] = {'host': name, 'port': str(DEPENDENCY_PORTS[dependency['type']]),
             'username': 'codereferee', 'database': 'codereferee', 'password': secrets.token_hex(24)}
     environment = {}
     for name, value in plan['env'].items():
@@ -501,22 +513,43 @@ def render_plan(plan: dict, namespace: str, image: str) -> tuple[str, dict]:
     for key in ('command', 'args'):
         if key in plan:
             container[key] = plan[key]
+    containers = [container]
+    forwards = [f'{DEPENDENCY_PORTS[d["type"]]}:{name}:{DEPENDENCY_PORTS[d["type"]]}'
+                for name, d in plan['dependencies'].items() if d.get('local')]
+    if forwards:
+        # 레포 설정은 localhost의 DB를 본다. 앱 Pod 안에서 그 포트를 DB Service로 넘긴다.
+        containers.append({'name': 'local-db-forward', 'image': 'python:3.12-alpine', 'imagePullPolicy': 'IfNotPresent',
+            'command': ['python', '-c', FORWARDER, *forwards],
+            'resources': {'requests': {'cpu': '10m', 'memory': '16Mi'}, 'limits': {'cpu': '200m', 'memory': '64Mi'}}})
     objects = [{'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': namespace}},
         {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': {'name': 'repository-api', 'namespace': namespace},
          'spec': {'replicas': plan['replicas'], 'selector': {'matchLabels': labels},
                   'template': {'metadata': {'labels': labels}, 'spec': {'automountServiceAccountToken': False,
-                    'containers': [container], 'terminationGracePeriodSeconds': 10}}}},
+                    'containers': containers, 'terminationGracePeriodSeconds': 10}}}},
         {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': 'repository-api', 'namespace': namespace},
          'spec': {'selector': labels, 'ports': [{'port': plan['port'], 'targetPort': plan['port']}]}}]
     target_dependencies = {}
     for name, dependency in plan['dependencies'].items():
         kind = dependency['type']
-        dep_port = {'redis': 6379, 'postgres': 5432, 'mysql': 3306}[kind]
-        dep_image = {'redis': 'redis:7-alpine', 'postgres': 'postgres:17-alpine', 'mysql': 'mysql:8.4'}[kind]
+        dep_port = DEPENDENCY_PORTS[kind]
+        dep_image = {'redis': 'redis:7-alpine', 'postgres': 'postgres:17-alpine', 'mysql': 'mysql:8.4'}.get(kind)
         dep_labels = {'app.kubernetes.io/name': name}
         dep_container = {'name': kind, 'image': dep_image, 'ports': [{'containerPort': dep_port}],
                          'resources': {'requests': {'cpu': '50m', 'memory': '64Mi'}, 'limits': {'cpu': '500m', 'memory': '256Mi'}}}
-        if kind == 'postgres':
+        local = dependency.get('local')
+        if local:
+            # 레포에 적힌 개발용 계정 그대로. 생성한 비밀번호를 쓰면 앱 설정과 맞지 않는다.
+            dep_container['image'] = LOCAL_DATABASE_IMAGES[kind]
+            environment = container_environment(local)
+            if environment:
+                dep_container['env'] = [{'name': key, 'value': value} for key, value in environment.items()]
+            arguments = container_arguments(local)
+            if arguments:
+                dep_container['args'] = arguments
+            if kind in {'mysql', 'mongo'}:
+                dep_container['resources']['requests']['memory'] = '128Mi'
+                dep_container['resources']['limits']['memory'] = '512Mi'
+        elif kind == 'postgres':
             # Explicit reproduction values, never real credentials. Apps must use
             # these declared values; unknown external secret requirements are not inferred.
             dep_container['env'] = [{'name': 'POSTGRES_USER', 'value': 'codereferee'},

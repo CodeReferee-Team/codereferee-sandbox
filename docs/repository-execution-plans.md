@@ -100,6 +100,20 @@ dependencies:
   Gradle wrapper와 pom.xml이 함께 있으면(spring-petclinic) 배포와 검사 모두 Gradle을 쓴다.
   JDK는 레포가 선언한 Java 버전(build 파일, `gradle/libs.versions.toml`, `gradle.properties`)에서 가장 높은 값을
   17·21·25 중 그 이상인 가장 낮은 버전으로 맞춘다. Gradle toolchain은 정확히 같은 JDK가 있어야 빌드된다.
+- 로컬 DB 자동 재현(`scripts/local_databases.py`): 선언이 없는 레포(Dockerfile·스택 탐색 경로)의 설정이
+  `localhost`/`127.0.0.1`의 MySQL·PostgreSQL·MongoDB·Redis를 가리키면, 레포에 적힌 개발용 계정·DB 이름 그대로
+  임시 DB를 띄운다. 2026-10-30 실제 레포 배치에서 판정 불가 32건 중 10건이 DB가 없어서였고, 10건 모두 이 모양이었다.
+  - 보는 곳: Spring `src/main/resources/application*.properties|yml`의 `spring.datasource.*`·`spring.data.mongodb.*`·
+    redis 호스트, Node 설정 JSON(패키지가 `mysql`/`mysql2`/`pg`일 때)과 `mongodb://`·`redis://` 문자열, `*.ini`의
+    `Type`/`User`/`Password`/`Host`/`Name` 섹션. `node_modules`·`test` 등은 건너뛴다.
+  - 원격 호스트, 기본값 없는 자리표시자(`${DB_PASSWORD}`), 기본 포트가 아닌 DB는 재현하지 않는다. 값을 지어내지 않는다.
+  - 배포: DB는 별도 Deployment로 두고 앱 Pod에 `local-db-forward` 사이드카(`python:3.12-alpine`)를 붙여 `localhost:<포트>`를
+    DB Service로 넘긴다. DB를 사이드카로 넣으면 앱 Pod 삭제 실험이 DB까지 지워 실험의 의미가 바뀐다.
+  - 검사(테스트) 단계: DB 컨테이너를 먼저 띄우고 준비될 때까지(최대 180초) 기다린 뒤, 검사 컨테이너가 그 네트워크를 함께 써서
+    `localhost`로 붙는다. 끝나면 지운다. DB가 뜨지 않으면 인프라 오류(판정 불가)다.
+  - MySQL은 `mysql:8.0` + `mysql_native_password`. 예제 레포가 `useSSL=false`로 붙어 MySQL 8 기본 인증이
+    `Public Key Retrieval is not allowed`로 끊기고, Node `mysql` 패키지는 기본 인증을 지원하지 않는다.
+  - 환경변수로만 주소를 받는 레포(msdocs-nodejs-mongodb의 `MONGODB_URI`)는 아직 재현하지 않는다.
 - Kubernetes manifest 자동 변환·멀티레포 그룹·실제 온디맨드 Worker는 아직 이 단일 서비스 단계에 포함되지 않음.
 
 Compose의 bind mount·영속 데이터·호스트 Docker socket은 재사용하지 않는다.
