@@ -12,6 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from collect_baseline import kubectl_environment
+from local_databases import IMAGES as DATABASE_IMAGES, container_arguments, container_environment, detect_local_databases, readiness_command
 from execution_plan import MAVEN_IMAGES, ConfigurationRequired, inside, java_release, node_major, poetry_requirements, read_yaml
 
 
@@ -160,6 +161,60 @@ def junit_test_count(repository: Path, stack: str) -> int | None:
     return count
 
 
+def start_check_databases(databases: dict, request: str, environment: dict, deadline: float) -> tuple[list[str], dict]:
+    """레포 설정이 가리키는 로컬 DB를 띄운다. 검사 컨테이너는 첫 DB의 네트워크를 함께 써서
+    `localhost:3306` 같은 레포 설정을 고치지 않고 그대로 붙는다. Spring의 contextLoads 테스트가
+    DB 없이 실패하던 경우(R41·R45·R49)다.
+
+    DB가 뜨지 않으면 레포 결함이 아니라 우리 쪽 문제다(infrastructure_error).
+    """
+    names, report = [], {'databases': [], 'ready': False}
+    for kind, database in databases.items():
+        name = f'codereferee-check-db-{kind}-' + uuid4().hex[:12]
+        command = ['docker', 'run', '--detach', '--name', name, '--label', 'codereferee.temporary=true',
+            '--label', 'codereferee.request-id=' + request, '--memory', '512m', '--cpus', '1', '--pids-limit', '512']
+        if names:
+            command += ['--network', 'container:' + names[0]]
+        for key, value in container_environment(database).items():
+            command += ['--env', f'{key}={value}']
+        command += [DATABASE_IMAGES[kind], *container_arguments(database)]
+        started = subprocess.run(command, text=True, capture_output=True, env=environment, timeout=180)
+        if started.returncode:
+            report['error'] = started.stderr[-1000:]
+            return names, report
+        names.append(name)
+        report['databases'].append({'type': kind, 'source': database['source']})
+    for kind, database in databases.items():
+        name = next(n for n in names if f'-db-{kind}-' in n)
+        while True:
+            try:
+                ready = subprocess.run(['docker', 'exec', name, *readiness_command(database)], text=True,
+                    capture_output=True, env=environment, timeout=15).returncode == 0
+            except subprocess.TimeoutExpired:
+                ready = False
+            if ready:
+                break
+            if time.monotonic() > deadline:
+                logs = subprocess.run(['docker', 'logs', '--tail', '30', name], text=True, capture_output=True,
+                    env=environment, timeout=30)
+                report['error'] = f'{kind} did not become ready: ' + (logs.stdout + logs.stderr)[-1500:]
+                return names, report
+            time.sleep(2)
+    report['ready'] = True
+    return names, report
+
+
+def remove_check_databases(names: list[str], environment: dict) -> dict:
+    if not names:
+        return {'removed': True}
+    try:
+        removed = subprocess.run(['docker', 'rm', '--force', '--volumes', *names], text=True, capture_output=True,
+            env=environment, timeout=60)
+        return {'removed': removed.returncode == 0, 'error': removed.stderr[-500:] if removed.returncode else None}
+    except (OSError, subprocess.TimeoutExpired):
+        return {'removed': False, 'error': 'Check database cleanup failed.'}
+
+
 def verify_repository(repository: Path, cache: Path, request: str, *, timeout: int = 600) -> dict:
     started = time.monotonic()
     # Validate before creating any resources. Linux package caches do not belong
@@ -177,6 +232,7 @@ def verify_repository(repository: Path, cache: Path, request: str, *, timeout: i
             'failed_step': 'prepare', 'exit_code': None, 'infrastructure_error': True,
             'outcome': 'failed', 'test_execution': 'not_attempted', 'verification_declared': plan['declared']})
     report = {}
+    database_names, database_report = [], None
     try:
         # 검사 단계가 호스트 uid 로 도므로 레포 디렉터리도 그 uid 가 쓸 수 있어야 한다.
         # 컨테이너 안에서 확인하면 그 실패가 레포의 빌드 실패와 구분되지 않으므로
@@ -217,12 +273,30 @@ def verify_repository(repository: Path, cache: Path, request: str, *, timeout: i
                 failed_step='prepare', exit_code=None, infrastructure_error=True,
                 outcome='failed', test_execution='not_attempted', verification_declared=plan['declared'])
             raise CheckFailure(report)
-        report = _verify_repository(repository, volume, request, timeout=max(1, timeout - (time.monotonic() - started)))
+        network = None
+        databases = detect_local_databases(inside(repository, plan['workingDirectory']))
+        if databases:
+            database_names, database_report = start_check_databases(databases, request, environment,
+                deadline=time.monotonic() + min(180, max(1, timeout - (time.monotonic() - started))))
+            if not database_report['ready']:
+                report.update(steps=[{'name': 'prepare', 'stderr': database_report.get('error', '')}],
+                    failed_step='prepare', exit_code=None, infrastructure_error=True, local_databases=database_report,
+                    outcome='failed', test_execution='not_attempted', verification_declared=plan['declared'])
+                raise CheckFailure(report)
+            network = 'container:' + database_names[0]
+        report = _verify_repository(repository, volume, request, timeout=max(1, timeout - (time.monotonic() - started)),
+                                    network=network)
+        if databases:
+            report['local_databases'] = database_report
         return report
     except CheckFailure as failure:
         report = failure.report
+        if database_report is not None:
+            report.setdefault('local_databases', database_report)
         raise
     finally:
+        if database_names:
+            report['check_database_cleanup'] = remove_check_databases(database_names, environment)
         try:
             removed = subprocess.run(['docker', 'volume', 'rm', volume], text=True, capture_output=True,
                 env=environment, timeout=30)
@@ -232,7 +306,8 @@ def verify_repository(repository: Path, cache: Path, request: str, *, timeout: i
             report['check_cache_cleanup'] = {'removed': False, 'error': 'Temporary check cache cleanup failed.'}
 
 
-def _verify_repository(repository: Path, cache_name: str, request: str, *, timeout: int = 600) -> dict:
+def _verify_repository(repository: Path, cache_name: str, request: str, *, timeout: int = 600,
+                       network: str | None = None) -> dict:
     plan = check_plan(repository)
     report = {'schema_version': 'sandbox-result.v1', 'detected_stack': plan['stack'] or 'unknown',
         'verification_declared': plan['declared'], 'test_execution': 'not_declared' if plan['test'] is None else 'pending',
@@ -277,6 +352,8 @@ def _verify_repository(repository: Path, cache_name: str, request: str, *, timeo
             '--mount', source_mount,
             '--mount', f'type=volume,source={cache_name},target=/cache',
             '--workdir', workdir]
+        if network:
+            command.extend(['--network', network])
         # 호스트 uid 로 돌아야 bind 마운트한 레포에 쓸 수 있다. 자세한 근거는
         # CHECK_OWNER 주석 참조. Windows 는 기존대로 node 만 고정 uid 를 쓴다.
         if CHECK_OWNER:
