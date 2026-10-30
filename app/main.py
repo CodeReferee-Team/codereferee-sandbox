@@ -27,6 +27,7 @@ ROLLOUT_RESTART_SCRIPT = PROJECT_ROOT / "scripts" / "run_rollout_restart_experim
 DEPENDENCY_SCRIPT = PROJECT_ROOT / 'scripts' / 'run_dependency_experiment.py'
 DEPLOY_SCRIPT = PROJECT_ROOT / "scripts" / "deploy_repository.py"
 SMOKE_SCRIPT = PROJECT_ROOT / 'scripts' / 'run_service_smoke.py'
+LOAD_SCRIPT = PROJECT_ROOT / 'scripts' / 'run_load_experiment.py'
 EXPERIMENT_TIMEOUT_SECONDS = 300
 DEPLOY_TIMEOUT_SECONDS = 1200
 SMOKE_TIMEOUT_SECONDS = 180
@@ -40,6 +41,8 @@ SCENARIO_ESTIMATE_SECONDS = {
     'litmus_container_kill': 130, 'litmus_pod_delete': 140, 'litmus_pod_cpu_hog': 115,
     'litmus_pod_memory_hog': 100, 'deployment_scale_down': 60, 'rollout_restart': 60,
     'service_selector_blackhole': 30,
+    # 10·50·100·200명 단계 20초씩과 관측 Pod 기동·회복 확인. 실측 전 추정값이다.
+    'load_concurrent_users': 150,
 }
 experiment_lock = threading.Lock()
 
@@ -450,6 +453,11 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
             "--label-selector", target.label_selector,
             '--probe-path', target.probe_path,
         ]
+    if request.chaos_mode == 'load_concurrent_users' and target is not None:
+        return [sys.executable, str(LOAD_SCRIPT), '--namespace', target.namespace,
+                '--deployment', target.deployment, '--service', target.service,
+                '--service-port', str(target.service_port), '--label-selector', target.label_selector,
+                '--probe-path', target.probe_path]
     if request.chaos_mode == "service_selector_blackhole" and target is not None:
         return [
             sys.executable, str(SERVICE_SELECTOR_SCRIPT),

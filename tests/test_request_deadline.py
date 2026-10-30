@@ -39,7 +39,7 @@ class RequestDeadlineTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def request(self, mode='suite_standard', deadline=None):
+    def request(self, mode='suite_custom__ck__cpu__lat', deadline=None):
         extra = {} if deadline is None else {'deadlineSeconds': deadline}
         return RepositoryValidationRequest(repositoryUrl='https://github.com/test/repo', requestId='test',
                                            deploymentProfile='test', chaosMode=mode, **extra)
