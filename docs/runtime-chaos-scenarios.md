@@ -45,6 +45,19 @@ AI는 응답을 600초까지 기다리는데 샌드박스는 배포에만 1,200�
   `sandbox_execution_timeout`이다. 어느 쪽이 원인인지 갈라서 본다.
 - 기한이 없으면 지금과 똑같이 단계별 상한만 쓴다.
 
+### 디스크 여유 확인 `sandbox_disk_low` (2026-10-30)
+
+배포를 시작하기 전에 Docker 데이터 경로(`docker info`의 `DockerRootDir`)의 여유 공간을 잰다.
+디스크가 차면 실패가 npm·Maven·Gradle·docker build 안에서 `ENOSPC`로 나서, 리포트가 레포를 빌드하지
+못한 것처럼 읽힌다. 2026-10-30 실서버에서 연속 8건이 이렇게 났다.
+
+- 여유가 `CODEREFEREE_MIN_FREE_DISK_GB`(기본 5) 아래면 BuildKit 빌드 캐시만 비우고 다시 잰다.
+  이미지와 볼륨은 지우지 않는다. 요청이 만든 것만 지우는 `artifact_cleanup`의 원칙을 따른다.
+- 그래도 모자라면 빌드를 시작하지 않고 `infraError: sandbox_disk_low`인 인프라 오류로 끝낸다.
+  잰 값은 `source.disk_guard`에 남는다.
+- 기본값 5GiB는 Spring Boot 요청 하나의 최대 사용량(Maven 저장소, 이미지, kind load용 tar) 추정에
+  여유를 더한 운영 값이다. 판정 임계값이 아니다. 0이면 끄고, 잴 수 없는 호스트는 막지 않는다.
+
 새로 지원하는 `chaosMode`:
 
 | 모드 | 주입 | 관측 |
