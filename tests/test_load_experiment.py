@@ -130,10 +130,49 @@ class LoadRunnerTests(unittest.TestCase):
         with patch.object(load, 'parse_args', return_value=self.arguments()), \
              patch.object(load, 'get_target_configuration', return_value={'replicas': 1}), \
              patch.object(load, 'restart_count', side_effect=[0, 1]), \
+             patch.object(load, 'cpu_budget', return_value={'sufficient': True}), \
              patch.object(load, 'InClusterProbe', return_value=observer), \
              patch.object(load, 'run_generator', return_value=generated), contextlib.redirect_stdout(output):
             code = load.main()
         return code, json.loads(output.getvalue())
+
+    def test_target_users_on_too_few_cores_is_not_measured(self):
+        args = self.arguments()
+        args.target_users = 200
+        budget = {'sufficient': False, 'node_allocatable_millicores': 2000, 'app_pods': 2,
+                  'app_limit_millicores': 2000, 'other_limit_millicores': 0, 'generator_limit_millicores': 1000}
+        output = io.StringIO()
+        with patch.object(load, 'parse_args', return_value=args), \
+             patch.object(load, 'get_target_configuration', return_value={'replicas': 2}), \
+             patch.object(load, 'restart_count', return_value=0), \
+             patch.object(load, 'cpu_budget', return_value=budget), \
+             patch.object(load, 'InClusterProbe') as probe, \
+             patch.object(load, 'run_generator') as generator, contextlib.redirect_stdout(output):
+            code = load.main()
+        result = json.loads(output.getvalue())
+        self.assertEqual(code, 1)
+        probe.assert_not_called()
+        generator.assert_not_called()
+        self.assertEqual(result['observationStatus'], 'infrastructure_error')
+        self.assertEqual(result['infraError'], 'sandbox_cpu_insufficient')
+        self.assertIn('3000m', result['stderr'])
+
+    def test_without_target_users_short_cores_are_recorded_not_blocking(self):
+        observer = MagicMock()
+        observer.__enter__.return_value = observer
+        observer.collect.return_value = self.probes()[:2]
+        observer.collect_until_healthy.return_value = (self.probes(), True)
+        output = io.StringIO()
+        with patch.object(load, 'parse_args', return_value=self.arguments()), \
+             patch.object(load, 'get_target_configuration', return_value={'replicas': 2}), \
+             patch.object(load, 'restart_count', return_value=0), \
+             patch.object(load, 'cpu_budget', return_value={'sufficient': False}), \
+             patch.object(load, 'InClusterProbe', return_value=observer), \
+             patch.object(load, 'run_generator', return_value={'stages': [stage(10, 100, 0)]}), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(load.main(), 0)
+        self.assertEqual(json.loads(output.getvalue())['chaos_observation']['load']['cpu_budget'],
+                         {'sufficient': False})
 
     def test_result_carries_capacity_and_crash_evidence(self):
         code, result = self.run_main(recovered=True)
@@ -143,6 +182,7 @@ class LoadRunnerTests(unittest.TestCase):
         self.assertEqual(observation['load']['max_users_without_errors'], 10)
         self.assertEqual(observation['load']['first_users_with_errors'], 50)
         self.assertEqual(observation['restart_count_delta'], 1)
+        self.assertEqual(observation['load']['cpu_budget'], {'sufficient': True})
         self.assertEqual(observation['recovery_seconds'], 0.0)
         # 부하 요청 수는 묶음 가용성(probe_count 합)에 섞지 않는다.
         self.assertEqual(result['metrics']['probe_count'], 7)
@@ -151,6 +191,56 @@ class LoadRunnerTests(unittest.TestCase):
         code, result = self.run_main(recovered=False)
         self.assertEqual(code, 1)
         self.assertFalse(result['chaos_observation']['recovered'])
+
+
+def pod(name, cpu, phase='Running'):
+    resources = {'limits': {'cpu': cpu}} if cpu else {}
+    return {'metadata': {'name': name}, 'status': {'phase': phase},
+            'spec': {'containers': [{'name': 'c', 'resources': resources}]}}
+
+
+class CpuBudgetTests(unittest.TestCase):
+    """2026-10-30: on a 2 vCPU node petclinic got worse from 1 to 2 replicas."""
+
+    def budget(self, node_cpu, app, others=()):
+        nodes = {'items': [{'status': {'allocatable': {'cpu': node_cpu}}}]}
+
+        def run(command, **_kwargs):
+            return subprocess.CompletedProcess(command, 0, json.dumps(nodes), '')
+
+        def kubectl(_namespace, *args, **_kwargs):
+            items = app if '-l' in args else [*app, *others]
+            return subprocess.CompletedProcess(args, 0, json.dumps({'items': items}), '')
+        with patch.object(load.subprocess, 'run', side_effect=run), patch.object(load, 'kubectl', side_effect=kubectl):
+            return load.cpu_budget('test', 'app=api')
+
+    def test_one_replica_fits_two_cores(self):
+        report = self.budget('2', [pod('api-1', '1000m')])
+        self.assertTrue(report['sufficient'])
+        self.assertEqual(report['app_limit_millicores'], 1000)
+        self.assertEqual(report['generator_limit_millicores'], 1000)
+
+    def test_two_replicas_do_not_fit_two_cores(self):
+        report = self.budget('2', [pod('api-1', '1000m'), pod('api-2', '1000m')])
+        self.assertFalse(report['sufficient'])
+        self.assertEqual(report['app_pods'], 2)
+
+    def test_local_database_counts_against_the_same_cores(self):
+        report = self.budget('2', [pod('api-1', '1000m')], [pod('local-mysql', '500m')])
+        self.assertEqual(report['other_limit_millicores'], 500)
+        self.assertFalse(report['sufficient'])
+        finished = self.budget('2', [pod('api-1', '1000m')], [pod('old', '500m', phase='Succeeded')])
+        self.assertTrue(finished['sufficient'])
+
+    def test_unknown_when_the_app_has_no_cpu_limit(self):
+        report = self.budget('4', [pod('api-1', None)])
+        self.assertIsNone(report['sufficient'])
+
+    def test_millicores(self):
+        self.assertEqual(load.millicores('1500m'), 1500)
+        self.assertEqual(load.millicores('2'), 2000)
+        self.assertEqual(load.millicores('0.5'), 500)
+        self.assertIsNone(load.millicores(None))
 
 
 if __name__ == '__main__':
