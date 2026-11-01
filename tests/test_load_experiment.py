@@ -18,7 +18,8 @@ import run_load_experiment as load
 
 
 def stage(users, requests, failed):
-    return {'users': users, 'requests': requests, 'failed_requests': failed}
+    return {'users': users, 'requests': requests, 'failed_requests': failed,
+            'unfinished_users': 0, 'participating_users': min(users, requests)}
 
 
 class LoadSummaryTests(unittest.TestCase):
@@ -46,7 +47,49 @@ class LoadSummaryTests(unittest.TestCase):
 
     def test_a_stage_without_requests_is_not_counted_as_clean(self):
         self.assertEqual(load.summarize([stage(10, 0, 0)])['max_users_without_errors'], None)
-        self.assertTrue(load.summarize([stage(10, 5, 0), stage(50, 9, 0)])['all_stages_clean'])
+        self.assertTrue(load.summarize([stage(10, 20, 0), stage(50, 90, 0)])['all_stages_clean'])
+
+    def test_empty_target_stage_is_not_a_success(self):
+        result = load.summarize([stage(10, 60, 0), stage(200, 0, 0)], 200)
+        self.assertIsNone(result['target_met'])
+        self.assertFalse(result['measurement_valid'])
+        self.assertFalse(result['all_stages_clean'])
+        self.assertEqual(result['max_users_without_errors'], 10)
+        self.assertIn('no_requests', result['measurement_issues'][0]['reasons'])
+
+    def test_unfinished_or_unrepresented_users_cannot_establish_capacity(self):
+        for incomplete in (dict(stage(200, 400, 0), unfinished_users=195), stage(200, 5, 0)):
+            with self.subTest(incomplete=incomplete):
+                result = load.summarize([stage(10, 60, 0), incomplete, stage(300, 600, 0)], 200)
+                self.assertIsNone(result['target_met'])
+                self.assertFalse(result['measurement_valid'])
+                self.assertEqual(result['max_users_without_errors'], 10)
+
+    def test_no_stages_or_missing_expected_stage_is_incomplete(self):
+        for stages in ([], [stage(10, 60, 0)], [stage(200, 400, 0), stage(10, 60, 0)]):
+            result = load.summarize(stages, 200, expected_stages=[10, 200])
+            self.assertFalse(result['measurement_valid'])
+            self.assertIsNone(result['target_met'])
+        missing_middle = load.summarize([stage(10, 60, 0), stage(200, 400, 0)], 200,
+                                       expected_stages=[10, 50, 200])
+        self.assertEqual(missing_middle['max_users_without_errors'], 10)
+
+    def test_missing_or_inconsistent_counters_are_not_successful(self):
+        for incomplete in ({'users': 200}, dict(stage(200, 400, 0), requests=-1),
+                           stage(200, 400, 401)):
+            result = load.summarize([incomplete], 200)
+            self.assertFalse(result['measurement_valid'])
+            self.assertIsNone(result['target_met'])
+
+    def test_completed_target_with_http_failures_is_a_valid_miss(self):
+        result = load.summarize([stage(200, 400, 20)], 200, expected_stages=[200])
+        self.assertTrue(result['measurement_valid'])
+        self.assertFalse(result['target_met'])
+
+    def test_completed_target_without_failures_is_valid(self):
+        result = load.summarize([stage(200, 400, 0)], 200, expected_stages=[200])
+        self.assertTrue(result['measurement_valid'])
+        self.assertTrue(result['target_met'])
 
     def test_target_users_are_measured_exactly_and_judged_up_to_that_stage(self):
         self.assertEqual(load.with_target([10, 50, 100, 200], 150), [10, 50, 100, 150, 200])
@@ -90,6 +133,7 @@ class GeneratorTests(unittest.TestCase):
 
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         port = server.server_address[1]
 
@@ -109,9 +153,30 @@ class GeneratorTests(unittest.TestCase):
         (private,) = run('/private', '5')
         self.assertEqual(private['failed_requests'], 0)
         self.assertEqual(set(private['status_counts']), {'401'})
+        for result in (small, large, private):
+            self.assertEqual(result['participating_users'], result['users'])
+            self.assertEqual(result['unfinished_users'], 0)
+            self.assertTrue(load.summarize([result])['measurement_valid'])
 
 
 class GeneratorDeadlineTests(unittest.TestCase):
+    def test_unfinished_workers_stop_later_stages_and_cannot_report_success(self):
+        # Inject a stuck request into the real generator process; no network/server timing race.
+        code = load.GENERATOR_CODE.replace('results=[]',
+            'def request():\n time.sleep(30); return 200\nresults=[]')
+        env = dict(os.environ, TARGET_URL='http://127.0.0.1/', STAGES='1,2', STAGE_SECONDS='1',
+                   THINK_SECONDS='0.01', REQUEST_TIMEOUT='0.1')
+        out = subprocess.run([sys.executable, '-c', code], env=env, capture_output=True,
+                             text=True, timeout=20, check=True)
+        stages = json.loads(out.stdout)['stages']
+        self.assertEqual(len(stages), 1)
+        self.assertEqual(stages[0]['unfinished_users'], 1)
+        self.assertEqual(stages[0]['requests'], 0)
+        self.assertEqual(stages[0]['participating_users'], 0)
+        summary = load.summarize(stages, 2, expected_stages=[1, 2])
+        self.assertFalse(summary['measurement_valid'])
+        self.assertIsNone(summary['target_met'])
+
     def test_stuck_users_share_one_stage_deadline(self):
         """Users that get no answer still finish within one stage deadline, and each stage logs progress."""
         listener = socket.socket()
@@ -132,6 +197,17 @@ class GeneratorDeadlineTests(unittest.TestCase):
 
 class GeneratorStartTests(unittest.TestCase):
     """A generator Pod that never starts must say why, not wait out the whole limit."""
+
+    def test_final_result_can_precede_progress_in_merged_container_logs(self):
+        expected = {'stages': [stage(10, 100, 0)]}
+        logs = json.dumps({'progress': stage(10, 100, 0)}) + '\n' + json.dumps(expected)
+        self.assertEqual(load.generator_result(logs), expected)
+        self.assertEqual(load.generator_result(logs + '\n' + json.dumps({'progress': stage(10, 100, 0)})),
+                         expected)
+
+    def test_progress_without_a_final_result_is_not_a_complete_measurement(self):
+        with self.assertRaisesRegex(RuntimeError, 'no final stage result'):
+            load.generator_result(json.dumps({'progress': stage(10, 100, 0)}))
 
     def pod(self, phase='Pending', waiting=None, scheduled=None):
         status = {'phase': phase}
@@ -181,14 +257,17 @@ class LoadRunnerTests(unittest.TestCase):
         return [{'at': f'2026-10-30T00:00:0{i}Z', 'success': success, 'status_code': 200 if success else None,
                  'latency_ms': 1} for i in range(5)]
 
-    def run_main(self, recovered):
+    def run_main(self, recovered, generated=None, target_users=None):
         observer = MagicMock()
         observer.__enter__.return_value = observer
         observer.collect.return_value = self.probes()[:2]
         observer.collect_until_healthy.return_value = (self.probes(recovered), recovered)
-        generated = {'stages': [dict(stage(10, 100, 0), p95_latency_ms=12), dict(stage(50, 400, 30), p95_latency_ms=900)]}
+        if generated is None:
+            generated = {'stages': [dict(stage(10, 100, 0), p95_latency_ms=12), dict(stage(50, 400, 30), p95_latency_ms=900)]}
+        args = self.arguments()
+        args.target_users = target_users
         output = io.StringIO()
-        with patch.object(load, 'parse_args', return_value=self.arguments()), \
+        with patch.object(load, 'parse_args', return_value=args), \
              patch.object(load, 'get_target_configuration', return_value={'replicas': 1}), \
              patch.object(load, 'restart_count', side_effect=[0, 1]), \
              patch.object(load, 'cpu_budget', return_value={'sufficient': True}), \
@@ -229,7 +308,7 @@ class LoadRunnerTests(unittest.TestCase):
              patch.object(load, 'restart_count', return_value=0), \
              patch.object(load, 'cpu_budget', return_value={'sufficient': False}), \
              patch.object(load, 'InClusterProbe', return_value=observer), \
-             patch.object(load, 'run_generator', return_value={'stages': [stage(10, 100, 0)]}), \
+             patch.object(load, 'run_generator', return_value={'stages': [stage(10, 100, 0), stage(50, 100, 0)]}), \
              contextlib.redirect_stdout(output):
             self.assertEqual(load.main(), 0)
         self.assertEqual(json.loads(output.getvalue())['chaos_observation']['load']['cpu_budget'],
@@ -252,6 +331,30 @@ class LoadRunnerTests(unittest.TestCase):
         code, result = self.run_main(recovered=False)
         self.assertEqual(code, 1)
         self.assertFalse(result['chaos_observation']['recovered'])
+
+    def test_incomplete_measurement_is_infra_error_even_if_app_recovers(self):
+        for target in (None, 50):
+            for stages in ([stage(10, 100, 0), stage(50, 0, 0)],
+                           [stage(10, 100, 0), dict(stage(50, 100, 0), unfinished_users=3)],
+                           [stage(10, 100, 0)], []):
+                with self.subTest(target=target, stages=stages):
+                    code, result = self.run_main(True, {'stages': stages}, target)
+                    self.assertEqual(code, 1)
+                    self.assertIsNone(result['exitCode'])
+                    self.assertEqual(result['observationStatus'], 'infrastructure_error')
+                    self.assertEqual(result['infraError'], 'load_measurement_incomplete')
+                    self.assertFalse(result['timedOut'])
+                    self.assertTrue(result['chaos_observation']['recovered'])
+                    self.assertIsNone(result['chaos_observation']['load']['target_met'])
+                    self.assertEqual(result['chaos_observation']['load']['stages'], stages)
+
+    def test_http_adapter_preserves_incomplete_measurement_as_infra(self):
+        from app.main import parse_experiment_result
+        code, result = self.run_main(True, {'stages': [stage(10, 100, 0), stage(50, 0, 0)]}, 50)
+        parsed = parse_experiment_result(subprocess.CompletedProcess([], code, json.dumps(result), ''))
+        self.assertIsNone(parsed['exitCode'])
+        self.assertEqual(parsed['observationStatus'], 'infrastructure_error')
+        self.assertEqual(parsed['infraError'], 'load_measurement_incomplete')
 
 
 def pod(name, cpu, phase='Running'):
