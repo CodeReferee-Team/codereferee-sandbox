@@ -25,6 +25,7 @@ from in_cluster_probe import InClusterProbe
 from run_litmus_pod_delete import measured_recovery_seconds
 from run_pod_kill_experiment import get_target_configuration, metrics_from_probes
 
+GENERATOR_IMAGE = 'python:3.12-alpine'
 GENERATOR_RESOURCES = {'requests': {'cpu': '250m', 'memory': '64Mi'},
                        'limits': {'cpu': '1000m', 'memory': '256Mi'}}
 
@@ -33,7 +34,7 @@ GENERATOR_RESOURCES = {'requests': {'cpu': '250m', 'memory': '64Mi'},
 # those are what a user sees as "the service is down or turned me away".
 # Other 4xx (auth, missing route) are answers from a running service.
 GENERATOR_CODE = r'''
-import http.client,json,os,random,threading,time
+import http.client,json,os,random,sys,threading,time
 from urllib.parse import urlsplit
 URL=urlsplit(os.environ["TARGET_URL"]); STAGES=[int(v) for v in os.environ["STAGES"].split(",")]
 STAGE_SECONDS=float(os.environ["STAGE_SECONDS"]); THINK=float(os.environ["THINK_SECONDS"]); TIMEOUT=float(os.environ["REQUEST_TIMEOUT"])
@@ -63,7 +64,10 @@ def stage(users):
  threads=[threading.Thread(target=user,daemon=True) for _ in range(users)]
  for t in threads: t.start()
  begun=time.monotonic(); window["stop"]=begun+STAGE_SECONDS; go.set()
- for t in threads: t.join(STAGE_SECONDS+TIMEOUT+THINK+5)
+ # One deadline for the whole stage: a per-thread join timeout adds up across stuck users
+ # (200 users x 31s), and the runner's limit expires before the stage reports anything.
+ deadline=begun+STAGE_SECONDS+TIMEOUT+THINK+5
+ for t in threads: t.join(max(0.0,deadline-time.monotonic()))
  elapsed=time.monotonic()-begun
  failed=[r for r in records if r[2] is not None or r[1] is None or r[1]>=500 or r[1]==429]
  statuses={}; errors={}
@@ -76,7 +80,11 @@ def stage(users):
   "throughput_rps":round(len(records)/elapsed,2) if elapsed else None,"offered_rps":round(users/THINK,2),
   "p50_latency_ms":percentile(answered,50),"p95_latency_ms":percentile(answered,95),"p99_latency_ms":percentile(answered,99),
   "status_counts":statuses,"error_counts":errors,"unfinished_users":sum(t.is_alive() for t in threads)}
-print(json.dumps({"stages":[stage(users) for users in STAGES]}),flush=True)
+results=[]
+for users in STAGES:
+ results.append(stage(users))
+ print(json.dumps({"progress":results[-1]}),file=sys.stderr,flush=True)
+print(json.dumps({"stages":results}),flush=True)
 '''
 
 
@@ -226,7 +234,7 @@ def run_generator(args: argparse.Namespace, url: str, stages: list[int]) -> dict
         'name': name, 'namespace': args.namespace,
         'labels': {'app.kubernetes.io/name': 'codereferee-load'}}, 'spec': {
         'automountServiceAccountToken': False, 'restartPolicy': 'Never',
-        'containers': [{'name': 'load', 'image': 'python:3.12-alpine',
+        'containers': [{'name': 'load', 'image': GENERATOR_IMAGE,
             'command': ['python', '-u', '-c', GENERATOR_CODE],
             'env': [{'name': 'TARGET_URL', 'value': url},
                     {'name': 'STAGES', 'value': ','.join(str(s) for s in stages)},
@@ -238,13 +246,20 @@ def run_generator(args: argparse.Namespace, url: str, stages: list[int]) -> dict
     try:
         kubectl(args.namespace, 'apply', '-f', '-', input_text=json.dumps(manifest))
         deadline = time.monotonic() + limit
+        status: dict[str, Any] = {}
         while time.monotonic() < deadline:
-            phase = kubectl(args.namespace, 'get', 'pod', name, '-o', 'jsonpath={.status.phase}').stdout.strip()
+            status = json.loads(kubectl(args.namespace, 'get', 'pod', name, '-o', 'json').stdout or '{}').get(
+                'status', {})
+            phase = status.get('phase', '')
             if phase in ('Succeeded', 'Failed'):
                 break
+            stuck = generator_stuck_reason(status)
+            if stuck:
+                raise RuntimeError('Load generator did not start: ' + stuck)
             time.sleep(2)
         else:
-            raise RuntimeError(f'Load generator did not finish within {limit}s.')
+            raise RuntimeError(f'Load generator did not finish within {limit}s (last phase: '
+                               f"{status.get('phase') or 'unknown'}). " + generator_log_tail(args.namespace, name))
         logs = kubectl(args.namespace, 'logs', name).stdout
         if phase != 'Succeeded':
             raise RuntimeError('Load generator failed: ' + logs[-500:])
@@ -253,6 +268,38 @@ def run_generator(args: argparse.Namespace, url: str, stages: list[int]) -> dict
         subprocess.run(kubectl_command('-n', args.namespace, 'delete', 'pod', name, '--ignore-not-found=true',
                                        '--wait=false'), capture_output=True, text=True,
                        env=kubectl_environment(), timeout=30)
+
+
+STUCK_WAITING_REASONS = ('ErrImagePull', 'ImagePullBackOff', 'InvalidImageName', 'CreateContainerConfigError',
+                         'CreateContainerError')
+
+
+def generator_stuck_reason(status: dict[str, Any]) -> str | None:
+    """Why a Pending generator Pod will not start by itself, or None while it may still start.
+
+    Without this the runner waits out the whole limit and reports only a timeout, which reads
+    the same whether the image could not be pulled or the node had no CPU left.
+    """
+    if status.get('phase') not in (None, '', 'Pending'):
+        return None
+    for container in status.get('containerStatuses') or []:
+        waiting = (container.get('state') or {}).get('waiting') or {}
+        if waiting.get('reason') in STUCK_WAITING_REASONS:
+            return f"{waiting['reason']} for {GENERATOR_IMAGE}: {waiting.get('message', '')}".strip()
+    for condition in status.get('conditions') or []:
+        if (condition.get('type') == 'PodScheduled' and condition.get('status') == 'False'
+                and condition.get('reason') == 'Unschedulable'):
+            return 'Unschedulable: ' + condition.get('message', '')
+    return None
+
+
+def generator_log_tail(namespace: str, name: str) -> str:
+    """The generator prints one line per finished stage, so its log shows how far it got."""
+    try:
+        logs = kubectl(namespace, 'logs', name, '--tail=20').stdout.strip()
+    except (RuntimeError, subprocess.TimeoutExpired):
+        return 'No generator log.'
+    return 'Generator log: ' + logs[-800:] if logs else 'Generator printed nothing.'
 
 
 def cpu_insufficient(target: dict, target_users: int, budget: dict) -> dict[str, Any]:
