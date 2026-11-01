@@ -5,7 +5,9 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import socket
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
@@ -107,6 +109,65 @@ class GeneratorTests(unittest.TestCase):
         (private,) = run('/private', '5')
         self.assertEqual(private['failed_requests'], 0)
         self.assertEqual(set(private['status_counts']), {'401'})
+
+
+class GeneratorDeadlineTests(unittest.TestCase):
+    def test_stuck_users_share_one_stage_deadline(self):
+        """Users that get no answer still finish within one stage deadline, and each stage logs progress."""
+        listener = socket.socket()
+        listener.bind(('127.0.0.1', 0)); listener.listen(1)  # accepts nothing beyond the backlog
+        self.addCleanup(listener.close)
+        port = listener.getsockname()[1]
+        env = dict(os.environ, TARGET_URL=f'http://127.0.0.1:{port}/', STAGES='40', STAGE_SECONDS='1',
+                   THINK_SECONDS='0.5', REQUEST_TIMEOUT='2')
+        started = time.monotonic()
+        out = subprocess.run([sys.executable, '-c', load.GENERATOR_CODE], env=env, capture_output=True,
+                             text=True, timeout=60)
+        took = time.monotonic() - started
+        (only,) = json.loads(out.stdout.strip().splitlines()[-1])['stages']
+        self.assertEqual(only['users'], 40)
+        self.assertLess(took, 15)
+        self.assertIn('progress', out.stderr)
+
+
+class GeneratorStartTests(unittest.TestCase):
+    """A generator Pod that never starts must say why, not wait out the whole limit."""
+
+    def pod(self, phase='Pending', waiting=None, scheduled=None):
+        status = {'phase': phase}
+        if waiting:
+            status['containerStatuses'] = [{'state': {'waiting': {'reason': waiting, 'message': 'pull failed'}}}]
+        if scheduled:
+            status['conditions'] = [{'type': 'PodScheduled', 'status': 'False', 'reason': scheduled,
+                                     'message': '0/1 nodes are available: 1 Insufficient cpu.'}]
+        return status
+
+    def test_image_pull_failure_is_reported(self):
+        reason = load.generator_stuck_reason(self.pod(waiting='ImagePullBackOff'))
+        self.assertIn('ImagePullBackOff', reason)
+        self.assertIn('python:3.12-alpine', reason)
+
+    def test_unschedulable_is_reported(self):
+        self.assertIn('Insufficient cpu', load.generator_stuck_reason(self.pod(scheduled='Unschedulable')))
+
+    def test_pending_while_creating_is_not_stuck(self):
+        self.assertIsNone(load.generator_stuck_reason(self.pod(waiting='ContainerCreating')))
+        self.assertIsNone(load.generator_stuck_reason(self.pod(phase='Running')))
+
+    def test_run_generator_stops_early_with_the_reason(self):
+        args = SimpleNamespace(namespace='ns', stage_seconds=20, load_timeout_seconds=5, think_seconds=1)
+        stuck = json.dumps({'status': self.pod(waiting='ErrImagePull')})
+        calls = []
+
+        def fake(namespace, *a, input_text=None):
+            calls.append(a)
+            return SimpleNamespace(stdout=stuck if a[:2] == ('get', 'pod') else '', stderr='', returncode=0)
+
+        with patch.object(load, 'kubectl', side_effect=fake), patch.object(load.subprocess, 'run'), \
+             patch.object(load.time, 'sleep'):
+            with self.assertRaisesRegex(RuntimeError, 'ErrImagePull'):
+                load.run_generator(args, 'http://svc', [10])
+        self.assertLess(len([c for c in calls if c[:2] == ('get', 'pod')]), 5)
 
 
 class LoadRunnerTests(unittest.TestCase):
