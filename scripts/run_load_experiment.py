@@ -87,6 +87,12 @@ def main() -> int:
     stages = with_target(parse_stages(args.stages), args.target_users)
     configuration = get_target_configuration(args.namespace, args.deployment)
     restarts_before = restart_count(args.namespace, args.label_selector)
+    budget = cpu_budget(args.namespace, args.label_selector)
+    if args.target_users and budget.get('sufficient') is False:
+        # 요청자의 인원이 걸린 측정은 판정이 된다. 코어가 모자라 복제본이 서로 다투면 그 결과는
+        # 앱이 아니라 샌드박스의 한계라서, 재지 않고 측정 불가로 돌려준다.
+        print(json.dumps(cpu_insufficient(target, args.target_users, budget), ensure_ascii=False, indent=2))
+        return 1
     url = f'http://{args.service}.{args.namespace}.svc.cluster.local:{args.service_port}{args.probe_path}'
 
     with InClusterProbe(args.namespace, args.service, args.service_port, local_port=args.local_port,
@@ -140,6 +146,7 @@ def main() -> int:
                 'request_timeout_seconds': args.load_timeout_seconds,
                 'failure_definition': 'no HTTP answer within the timeout, or status 5xx or 429',
                 'generator_resources': GENERATOR_RESOURCES,
+                'cpu_budget': budget,
             },
             'observation_window': {
                 'baseline_probe_count': args.baseline_probes,
@@ -246,6 +253,72 @@ def run_generator(args: argparse.Namespace, url: str, stages: list[int]) -> dict
         subprocess.run(kubectl_command('-n', args.namespace, 'delete', 'pod', name, '--ignore-not-found=true',
                                        '--wait=false'), capture_output=True, text=True,
                        env=kubectl_environment(), timeout=30)
+
+
+def cpu_insufficient(target: dict, target_users: int, budget: dict) -> dict[str, Any]:
+    need = budget['app_limit_millicores'] + budget['other_limit_millicores'] + budget['generator_limit_millicores']
+    return {
+        'schemaVersion': 'chaos-v1', 'scenario': 'load_concurrent_users',
+        'observationStatus': 'infrastructure_error', 'infraError': 'sandbox_cpu_insufficient',
+        'exitCode': None, 'timedOut': False, 'target': target,
+        'stderr': (f"The sandbox nodes can allocate {budget['node_allocatable_millicores']}m CPU, but "
+                   f"{budget['app_pods']} app Pod(s), the other request Pods and the load generator are "
+                   f"allowed {need}m. Measuring {target_users} users here would measure the sandbox, "
+                   'not the app. Run load on a larger sandbox node.'),
+        'chaos_observation': {'type': 'load_concurrent_users',
+                              'load': {'target_users': target_users, 'cpu_budget': budget}},
+        'source': {'real_execution_observed': False, 'target': target.get('deployment')},
+    }
+
+
+def millicores(value: Any) -> int | None:
+    if value is None:
+        return None
+    text = str(value)
+    try:
+        return int(text[:-1]) if text.endswith('m') else int(round(float(text) * 1000))
+    except ValueError:
+        return None
+
+
+def cpu_budget(namespace: str, selector: str) -> dict[str, Any]:
+    """Whether the cluster can give every app Pod and the generator the CPU they are allowed.
+
+    The sandbox is one small node. When the app Pods' CPU limits plus the generator's
+    exceed what the nodes can allocate, adding replicas only splits the same cores, so
+    a miss at the requester's target says more about the sandbox than about the app
+    (2026-10-30: petclinic on 2 vCPU got worse going from 1 to 2 replicas).
+    """
+    generator = millicores(GENERATOR_RESOURCES['limits']['cpu'])
+    try:
+        nodes = json.loads(subprocess.run(kubectl_command('get', 'nodes', '-o', 'json'), capture_output=True,
+            text=True, env=kubectl_environment(), timeout=30, check=True).stdout)
+        app = json.loads(kubectl(namespace, 'get', 'pods', '-l', selector, '-o', 'json').stdout)
+        every = json.loads(kubectl(namespace, 'get', 'pods', '-o', 'json').stdout)
+    except (subprocess.SubprocessError, RuntimeError, ValueError, OSError) as exc:
+        return {'sufficient': None, 'reason': f'cpu_budget_unavailable: {exc}'[:300]}
+    allocatable = sum(millicores(node.get('status', {}).get('allocatable', {}).get('cpu')) or 0
+                      for node in nodes.get('items', []))
+    app_names = {pod['metadata']['name'] for pod in app.get('items', [])}
+
+    def limits(pods):
+        return [millicores(container.get('resources', {}).get('limits', {}).get('cpu'))
+                for pod in pods for container in pod.get('spec', {}).get('containers', [])]
+    app_limits = limits(app.get('items', []))
+    # Local databases and other request Pods share the same cores during the load.
+    other_limits = limits(pod for pod in every.get('items', [])
+                          if pod['metadata']['name'] not in app_names
+                          and pod.get('status', {}).get('phase') in ('Pending', 'Running'))
+    report = {'node_allocatable_millicores': allocatable, 'app_pods': len(app_names),
+              'app_limit_millicores': None if None in app_limits else sum(app_limits),
+              'other_limit_millicores': sum(v or 0 for v in other_limits),
+              'generator_limit_millicores': generator}
+    if report['app_limit_millicores'] is None or not allocatable:
+        report.update(sufficient=None, reason='an app container has no CPU limit, or node CPU is unknown')
+    else:
+        report['sufficient'] = (report['app_limit_millicores'] + report['other_limit_millicores']
+                                + generator <= allocatable)
+    return report
 
 
 def restart_count(namespace: str, selector: str) -> int | None:
