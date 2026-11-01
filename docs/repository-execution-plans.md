@@ -121,6 +121,10 @@ dependencies:
   - 보는 곳: Spring `src/main/resources/application*.properties|yml`의 `spring.datasource.*`·`spring.data.mongodb.*`·
     redis 호스트, Node 설정 JSON(패키지가 `mysql`/`mysql2`/`pg`일 때)과 `mongodb://`·`redis://` 문자열, `*.ini`의
     `Type`/`User`/`Password`/`Host`/`Name` 섹션. `node_modules`·`test` 등은 건너뛴다.
+  - Spring은 기본 파일(`application.*`)이 있으면 그 파일과 `spring.profiles.active`에 적힌 프로필 파일만 본다.
+    활성이 아닌 프로필의 DB는 앱이 붙지 않으므로 띄우지 않는다. spring-petclinic은 기본이 H2인데 MySQL·Postgres를
+    둘 다 띄워 노드 CPU 1000m를 차지했고, 4코어에서도 복제본 2개 부하를 재지 못했다(2026-11-01). 기본 파일이 없으면
+    어느 프로필로 뜰지 모르므로 프로필 파일을 모두 본다.
   - 원격 호스트, 기본값 없는 자리표시자(`${DB_PASSWORD}`), 기본 포트가 아닌 DB는 재현하지 않는다. 값을 지어내지 않는다.
   - 배포: DB는 별도 Deployment로 두고 앱 Pod에 `local-db-forward` 사이드카(`python:3.12-alpine`)를 붙여 `localhost:<포트>`를
     DB Service로 넘긴다. DB를 사이드카로 넣으면 앱 Pod 삭제 실험이 DB까지 지워 실험의 의미가 바뀐다.

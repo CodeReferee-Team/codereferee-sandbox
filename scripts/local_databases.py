@@ -75,10 +75,18 @@ def _spring_properties(root: Path) -> list[tuple[Path, dict]]:
                           for key, value in _flatten(document)}
             except yaml.YAMLError:
                 continue
-        # application.properties가 기본 프로필이다. 프로필별 파일은 기본값이 없을 때만 본다.
         found.append((path, values))
-    found.sort(key=lambda item: item[0].name not in {'application.properties', 'application.yml', 'application.yaml'})
-    return found
+    defaults = [item for item in found if item[0].stem == 'application']
+    if not defaults:
+        # 기본 파일이 없으면 어느 프로필로 띄울지 모르므로 프로필별 파일을 모두 본다.
+        return found
+    # 기본 파일이 있으면 Spring은 그 파일과 활성 프로필의 파일만 읽는다. 다른 프로필의 DB는 앱이 붙지
+    # 않는데도 띄우면 노드 CPU만 차지한다(spring-petclinic: 기본 H2인데 MySQL·Postgres 둘 다 떴다).
+    active = {name.strip() for _, values in defaults
+              for name in str(_resolved(values.get('spring.profiles.active')) or '').split(',') if name.strip()}
+    profiles = [item for item in found if item[0].stem.startswith('application-')
+                and item[0].stem[len('application-'):] in active]
+    return defaults + profiles
 
 
 def _add(found: dict, kind: str, source: str, *, host, port=None, user=None, password=None, database=None):
