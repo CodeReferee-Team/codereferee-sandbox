@@ -46,6 +46,32 @@ class LocalDatabaseDetectionTests(unittest.TestCase):
         self.assertEqual(container_environment(postgres),
             {'POSTGRES_USER': 'username', 'POSTGRES_DB': 'jwt_security', 'POSTGRES_PASSWORD': 'password'})
 
+    def test_inactive_profile_databases_are_not_started(self):
+        # spring-projects/spring-petclinic: H2 by default, MySQL/Postgres only under their profiles.
+        # Starting both took 1000m of the 4-core node and blocked measuring 2 replicas (2026-11-01).
+        self.write('src/main/resources/application.properties', 'database=h2\nspring.jpa.open-in-view=false\n')
+        self.write('src/main/resources/application-mysql.properties',
+            'database=mysql\nspring.datasource.url=${MYSQL_URL:jdbc:mysql://localhost/petclinic}\n'
+            'spring.datasource.username=${MYSQL_USER:petclinic}\nspring.datasource.password=${MYSQL_PASS:petclinic}\n')
+        self.write('src/main/resources/application-postgres.properties',
+            'spring.datasource.url=${POSTGRES_URL:jdbc:postgresql://localhost/petclinic}\n'
+            'spring.datasource.username=${POSTGRES_USER:petclinic}\nspring.datasource.password=${POSTGRES_PASS:petclinic}\n')
+        self.assertEqual(detect_local_databases(self.root), {})
+
+    def test_active_profile_and_profile_only_repositories_still_detect(self):
+        self.write('src/main/resources/application.yml', 'spring:\n  profiles:\n    active: dev\n')
+        self.write('src/main/resources/application-dev.yml', 'spring:\n  datasource:\n'
+            '    url: jdbc:postgresql://localhost:5432/app\n    username: app\n    password: secret\n')
+        self.write('src/main/resources/application-prod.yml', 'spring:\n  datasource:\n'
+            '    url: jdbc:mysql://localhost:3306/app\n    username: app\n    password: secret\n')
+        self.assertEqual(set(detect_local_databases(self.root)), {'postgres'})
+        other = Path(tempfile.mkdtemp()); self.addCleanup(lambda: __import__('shutil').rmtree(other))
+        (other / 'src/main/resources').mkdir(parents=True)
+        (other / 'src/main/resources/application-local.properties').write_text(
+            'spring.datasource.url=jdbc:mysql://localhost:3306/app\nspring.datasource.username=root\n'
+            'spring.datasource.password=root\n')
+        self.assertEqual(set(detect_local_databases(other)), {'mysql'})
+
     def test_values_are_never_invented(self):
         self.write('src/main/resources/application.properties',
             'spring.datasource.url=jdbc:mysql://localhost:3306/app\nspring.datasource.username=${DB_USER}\n')
