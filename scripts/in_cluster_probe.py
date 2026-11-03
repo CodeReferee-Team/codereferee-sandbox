@@ -6,6 +6,7 @@ the cluster and crosses the target Service and Pod interface (including netem).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 import uuid
@@ -14,6 +15,12 @@ from urllib.request import ProxyHandler, build_opener
 
 from collect_baseline import kubectl_command, kubectl_environment, probe_success_below
 from run_pod_kill_experiment import stop_process
+
+
+def probe_destination(service: str, port: int) -> tuple[str, int]:
+    """The business entry point can differ from the Service receiving the fault."""
+    return (os.getenv('CODEREFEREE_PROBE_SERVICE') or service,
+            int(os.getenv('CODEREFEREE_PROBE_SERVICE_PORT') or port))
 
 
 OBSERVER_CODE = '''import json, time
@@ -74,6 +81,7 @@ class InClusterProbe:
                  local_port: int = 18080, path: str = '/', spec: dict | None = None,
                  context: dict | None = None):
         self.namespace = namespace
+        service, port = probe_destination(service, port)
         self.name = 'codereferee-observer-' + uuid.uuid4().hex[:8]
         self.url = f'http://{service}.{namespace}.svc.cluster.local:{port}{path}'
         self.timeout = timeout

@@ -13,7 +13,7 @@ except ImportError:
 
 
 def cleanup_request_image(image: str, namespace: str, *, remove_from_kind: bool = True) -> dict:
-    match = re.fullmatch(r'codereferee/([a-z0-9-]+):[a-f0-9]{12}', image)
+    match = re.fullmatch(r'codereferee/([a-z0-9-]+)(?:/svc-[a-z][a-z0-9-]{0,30})?:[a-f0-9]{12}', image)
     if not match or namespace != 'codereferee-' + match[1]:
         raise ValueError('Image does not belong to the supplied request namespace.')
     report = {'image': image, 'host_removed': False, 'kind_nodes': [], 'errors': []}
@@ -28,8 +28,14 @@ def cleanup_request_image(image: str, namespace: str, *, remove_from_kind: bool 
             for node in nodes.stdout.splitlines():
                 removed = subprocess.run(['docker', 'exec', node, 'crictl', 'rmi', image],
                     capture_output=True, text=True, env=environment, timeout=30)
-                report['kind_nodes'].append({'node': node, 'removed': removed.returncode == 0})
-                if removed.returncode:
+                # Multiple service tags may point at one image ID. Removing the first
+                # can remove its aliases too; already absent is the desired end state.
+                absent = removed.returncode != 0 and 'no such image ' in removed.stderr.lower()
+                row = {'node': node, 'removed': removed.returncode == 0 or absent}
+                if absent:
+                    row['already_absent'] = True
+                report['kind_nodes'].append(row)
+                if removed.returncode and not absent:
                     report['errors'].append(removed.stderr.strip())
     removed = subprocess.run(['docker', 'image', 'rm', image], capture_output=True,
                              text=True, env=environment, timeout=30)

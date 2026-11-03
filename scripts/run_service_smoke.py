@@ -3,7 +3,7 @@ import argparse
 import json
 import time
 
-from in_cluster_probe import InClusterProbe
+from in_cluster_probe import InClusterProbe, probe_destination
 from run_pod_kill_experiment import metrics_from_probes
 
 
@@ -18,11 +18,12 @@ def main():
     with InClusterProbe(args.namespace, args.service, args.service_port, path=args.probe_path) as observer:
         probes = observer.collect(5)
     success = all(p['success'] for p in probes)
+    probe_service, probe_port = probe_destination(args.service, args.service_port)
     result = {'schemaVersion': 'sandbox-result.v1', 'observationStatus': 'observed',
         'exitCode': 0 if success else 1, 'timedOut': False,
         'durationMillis': round((time.monotonic() - started) * 1000),
         'serverStarted': any(p['success'] for p in probes),
-        'serverUrl': f'http://{args.service}.{args.namespace}.svc.cluster.local:{args.service_port}',
+        'serverUrl': f'http://{probe_service}.{args.namespace}.svc.cluster.local:{probe_port}',
         'httpStatus': probes[-1]['status_code'], 'serviceCheckAttempted': True,
         'browserCheckAttempted': False, 'browserLoaded': False,
         'probeTransport': 'in_cluster_http', 'metrics': metrics_from_probes(probes),
