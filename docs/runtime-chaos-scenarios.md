@@ -317,6 +317,14 @@ Task `f778fe57-9a96-469f-babc-c476c4f56cb5`, 같은 QuickByte commit을 한 번 
 | 8 | Rollout Restart | 1/101 | 54.77 | 1.85 |
 
 Scale Down은 replica 1 → 0 → 1을 복원하고 HTTP 연속 성공을 확인했다.
+
+### Scale Down의 실제 종료 확인
+
+2026-11-04 보강부터 scale 명령 수락만으로 장애 시작을 간주하지 않는다.
+대상 selector의 Pod가 실제 0개가 될 때까지 기다린 다음 장애 구간을 관측한다.
+`chaos_observation.scale_operation.zero_pods_observed`가 이를 나타낸다.
+제한 시간 안에 종료를 확인할 수 없으면 실험 준비 오류로 반환하고, finally에서 원래 replica 수 복원을 시도한다.
+멀티서비스 실측에서는 복제본 2 → 실제 Pod 0개 → Ready 2개와 업무 HTTP 실패·복구를 확인했다.
 Rollout은 실제 새 Pod UID로 교체됐고 HTTP 연속 성공을 확인했다.
 기존 앱 Pod 직접 port-forward 관측을 in-cluster Service HTTP로 보강했다.
 
