@@ -78,6 +78,10 @@ class ChaosTarget(BaseModel):
     # 헬스 경로를 선언하지 않은 자동 배포 대상은 4xx도 응답으로 센다(collect_baseline.answered).
     # 필드가 없으면 pydantic이 조용히 버리므로 여기 자리를 둔다.
     probe_accepts_client_errors: bool = Field(default=False, alias='probeAcceptsClientErrors')
+    probe_service: str | None = Field(default=None, alias='probeService')
+    probe_service_port: int | None = Field(default=None, alias='probeServicePort', ge=1, le=65535)
+    workloads: dict[str, Any] = Field(default_factory=dict)
+    resource_configuration: dict[str, Any] = Field(default_factory=dict, alias='resourceConfiguration')
 
 
 class RepositoryExecutionFailure(Exception):
@@ -137,9 +141,15 @@ class StageTimeout(Exception):
 
 
 def probe_environment(target: 'ChaosTarget | None') -> dict[str, str] | None:
-    if target is None or not target.probe_accepts_client_errors:
+    if target is None:
         return None
-    return dict(os.environ, CODEREFEREE_PROBE_SUCCESS_BELOW='500')
+    updates = {}
+    if target.probe_accepts_client_errors:
+        updates['CODEREFEREE_PROBE_SUCCESS_BELOW'] = '500'
+    if target.probe_service:
+        updates['CODEREFEREE_PROBE_SERVICE'] = target.probe_service
+        updates['CODEREFEREE_PROBE_SERVICE_PORT'] = str(target.probe_service_port or target.service_port)
+    return dict(os.environ, **updates) if updates else None
 
 
 def run_bounded(command: list[str], *, stage: str, seconds: float, budget_bound: bool = False,
@@ -296,6 +306,20 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         result = infrastructure_error(str(exc), request, timed_out=False, stage=stage)
         return result
     finally:
+        if ('result' in locals() and result.get('observationStatus') == 'observed'
+                and result.get('exitCode') != 0 and 'metrics_target' in locals()
+                and metrics_target is not None and metrics_target.workloads):
+            from scripts.pod_diagnostics import collect_pod_diagnostics
+            diagnostics = {}
+            for name, workload in metrics_target.workloads.items():
+                try:
+                    # The rendered Secret registry is no longer in this process.
+                    # Keep structured status/reason/exit codes; withhold free text.
+                    diagnostics[name] = collect_pod_diagnostics(metrics_target.namespace,
+                        workload['deployment'], (), include_text=False)
+                except Exception:
+                    diagnostics[name] = {'pods': [], 'collection_errors': ['diagnostics_collection_failed']}
+            result.setdefault('source', {})['service_diagnostics'] = diagnostics
         if metrics_session is not None:
             metrics_report = metrics_session.finish()
             if 'result' in locals():
@@ -304,16 +328,32 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
             namespace_removed = cleanup_namespace(deployed_target.namespace)
             if deployed and deployed.get('image'):
                 from scripts.artifact_cleanup import cleanup_request_image
-                try:
-                    report = cleanup_request_image(deployed['image'], deployed_target.namespace,
-                                                   remove_from_kind=namespace_removed)
-                    report['namespace_removed'] = namespace_removed
-                except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
-                    report = {'namespace_removed': namespace_removed, 'errors': [str(exc)]}
+                image_reports = []
+                for image in dict.fromkeys(deployed.get('images') or [deployed['image']]):
+                    try:
+                        image_reports.append(dict(cleanup_request_image(image, deployed_target.namespace,
+                            remove_from_kind=namespace_removed), image=image))
+                    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+                        image_reports.append({'image': image, 'errors': [str(exc)]})
+                report = dict(image_reports[0]) if len(image_reports) == 1 else {
+                    'images': image_reports, 'errors': [e for r in image_reports for e in r.get('errors', [])]}
+                report['namespace_removed'] = namespace_removed
                 if 'result' in locals():
                     result.setdefault('source', {})['artifact_cleanup'] = report
         if 'result' in locals():
             result['durationMillis'] = round((time.monotonic() - request_started) * 1000)
+            if 'metrics_target' in locals() and metrics_target is not None and metrics_target.resource_configuration:
+                result.setdefault('source', {})['resource_configuration'] = metrics_target.resource_configuration
+            if 'metrics_target' in locals() and metrics_target is not None and metrics_target.workloads:
+                result.setdefault('source', {})['workload_resources'] = {
+                    name: workload.get('resourceConfiguration', {'sources': {'cpu': 'unknown', 'memory': 'unknown'}})
+                    for name, workload in metrics_target.workloads.items()}
+                result.setdefault('source', {})['probe_endpoint'] = {
+                    'service': metrics_target.probe_service or metrics_target.service,
+                    'port': metrics_target.probe_service_port or metrics_target.service_port,
+                    'path': metrics_target.probe_path}
+                result['source']['fault_target'] = {'deployment': metrics_target.deployment,
+                    'service': metrics_target.service, 'label_selector': metrics_target.label_selector}
         experiment_lock.release()
 
 
@@ -326,7 +366,7 @@ def attach_repository_checks(result: dict, deployed: dict) -> None:
         return
     report = result.setdefault('sandboxReport', {})
     report.update({key: checks[key] for key in ('detected_stack', 'verification_declared',
-        'test_execution', 'test_count', 'steps', 'check_cache_cleanup') if key in checks})
+        'test_execution', 'test_count', 'steps', 'check_cache_cleanup', 'services', 'service_timings') if key in checks})
     report['repository_check_outcome'] = checks.get('outcome')
 
 
