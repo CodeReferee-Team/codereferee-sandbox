@@ -22,6 +22,7 @@ from typing import Any
 
 from collect_baseline import kubectl_command, kubectl_environment
 from in_cluster_probe import InClusterProbe, probe_destination
+from business_probe import CLIENT_CODE, environment_probe_spec
 from run_litmus_pod_delete import measured_recovery_seconds
 from run_pod_kill_experiment import get_target_configuration, metrics_from_probes
 
@@ -33,16 +34,26 @@ GENERATOR_RESOURCES = {'requests': {'cpu': '250m', 'memory': '64Mi'},
 # A request fails when no HTTP answer arrives in time, or the answer is 5xx or 429:
 # those are what a user sees as "the service is down or turned me away".
 # Other 4xx (auth, missing route) are answers from a running service.
-GENERATOR_CODE = r'''
+GENERATOR_CODE = CLIENT_CODE + r'''
 import http.client,json,os,random,sys,threading,time
 from urllib.parse import urlsplit
 URL=urlsplit(os.environ["TARGET_URL"]); STAGES=[int(v) for v in os.environ["STAGES"].split(",")]
 STAGE_SECONDS=float(os.environ["STAGE_SECONDS"]); THINK=float(os.environ["THINK_SECONDS"]); TIMEOUT=float(os.environ["REQUEST_TIMEOUT"])
 PATH=(URL.path or "/")+("?"+URL.query if URL.query else "")
+SPEC=json.loads(os.environ.get("PROBE_SPEC","{}"))
+WORKFLOW_TIMEOUT=TIMEOUT*max(1,len(SPEC.get("steps",[])))
+business=WorkflowClient(os.environ["TARGET_URL"],TIMEOUT,SPEC) if SPEC else None
+if business: business.setup()
 def percentile(values,p):
  if not values: return None
  values=sorted(values); return round(values[min(len(values)-1,int(round(p/100*(len(values)-1))))],2)
 def request():
+ if business:
+  # One authenticated session, isolated response/extraction context per request.
+  client=WorkflowClient(os.environ["TARGET_URL"],TIMEOUT,SPEC,context=business.context)
+  status,success,error=client.measured()
+  if not success: raise BusinessProbeFailure(status,error)
+  return status
  # http.client, not urllib: building a urllib opener per user took up to 3s each
  # under 100 threads and halved the offered load (measured locally).
  connection=http.client.HTTPConnection(URL.hostname,URL.port or 80,timeout=TIMEOUT)
@@ -50,6 +61,9 @@ def request():
   connection.request("GET",PATH,headers={"Connection":"close"})
   response=connection.getresponse(); response.read(65536); return response.status
  finally: connection.close()
+
+class BusinessProbeFailure(Exception):
+ def __init__(self,status,error): self.status=status; self.error=error
 def stage(users):
  records=[]; lock=threading.Lock(); go=threading.Event(); window={}
  def user():
@@ -57,6 +71,7 @@ def stage(users):
   while time.monotonic()<window["stop"]:
    started=time.monotonic(); status=None; error=None
    try: status=request()
+   except BusinessProbeFailure as exc: status=exc.status; error=exc.error or 'BusinessProbeFailure'
    except Exception as exc: error=type(exc).__name__
    latency=(time.monotonic()-started)*1000
    with lock: records.append((latency,status,error))
@@ -66,7 +81,7 @@ def stage(users):
  begun=time.monotonic(); window["stop"]=begun+STAGE_SECONDS; go.set()
  # One deadline for the whole stage: a per-thread join timeout adds up across stuck users
  # (200 users x 31s), and the runner's limit expires before the stage reports anything.
- deadline=begun+STAGE_SECONDS+TIMEOUT+THINK+5
+ deadline=begun+STAGE_SECONDS+WORKFLOW_TIMEOUT+THINK+5
  for t in threads: t.join(max(0.0,deadline-time.monotonic()))
  elapsed=time.monotonic()-begun
  failed=[r for r in records if r[2] is not None or r[1] is None or r[1]>=500 or r[1]==429]
@@ -231,6 +246,7 @@ def overload_behavior(stage: dict[str, Any] | None) -> dict[str, Any] | None:
 
 def run_generator(args: argparse.Namespace, url: str, stages: list[int]) -> dict[str, Any]:
     name = 'codereferee-load-' + uuid.uuid4().hex[:8]
+    spec = environment_probe_spec() or {}
     manifest = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {
         'name': name, 'namespace': args.namespace,
         'labels': {'app.kubernetes.io/name': 'codereferee-load'}}, 'spec': {
@@ -241,9 +257,11 @@ def run_generator(args: argparse.Namespace, url: str, stages: list[int]) -> dict
                     {'name': 'STAGES', 'value': ','.join(str(s) for s in stages)},
                     {'name': 'STAGE_SECONDS', 'value': str(args.stage_seconds)},
                     {'name': 'THINK_SECONDS', 'value': str(args.think_seconds)},
-                    {'name': 'REQUEST_TIMEOUT', 'value': str(args.load_timeout_seconds)}],
+                    {'name': 'REQUEST_TIMEOUT', 'value': str(args.load_timeout_seconds)},
+                    {'name': 'PROBE_SPEC', 'value': json.dumps(spec)}],
             'resources': GENERATOR_RESOURCES}]}}
-    limit = len(stages) * (args.stage_seconds + args.load_timeout_seconds + args.think_seconds + 5) + 120
+    limit = (len(stages) * (args.stage_seconds + args.load_timeout_seconds * max(1, len(spec.get('steps', [])))
+                           + args.think_seconds + 5) + args.load_timeout_seconds * len(spec.get('setup', [])) + 120)
     try:
         kubectl(args.namespace, 'apply', '-f', '-', input_text=json.dumps(manifest))
         deadline = time.monotonic() + limit

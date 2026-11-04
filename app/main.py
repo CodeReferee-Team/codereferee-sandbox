@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from scripts.business_probe import validate_probe_spec
 from app.scenarios import ALIASES, SCENARIOS, SUITES, resolve_scenarios
 from scripts.disk_guard import DiskLow, ensure_free_disk
 
@@ -75,6 +76,12 @@ class ChaosTarget(BaseModel):
     name: str | None = None
     dependencies: dict[str, Any] = Field(default_factory=dict)
     probe_path: str = Field(default='/', alias='probePath')
+    probe_spec: dict[str, Any] | None = Field(default=None, alias='probeSpec')
+
+    @field_validator('probe_spec')
+    @classmethod
+    def valid_probe_spec(cls, value):
+        return validate_probe_spec(value)
     # 헬스 경로를 선언하지 않은 자동 배포 대상은 4xx도 응답으로 센다(collect_baseline.answered).
     # 필드가 없으면 pydantic이 조용히 버리므로 여기 자리를 둔다.
     probe_accepts_client_errors: bool = Field(default=False, alias='probeAcceptsClientErrors')
@@ -149,6 +156,9 @@ def probe_environment(target: 'ChaosTarget | None') -> dict[str, str] | None:
     if target.probe_service:
         updates['CODEREFEREE_PROBE_SERVICE'] = target.probe_service
         updates['CODEREFEREE_PROBE_SERVICE_PORT'] = str(target.probe_service_port or target.service_port)
+    if target.probe_spec:
+        updates['CODEREFEREE_PROBE_SPEC'] = json.dumps(target.probe_spec)
+        updates['CODEREFEREE_PROBE_SUCCESS_BELOW'] = '300'
     return dict(os.environ, **updates) if updates else None
 
 
@@ -341,7 +351,17 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
                 if 'result' in locals():
                     result.setdefault('source', {})['artifact_cleanup'] = report
         if 'result' in locals():
+            # probeSpec may contain reproduction credentials. Keep it only in
+            # the internal subprocess contract, never in the public result.
+            strip_private_probe_specs(result)
             result['durationMillis'] = round((time.monotonic() - request_started) * 1000)
+            if 'metrics_target' in locals() and metrics_target is not None and metrics_target.probe_spec:
+                spec = metrics_target.probe_spec
+                result.setdefault('source', {})['business_probe'] = {
+                    'setup_steps': len(spec.get('setup', [])),
+                    'measured_paths': [step.get('path', '/') for step in spec['steps']],
+                    'success_policy': 'all_steps_2xx_and_declared_json_assertions',
+                    'load_session_scope': 'one_shared_authenticated_session'}
             if 'metrics_target' in locals() and metrics_target is not None and metrics_target.resource_configuration:
                 result.setdefault('source', {})['resource_configuration'] = metrics_target.resource_configuration
             if 'metrics_target' in locals() and metrics_target is not None and metrics_target.workloads:
@@ -355,6 +375,17 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
                 result['source']['fault_target'] = {'deployment': metrics_target.deployment,
                     'service': metrics_target.service, 'label_selector': metrics_target.label_selector}
         experiment_lock.release()
+
+
+def strip_private_probe_specs(value):
+    if isinstance(value, dict):
+        value.pop('probeSpec', None)
+        value.pop('probe_spec', None)
+        for nested in value.values():
+            strip_private_probe_specs(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            strip_private_probe_specs(nested)
 
 
 def attach_repository_checks(result: dict, deployed: dict) -> None:
