@@ -40,6 +40,7 @@ class RequestMetrics:
         self.stop = threading.Event()
         self.thread = None
         self.bindings = {}
+        self.service_bindings = {}
         self.bindings_lock = threading.Lock()
         self.started = time.time()
         self.report = {'schema_version': 'metrics-observation.v1',
@@ -99,6 +100,44 @@ class RequestMetrics:
                         'resources': container.get('resources', {}), 'created_at': metadata.get('creationTimestamp')})
                     binding.update(last_observed_at=now, restart_count_final=status.get('restartCount'),
                         container_id=status.get('containerID'), deletion_timestamp=metadata.get('deletionTimestamp'))
+        for name, target in self.target.get('workloads', {}).items():
+            pods = json.loads(wiring.run(wiring.kubectl_command('get', 'pods', '-n', self.target['namespace'],
+                '-l', target['labelSelector'], '-o', 'json')).stdout)
+            with self.bindings_lock:
+                bindings = self.service_bindings.setdefault(name, {})
+                for pod in pods.get('items', []):
+                    metadata = pod['metadata']
+                    for container in pod.get('status', {}).get('containerStatuses', []):
+                        key = (metadata['uid'], container['name'])
+                        bindings[key] = {'pod': metadata['name'], 'uid': metadata['uid'],
+                            'container': container['name'], 'container_id': container.get('containerID'),
+                            'restart_count': container.get('restartCount'), 'service': name}
+
+    def collect_service_metrics(self, ended):
+        """Additional per-service evidence; the primary Judge series still describes the fault target."""
+        result = {}
+        with self.bindings_lock:
+            bindings = {name: list(values.values()) for name, values in self.service_bindings.items()}
+        for name in self.target.get('workloads', {}):
+            rows = bindings.get(name, [])
+            names = sorted({row['pod'] for row in rows})
+            record = {'pod_bindings': rows, 'status': 'unavailable'}
+            if names:
+                labels = {'codereferee_request_id': self.request_id, 'codereferee_cluster': self.cluster,
+                          'namespace': self.target['namespace']}
+                selector = '{' + ','.join(k + '=' + json.dumps(v) for k, v in labels.items())
+                selector += ',pod=~' + json.dumps('|'.join(re.escape(n) for n in names)) + '}'
+                try:
+                    record['cpu_cores'] = self.query('rate(container_cpu_usage_seconds_total' + selector + '[10s])',
+                                                      start=self.started, end=ended)
+                    record['memory_working_set_bytes'] = self.query('container_memory_working_set_bytes' + selector,
+                                                                    start=self.started, end=ended)
+                    if record['cpu_cores'] and record['memory_working_set_bytes']:
+                        record['status'] = 'collected'
+                except Exception:
+                    record['error'] = 'service_metrics_query_failed'
+            result[name] = record
+        return result
 
     def watch(self):
         while not self.stop.wait(2):
@@ -115,7 +154,10 @@ class RequestMetrics:
             if not self.remote or not self.query_base:
                 raise ValueError('Both METRICS_REMOTE_WRITE_URL and METRICS_QUERY_URL must be configured.')
             self.query_base = receiver_url(self.query_base)
-            rendered = wiring.render(self.remote, self.request_id, self.cluster, self.target['namespace'], self.target['deployment'])
+            # Multiple business workloads need namespace-scoped collection;
+            # primary Judge queries remain restricted to the fault target.
+            deployment = None if self.target.get('workloads') else self.target['deployment']
+            rendered = wiring.render(self.remote, self.request_id, self.cluster, self.target['namespace'], deployment)
             self.attempted = True  # apply can partially succeed
             wiring.apply(rendered)
             for workload in wiring.WORKLOADS:
@@ -173,6 +215,8 @@ class RequestMetrics:
                 self.report['full_wal_drain_proven'] = False
                 self.report['range_step_seconds'] = 1
                 self.report['range_semantics'] = 'PromQL evaluation grid; not proof of one fresh scrape per second'
+                if self.target.get('workloads'):
+                    self.report['services'] = self.collect_service_metrics(ended)
         except Exception as exc:
             self.report['status'] = 'error'
             self.report['errors'].append(str(exc)[-1200:])

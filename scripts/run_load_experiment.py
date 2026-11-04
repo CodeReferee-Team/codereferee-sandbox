@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from collect_baseline import kubectl_command, kubectl_environment
-from in_cluster_probe import InClusterProbe
+from in_cluster_probe import InClusterProbe, probe_destination
 from run_litmus_pod_delete import measured_recovery_seconds
 from run_pod_kill_experiment import get_target_configuration, metrics_from_probes
 
@@ -101,7 +101,8 @@ def main() -> int:
         # 앱이 아니라 샌드박스의 한계라서, 재지 않고 측정 불가로 돌려준다.
         print(json.dumps(cpu_insufficient(target, args.target_users, budget), ensure_ascii=False, indent=2))
         return 1
-    url = f'http://{args.service}.{args.namespace}.svc.cluster.local:{args.service_port}{args.probe_path}'
+    probe_service, probe_port = probe_destination(args.service, args.service_port)
+    url = f'http://{probe_service}.{args.namespace}.svc.cluster.local:{probe_port}{args.probe_path}'
 
     with InClusterProbe(args.namespace, args.service, args.service_port, local_port=args.local_port,
                         timeout=args.request_timeout_seconds, path=args.probe_path) as observer:
