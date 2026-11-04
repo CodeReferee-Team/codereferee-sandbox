@@ -164,10 +164,49 @@ class MultiServiceTests(unittest.TestCase):
         self.assertEqual(payload['result']['sandboxReport']['failed_service'], 'api')
         self.assertEqual(len(cleanup), 4)
 
-    def test_more_than_four_services_requires_configuration(self):
+    def test_five_service_intermediate_failure_cleans_all_images(self):
         self.add_four_service_chain()
         self.data['services']['extra'] = dict(self.data['services']['storage'])
-        with self.assertRaisesRegex(ConfigurationRequired, '2..4'):
+        code, payload, _, cleanup = self.deploy('cr-svc-api')
+        self.assertEqual(code, 1)
+        self.assertEqual(payload['result']['sandboxReport']['failed_service'], 'api')
+        self.assertEqual(len(cleanup), 5)
+
+    def test_shared_root_verification_is_executed_once_not_per_service(self):
+        (self.root / 'build.gradle').write_text('plugins { id "java" }')
+        (self.root / 'gradlew').write_text('#!/bin/sh\n')
+        self.data['verification'] = {'stack':'gradle','test':['sh','./gradlew','test'],
+            'databases':{'postgres':{'username':'test','password':'dummy','database':'testdb'}}}
+        code, payload, _, _ = self.deploy()
+        self.assertEqual(code, 0)
+        report = payload['sandboxReport']
+        self.assertEqual(report['verification_scope'], 'repository')
+        self.assertEqual(set(report['verification_service_group']), {'gateway','api'})
+        self.assertEqual(len([t for t in report['service_timings'] if t['stage']=='verify']), 1)
+
+    def test_deploy_phase_rejects_missing_or_failed_check_evidence(self):
+        for checks in ({}, {'outcome':'failed'}):
+            with self.subTest(checks=checks), self.assertRaisesRegex(RuntimeError, 'successful repository checks'):
+                deploy.build_and_deploy_service_group(self.root, self.root, 'test', 'codereferee-test',
+                    'a'*40, {}, argparse.Namespace(), {'checks':checks})
+
+    def test_business_spec_and_pgvector_are_kept_in_internal_target(self):
+        self.data['dependencies']['db']['extensions'] = ['vector']
+        self.data['probeSpec'] = {'steps':[{'path':'/private','headers':{'Authorization':'Bearer dummy'}}]}
+        rendered, target, _ = render_services(self.resolve(), 'codereferee-test', {'api':'api','gateway':'web'})
+        self.assertEqual(target['probeSpec'], self.data['probeSpec'])
+        db = next(o for o in yaml.safe_load_all(rendered) if o['kind']=='Deployment' and o['metadata']['name']=='db')
+        self.assertEqual(db['spec']['template']['spec']['containers'][0]['image'], 'pgvector/pgvector:pg17')
+
+    def test_five_services_deploy_in_order_and_six_are_rejected(self):
+        self.add_four_service_chain()
+        self.data['services']['extra'] = dict(self.data['services']['storage'])
+        code, payload, waited, _ = self.deploy()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(payload['images']), 5)
+        self.assertIn('cr-svc-extra', waited)
+        self.data['services']['sixth'] = dict(self.data['services']['storage'])
+        with self.assertRaisesRegex(ConfigurationRequired, '2..5'):
             self.resolve()
 
     def test_three_services_render_one_workload_and_image_per_service(self):

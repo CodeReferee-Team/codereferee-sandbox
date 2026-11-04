@@ -222,7 +222,14 @@ def deploy_service_group(repository: Path, workspace: Path, request: str, namesp
         finally:
             state['timings'].append({'stage': stage, 'service': name,
                                      'durationSeconds': round(time.monotonic() - started, 3)})
-    for name in plan['serviceOrder']:
+    if plan.get('sharedVerification'):
+        try:
+            state['checks'] = measured('verify', None, lambda: verify_repository(repository, workspace / 'check-shared', request))
+            state['checks'].update(verification_scope='repository', verification_service_group=plan['serviceOrder'])
+        except CheckFailure as exc:
+            state['checks'] = dict(exc.report, verification_scope='repository')
+            raise
+    for name in ([] if plan.get('sharedVerification') else plan['serviceOrder']):
         config = plan['services'][name]
         try:
             reports[name] = measured('verify', name, lambda: verify_repository(
@@ -230,7 +237,32 @@ def deploy_service_group(repository: Path, workspace: Path, request: str, namesp
         except CheckFailure as exc:
             state['checks'] = dict(exc.report, failed_service=name)
             raise
-    state['checks'] = verification_report(reports)
+    if not plan.get('sharedVerification'):
+        state['checks'] = verification_report(reports)
+    return build_and_deploy_service_group(repository, workspace, request, namespace, commit_sha, plan, args, state)
+
+
+def build_and_deploy_service_group(repository: Path, workspace: Path, request: str, namespace: str,
+                                   commit_sha: str, plan: dict, args: argparse.Namespace, state: dict) -> dict:
+    """Deployment phase after real checks; also used by local phase-by-phase diagnostics.
+
+    The HTTP/CLI entry point always obtains state['checks'] from verify_repository.
+    There is no request option for supplying or skipping verification.
+    """
+    from multi_service import render_services, workload_name
+    if state.get('checks', {}).get('outcome') != 'passed':
+        raise RuntimeError('Service deployment requires successful repository checks.')
+    state.setdefault('images', {})
+    state.setdefault('loaded', set())
+    state.setdefault('timings', [])
+    def measured(stage, name, operation):
+        state.update(stage=stage, service=name)
+        started = time.monotonic()
+        try:
+            return operation()
+        finally:
+            state['timings'].append({'stage':stage, 'service':name,
+                                     'durationSeconds':round(time.monotonic()-started,3)})
     for name in plan['serviceOrder']:
         config = plan['services'][name]
         image = f'codereferee/{request}/svc-{name}:{commit_sha[:12]}'

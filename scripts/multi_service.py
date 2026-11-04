@@ -16,12 +16,12 @@ def workload_name(name: str) -> str:
 
 
 def resolve_services(repository: Path, data: dict) -> dict:
-    allowed = {'version', 'services', 'dependencies', 'entryService', 'targetService', 'probePath'}
+    allowed = {'version', 'services', 'dependencies', 'entryService', 'targetService', 'probePath', 'probeSpec', 'verification'}
     if set(data) - allowed:
         raise ConfigurationRequired('Unsupported version 2 configuration fields: ' + ', '.join(sorted(set(data) - allowed)))
     services = data.get('services')
-    if not isinstance(services, dict) or not 2 <= len(services) <= 4:
-        raise ConfigurationRequired('version 2 requires 2..4 named services.')
+    if not isinstance(services, dict) or not 2 <= len(services) <= 5:
+        raise ConfigurationRequired('version 2 requires 2..5 named services.')
     dependencies = normalize_dependencies(data.get('dependencies', {}))
     normalized = {}
     for name, declaration in services.items():
@@ -75,7 +75,13 @@ def resolve_services(repository: Path, data: dict) -> dict:
             remaining = re.sub(r'{{(?:service|dependency)\.[^.{}]+\.[^.{}]+}}', '', value)
             if '{{' in remaining or '}}' in remaining:
                 raise ConfigurationRequired('Unknown reproduction environment template.')
+    if 'verification' in data:
+        from repository_checks import check_plan
+        check_plan(repository)  # reject invalid shared verification before any image build
+    from business_probe import validate_probe_spec
+    spec = validate_probe_spec(data.get('probeSpec'))
     return {'source': 'repository_services', 'services': normalized, 'serviceOrder': order,
+            'sharedVerification': 'verification' in data, 'probeSpec': spec,
             'entryService': entry, 'targetService': target, 'probePath': path,
             'dependencies': dependencies, 'warnings': []}
 
@@ -107,7 +113,7 @@ def render_services(plan: dict, namespace: str, images: dict[str, str]) -> tuple
     entry = targets[plan['entryService']]
     target = dict(targets[plan['targetService']], probeService=entry['service'],
                   probeServicePort=entry['servicePort'], probePath=plan['probePath'],
-                  probeAcceptsClientErrors=False, entryService=plan['entryService'],
+                  probeAcceptsClientErrors=False, probeSpec=plan.get('probeSpec'), entryService=plan['entryService'],
                   targetService=plan['targetService'], workloads=targets)
     return yaml.safe_dump_all(objects, sort_keys=False), target, targets
 

@@ -13,6 +13,50 @@ from repository_checks import CheckFailure, check_plan, verify_repository
 
 
 class RepositoryChecksTests(unittest.TestCase):
+    def test_declared_database_has_no_host_or_arbitrary_image_override(self):
+        from repository_checks import declared_check_databases
+        value = {'postgres':{'username':'root','password':'dummy','database':'dear_test'}}
+        self.assertEqual(declared_check_databases(value)['postgres']['source'], 'verification.databases')
+        self.assertEqual(declared_check_databases({'postgres':dict(value['postgres'], extensions=['vector'])})['postgres']['extensions'], ['vector'])
+        with self.assertRaises(ValueError): declared_check_databases({'redis':{'extensions':['vector']}})
+        for key in ('host','image','port'):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                declared_check_databases({'postgres':dict(value['postgres'], **{key:'external'})})
+
+    @patch('repository_checks.subprocess.run')
+    def test_declared_vector_check_database_uses_private_network_and_is_cleaned(self, run):
+        self.write('build.gradle', 'plugins { id "java" }')
+        self.write('gradlew', '#!/bin/sh\n')
+        self.write('.codereferee/validation.yaml', 'verification:\n  databases:\n    postgres:\n      username: test\n      password: dummy\n      database: testdb\n      extensions: [vector]\n')
+        run.return_value = subprocess.CompletedProcess([], 0, '', '')
+        report = verify_repository(self.root, self.cache, 'vector-test')
+        database = next(c.args[0] for c in run.call_args_list if '--detach' in c.args[0])
+        self.assertIn('pgvector/pgvector:pg17', database)
+        self.assertNotIn('-p', database)
+        self.assertNotIn('--publish', database)
+        check = next(c.args[0] for c in run.call_args_list if '--workdir' in c.args[0])
+        self.assertTrue(check[check.index('--network') + 1].startswith('container:codereferee-check-db-postgres-'))
+        self.assertTrue(report['check_database_cleanup']['removed'])
+        self.assertTrue(report['check_cache_cleanup']['removed'])
+
+    @patch('repository_checks.subprocess.run')
+    def test_timed_out_database_creation_still_cleans_attempted_container(self, run):
+        self.write('build.gradle', 'plugins { id "java" }')
+        self.write('gradlew', '#!/bin/sh\n')
+        self.write('.codereferee/validation.yaml', 'verification:\n  databases:\n    postgres: {username: test, password: dummy, database: testdb}\n')
+        def execute(command, **kwargs):
+            if '--detach' in command:
+                raise subprocess.TimeoutExpired(command, 1)
+            return subprocess.CompletedProcess(command, 0, '', '')
+        run.side_effect = execute
+        with self.assertRaises(repository_checks.CheckFailure) as caught:
+            verify_repository(self.root, self.cache, 'db-timeout')
+        self.assertTrue(caught.exception.report['infrastructure_error'])
+        self.assertTrue(caught.exception.report['timed_out'])
+        self.assertTrue(caught.exception.report['check_database_cleanup']['removed'])
+        removal = next(c.args[0] for c in run.call_args_list if '--volumes' in c.args[0])
+        self.assertTrue(any(name.startswith('codereferee-check-db-postgres-') for name in removal))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
