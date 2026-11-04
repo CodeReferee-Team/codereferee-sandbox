@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from collect_baseline import kubectl_environment
-from local_databases import IMAGES as DATABASE_IMAGES, container_arguments, container_environment, detect_local_databases, readiness_command
+from local_databases import IMAGES as DATABASE_IMAGES, PGVECTOR_IMAGE, container_arguments, container_environment, detect_local_databases, readiness_command
 from execution_plan import MAVEN_IMAGES, ConfigurationRequired, inside, java_release, node_major, poetry_requirements, read_yaml
 
 
@@ -202,7 +202,7 @@ def start_check_databases(databases: dict, request: str, environment: dict, dead
                 command += ['--network', 'container:' + names[0]]
             for key, value in container_environment(database).items():
                 command += ['--env', f'{key}={value}']
-            image = 'pgvector/pgvector:pg17' if database.get('extensions') == ['vector'] else DATABASE_IMAGES[kind]
+            image = PGVECTOR_IMAGE if database.get('extensions') == ['vector'] else DATABASE_IMAGES[kind]
             command += [image, *container_arguments(database)]
             names.append(name)  # docker run may create the container before timing out
             started = subprocess.run(command, text=True, capture_output=True, env=environment, timeout=180)

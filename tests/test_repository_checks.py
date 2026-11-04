@@ -31,7 +31,7 @@ class RepositoryChecksTests(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess([], 0, '', '')
         report = verify_repository(self.root, self.cache, 'vector-test')
         database = next(c.args[0] for c in run.call_args_list if '--detach' in c.args[0])
-        self.assertIn('pgvector/pgvector:pg17', database)
+        self.assertIn('pgvector/pgvector:0.8.7-pg17', database)
         self.assertNotIn('-p', database)
         self.assertNotIn('--publish', database)
         check = next(c.args[0] for c in run.call_args_list if '--workdir' in c.args[0])
