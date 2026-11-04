@@ -12,6 +12,7 @@ from typing import Any
 
 from collect_baseline import kubectl_command, kubectl_environment
 from in_cluster_probe import InClusterProbe
+from run_litmus_pod_delete import measured_recovery_seconds
 from run_pod_kill_experiment import (
     collect_probes,
     get_ready_pod,
@@ -55,10 +56,10 @@ def main() -> int:
             replace_selector(target["namespace"], target["service"], original_selector)
 
     probes = [*baseline["probes"], *fault_probes, *recovery_probes["probes"]]
-    denominator = 'all measured in-cluster HTTP requests during baseline, routing fault, and recovery'
+    denominator = 'all measured in-cluster probe attempts during baseline, routing fault, and recovery'
     recovered = all(p['success'] for p in recovery_probes['probes'])
     baseline_metrics = metrics_from_probes(baseline["probes"])
-    baseline_metrics["error_rate_denominator"] = "all HTTP GET / probes collected during baseline; readiness wait probes are excluded"
+    baseline_metrics["error_rate_denominator"] = "all measured probe attempts during baseline; setup and readiness wait probes are excluded"
     observed_metrics = metrics_from_probes(probes)
     observed_metrics["error_rate_denominator"] = denominator
     output = {
@@ -78,7 +79,8 @@ def main() -> int:
             "started_at": started_at,
             "recovered_at": now_utc() if recovered else None,
             'recovered': recovered,
-            "recovery_seconds": round(time.monotonic() - fault_started, 2),
+            "recovery_seconds": measured_recovery_seconds([*fault_probes, *recovery_probes["probes"]]),
+            "experiment_duration_seconds": round(time.monotonic() - fault_started, 2),
             "target_pod_uid": source_pod.get("uid"),
             "replacement_pod_uid": None,
             "target_configuration": configuration,

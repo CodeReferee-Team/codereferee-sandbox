@@ -58,9 +58,9 @@ def main() -> int:
             scale(target['namespace'], target['deployment'], original_replicas)
 
     probes = [*baseline["probes"], *fault_probes, *recovery_probes["probes"]]
-    denominator = 'all measured in-cluster HTTP requests during baseline, scale-down, and recovery'
+    denominator = 'all measured in-cluster probe attempts during baseline, scale-down, and recovery'
     baseline_metrics = metrics_from_probes(baseline["probes"])
-    baseline_metrics["error_rate_denominator"] = "all HTTP GET / probes collected during baseline; readiness wait probes are excluded"
+    baseline_metrics["error_rate_denominator"] = "all measured probe attempts during baseline; setup and readiness wait probes are excluded"
     observed_metrics = metrics_from_probes(probes)
     observed_metrics["error_rate_denominator"] = denominator
     output = {
