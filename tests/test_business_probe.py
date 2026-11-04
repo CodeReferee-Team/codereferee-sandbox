@@ -80,6 +80,23 @@ class BusinessProbeTests(unittest.TestCase):
         self.assertNotIn('probeSpec', json.dumps(result))
         self.assertEqual(result['metrics']['availability'], 1)
 
+    def test_observer_setup_failure_exposes_only_safe_stage_and_status(self):
+        def execute(*args, input_text=None):
+            if args[0] == 'wait': raise RuntimeError('wait timed out')
+            if args[0] == 'get':
+                return subprocess.CompletedProcess([],0,json.dumps({'status':{'phase':'Failed',
+                    'containerStatuses':[{'name':'observer','state':{'terminated':{'exitCode':42}}}]}}),'')
+            if args[0] == 'logs':
+                return subprocess.CompletedProcess([],0,json.dumps({'probe_setup_error':{'step':0,'status_code':401,
+                                                                                       'token':'do-not-publish'}}),'')
+            return subprocess.CompletedProcess([],0,'','')
+        observer = InClusterProbe('n','s',80,spec=self.spec)
+        with patch.object(observer,'run',side_effect=execute), patch.object(observer,'__exit__') as cleanup:
+            with self.assertRaises(RuntimeError) as caught: observer.__enter__()
+        self.assertIn('401',str(caught.exception))
+        self.assertNotIn('do-not-publish',str(caught.exception))
+        cleanup.assert_called_once()
+
     def test_real_generator_uses_auth_and_counts_unauthorized_business_as_failure(self):
         env = dict(os.environ, TARGET_URL=self.url, STAGES='2', STAGE_SECONDS='0.3', THINK_SECONDS='0.05', REQUEST_TIMEOUT='1')
         for spec, expect_failure in ((self.spec, False), ({'steps':[{'path':'/private'}]}, True)):

@@ -582,7 +582,8 @@ def render_plan(plan: dict, namespace: str, image: str, *, workload: str = 'repo
         dep_port = DEPENDENCY_PORTS[kind]
         dep_image = {'redis': 'redis:7-alpine', 'postgres': 'postgres:17-alpine', 'mysql': 'mysql:8.4'}.get(kind)
         if dependency.get('extensions') == ['vector']:
-            dep_image = 'pgvector/pgvector:pg17'
+            from local_databases import PGVECTOR_IMAGE
+            dep_image = PGVECTOR_IMAGE
         dep_labels = {'app.kubernetes.io/name': name}
         dep_container = {'name': kind, 'image': dep_image, 'ports': [{'containerPort': dep_port}],
                          'resources': {'requests': {'cpu': '50m', 'memory': '64Mi'}, 'limits': {'cpu': '500m', 'memory': '256Mi'}}}

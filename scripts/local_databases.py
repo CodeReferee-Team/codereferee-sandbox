@@ -24,6 +24,7 @@ LOCAL_HOSTS = {'localhost', '127.0.0.1'}
 DEFAULT_PORTS = {'mysql': 3306, 'postgres': 5432, 'mongo': 27017, 'redis': 6379}
 # 로컬에서 띄운 DB라는 표시. render_plan과 검사 단계가 이 값으로 계정·이미지를 고른다.
 IMAGES = {'mysql': 'mysql:8.0', 'postgres': 'postgres:17-alpine', 'mongo': 'mongo:7', 'redis': 'redis:7-alpine'}
+PGVECTOR_IMAGE = 'pgvector/pgvector:0.8.7-pg17'
 SKIPPED_DIRECTORIES = {'node_modules', '.git', 'target', 'build', 'dist', 'vendor', '.venv', 'venv', 'test', 'tests'}
 JDBC = re.compile(r'jdbc:(mysql|mariadb|postgresql)://([^/:?]+)(?::(\d+))?/([A-Za-z0-9_\-]+)')
 MONGO_URI = re.compile(r'mongodb://(?:([^:@/\s]+)(?::([^@/\s]*))?@)?([^/:?\s,]+)(?::(\d+))?/([A-Za-z0-9_\-]+)')

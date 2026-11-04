@@ -24,7 +24,7 @@ def probe_destination(service: str, port: int) -> tuple[str, int]:
             int(os.getenv('CODEREFEREE_PROBE_SERVICE_PORT') or port))
 
 
-OBSERVER_CODE = '''import json, time
+OBSERVER_CODE = '''import json, time, sys
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.request import build_opener, ProxyHandler, Request
@@ -37,7 +37,11 @@ spec=json.loads(os.environ.get("PROBE_SPEC","{}"))
 context=json.loads(os.environ.get("PROBE_CONTEXT","{}"))
 SUCCESS_BELOW=int(os.environ.get("PROBE_SUCCESS_BELOW","400"))
 client=WorkflowClient(url,timeout,spec,context) if spec else None
-if client: client.setup()
+if client:
+ try: client.setup()
+ except Exception as exc:
+  print(json.dumps({"probe_setup_error":{"type":type(exc).__name__,"step":client.setup_step,"status_code":client.setup_status}}),file=sys.stderr,flush=True)
+  sys.exit(42)
 class Handler(BaseHTTPRequestHandler):
  protocol_version="HTTP/1.1"
  def do_GET(self):
@@ -110,8 +114,31 @@ class InClusterProbe:
                         raise RuntimeError('Observer port-forward failed; inspect .runtime/probe-logs.')
                     time.sleep(0.2)
             raise RuntimeError('Observer port-forward did not become available.')
-        except BaseException:
+        except BaseException as exc:
+            diagnosis = {}
+            if isinstance(exc, Exception):
+                try:
+                    pod = json.loads(self.run('get', 'pod', self.name, '-o', 'json').stdout)
+                    diagnosis['phase'] = pod.get('status', {}).get('phase')
+                    diagnosis['scheduling_reasons'] = [item.get('reason') for item in pod.get('status', {}).get('conditions', [])
+                                                      if item.get('type') == 'PodScheduled' and item.get('status') == 'False']
+                    diagnosis['containers'] = [
+                        {'name': item.get('name'), 'waiting_reason': (item.get('state', {}).get('waiting') or {}).get('reason'),
+                         'exit_code': (item.get('state', {}).get('terminated') or {}).get('exitCode')}
+                        for item in pod.get('status', {}).get('containerStatuses', [])]
+                    logs = self.run('logs', self.name, '--tail=10').stdout
+                    for line in logs.splitlines():
+                        try:
+                            error = json.loads(line).get('probe_setup_error')
+                            if isinstance(error, dict):
+                                diagnosis['setup'] = {key: error.get(key) for key in ('step', 'status_code')}
+                        except (ValueError, AttributeError):
+                            pass
+                except Exception:
+                    pass
             self.__exit__(None, None, None)
+            if diagnosis:
+                raise RuntimeError('Observer startup failed: ' + json.dumps(diagnosis)) from exc
             raise
 
     def probe(self) -> dict:
