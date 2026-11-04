@@ -94,8 +94,8 @@ def stage(users):
  for latency,status,error in samples:
   if status is not None: statuses[str(status)]=statuses.get(str(status),0)+1
   if error: errors[error]=errors.get(error,0)+1
- answered=[r[0] for r in samples if r[2] is None]
- return {"users":users,"duration_seconds":round(elapsed,2),"requests":len(samples),"failed_requests":len(failed),
+ answered=[r[0] for r in samples if r[2] is None or r[2]=='Business response rejected']
+ return {"users":users,"measurement_unit":"workflow_attempt" if business else "http_request","duration_seconds":round(elapsed,2),"requests":len(samples),"failed_requests":len(failed),
   "error_rate":round(len(failed)/len(samples),4) if samples else None,
   "throughput_rps":round(len(samples)/elapsed,2) if elapsed else None,"offered_rps":round(users/THINK,2),
   "p50_latency_ms":percentile(answered,50),"p95_latency_ms":percentile(answered,95),"p99_latency_ms":percentile(answered,99),
@@ -175,7 +175,10 @@ def main() -> int:
                 'think_seconds': args.think_seconds,
                 'stage_seconds': args.stage_seconds,
                 'request_timeout_seconds': args.load_timeout_seconds,
-                'failure_definition': 'no HTTP answer within the timeout, or status 5xx or 429',
+                'failure_definition': ('any workflow step fails 2xx/JSON checks or exceeds its timeout'
+                                       if environment_probe_spec() else 'no HTTP answer within the timeout, or status 5xx or 429'),
+                'workflow_paths': [step.get('path','/') for step in (environment_probe_spec() or {}).get('steps',[])],
+                'latency_definition': 'elapsed probe/workflow time for complete HTTP responses, including rejected responses; transport/protocol failures excluded',
                 'generator_resources': GENERATOR_RESOURCES,
                 'cpu_budget': budget,
             },
@@ -285,8 +288,12 @@ def overload_behavior(stage: dict[str, Any] | None) -> dict[str, Any] | None:
     counts = {
         'rejected': sum(n for code, n in statuses.items() if code == '429' or code.startswith('5')),
         'timed_out': sum(n for name, n in errors.items() if 'timeout' in name.lower()),
-        'connection_failed': sum(n for name, n in errors.items() if 'timeout' not in name.lower()),
+        'connection_failed': sum(n for name, n in errors.items()
+                                 if 'timeout' not in name.lower() and name != 'Business response rejected'),
     }
+    business_rejected = max(0, errors.get('Business response rejected', 0) - counts['rejected'])
+    if business_rejected:
+        counts['business_response_rejected'] = business_rejected
     kind = max(counts, key=lambda key: counts[key]) if any(counts.values()) else None
     return {'users': stage['users'], 'kind': kind, **counts}
 

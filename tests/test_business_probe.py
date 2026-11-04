@@ -120,6 +120,7 @@ class BusinessProbeTests(unittest.TestCase):
                 stage = json.loads(result.stdout)['stages'][0]
                 self.assertGreater(stage['requests'], 0)
                 self.assertEqual(stage['failed_requests'] > 0, expect_failure)
+                self.assertIsNotNone(stage['p95_latency_ms'])
                 self.assertNotIn('dummy-token', result.stdout + result.stderr)
 
     def test_real_observer_process_runs_setup_and_returns_only_measurements(self):
