@@ -72,6 +72,12 @@ class BusinessProbeTests(unittest.TestCase):
         self.assertEqual(env['CODEREFEREE_PROBE_SUCCESS_BELOW'], '300')
         with patch.dict(os.environ, env): self.assertEqual(InClusterProbe('n','s',80).spec, self.spec)
 
+    def test_dependency_path_override_is_not_replaced_by_parent_workflow(self):
+        with patch.dict(os.environ, {'CODEREFEREE_PROBE_SPEC':json.dumps(self.spec)}):
+            observer = InClusterProbe('n','s',80,path='/redis-business',spec={})
+        self.assertEqual(observer.spec,{})
+        self.assertTrue(observer.url.endswith('/redis-business'))
+
     def test_public_result_hides_specs_in_dependency_and_peer_targets_too(self):
         result = {'deployment':{'target':{'probeSpec':self.spec,'dependencies':{'db':{'probeSpec':self.spec}}},
                    'services':{'api':{'dependencies':{'db':{'probeSpec':self.spec}}}}},'metrics':{'availability':1}}
@@ -82,7 +88,6 @@ class BusinessProbeTests(unittest.TestCase):
 
     def test_observer_setup_failure_exposes_only_safe_stage_and_status(self):
         def execute(*args, input_text=None):
-            if args[0] == 'wait': raise RuntimeError('wait timed out')
             if args[0] == 'get':
                 return subprocess.CompletedProcess([],0,json.dumps({'status':{'phase':'Failed',
                     'containerStatuses':[{'name':'observer','state':{'terminated':{'exitCode':42}}}]}}),'')
@@ -96,6 +101,15 @@ class BusinessProbeTests(unittest.TestCase):
         self.assertIn('401',str(caught.exception))
         self.assertNotIn('do-not-publish',str(caught.exception))
         cleanup.assert_called_once()
+
+    def test_observer_waits_for_actual_ready_condition(self):
+        responses = [subprocess.CompletedProcess([],0,json.dumps({'status':{'phase':'Pending'}}),''),
+                     subprocess.CompletedProcess([],0,json.dumps({'status':{'phase':'Running','conditions':[
+                         {'type':'Ready','status':'True'}]}}),'')]
+        observer = InClusterProbe('n','s',80)
+        with patch.object(observer,'run',side_effect=responses) as read, patch('in_cluster_probe.time.sleep'):
+            observer.wait_ready()
+        self.assertEqual(read.call_count,2)
 
     def test_real_generator_uses_auth_and_counts_unauthorized_business_as_failure(self):
         env = dict(os.environ, TARGET_URL=self.url, STAGES='2', STAGE_SECONDS='0.3', THINK_SECONDS='0.05', REQUEST_TIMEOUT='1')
