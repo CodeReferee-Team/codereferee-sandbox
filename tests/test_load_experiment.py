@@ -23,6 +23,11 @@ def stage(users, requests, failed):
 
 
 class LoadSummaryTests(unittest.TestCase):
+    def test_business_auth_rejection_is_not_labelled_a_connection_failure(self):
+        result = load.overload_behavior(dict(stage(5,10,10), status_counts={'401':10},
+                                            error_counts={'Business response rejected':10}))
+        self.assertEqual(result['kind'],'business_response_rejected')
+        self.assertEqual(result['connection_failed'],0)
     def test_capacity_is_the_last_clean_stage_before_the_first_failing_one(self):
         summary = load.summarize([stage(10, 60, 0), stage(50, 300, 0), stage(100, 600, 12), stage(200, 900, 0)])
         self.assertEqual({k: summary[k] for k in ('max_users_without_errors', 'first_users_with_errors',
