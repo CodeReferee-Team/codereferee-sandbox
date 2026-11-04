@@ -39,8 +39,8 @@ def check_plan(repository: Path) -> dict:
     config = inside(repository, '.codereferee/validation.yaml')
     data = read_yaml(config) if config.is_file() else {}
     declaration = data.get('verification', {})
-    if not isinstance(declaration, dict) or set(declaration) - {'stack', 'test', 'build', 'env', 'workingDirectory'}:
-        raise ConfigurationRequired('verification supports stack, test, build, env, workingDirectory.')
+    if not isinstance(declaration, dict) or set(declaration) - {'stack', 'test', 'build', 'env', 'workingDirectory', 'databases'}:
+        raise ConfigurationRequired('verification supports stack, test, build, env, workingDirectory, databases.')
     working = declaration.get('workingDirectory', '.')
     if not inside(repository, working).is_dir():
         raise ConfigurationRequired('Verification workingDirectory does not exist.')
@@ -112,8 +112,32 @@ def check_plan(repository: Path) -> dict:
     if declared_test is not None:
         if stack is None: raise ConfigurationRequired('Declared test needs verification.stack or a supported manifest.')
         test = argument_array(declared_test)
-    return dict(stack=stack, image=image, install=install, build=build, test=test,
+    databases = declared_check_databases(declaration.get('databases', {}))
+    return dict(stack=stack, image=image, install=install, build=build, test=test, databases=databases,
         declared=declared_test is not None, env={k: str(v) for k, v in env.items()}, workingDirectory=working)
+
+
+def declared_check_databases(values: dict) -> dict:
+    """Explicit throwaway databases on the private check network, never host ports."""
+    if not isinstance(values, dict) or set(values) - {'postgres', 'mysql', 'redis', 'mongo'}:
+        raise ConfigurationRequired('verification.databases supports postgres/mysql/redis/mongo.')
+    result = {}
+    for kind, value in values.items():
+        if not isinstance(value, dict) or set(value) - {'username', 'password', 'database', 'extensions'}:
+            raise ConfigurationRequired('Check databases accept only reproduction username/password/database.')
+        if 'extensions' in value and (kind != 'postgres' or value['extensions'] != ['vector']):
+            raise ConfigurationRequired('Only postgres extensions: [vector] is supported for check databases.')
+        if any(not isinstance(v, str) or len(v) > 256 or any(c in v for c in ('\n', '\r', '${', '{{'))
+               for k,v in value.items() if k != 'extensions'):
+            raise ConfigurationRequired('Check database values must be explicit reproduction strings.')
+        if kind in {'postgres', 'mysql'} and (not value.get('username') or not value.get('database') or not value.get('password')):
+            raise ConfigurationRequired('SQL check databases need username/password/database.')
+        if kind in {'postgres', 'mysql'} and not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,62}', value['database']):
+            raise ConfigurationRequired('Check database names must be simple identifiers.')
+        result[kind] = dict(type=kind, port={'postgres':5432, 'mysql':3306, 'redis':6379, 'mongo':27017}[kind],
+                            user=value.get('username'), password=value.get('password'),
+                            database=value.get('database'), extensions=value.get('extensions', []), source='verification.databases')
+    return result
 
 
 # 검사 컨테이너는 호스트와 같은 uid 로 돈다.
@@ -169,39 +193,47 @@ def start_check_databases(databases: dict, request: str, environment: dict, dead
     DB가 뜨지 않으면 레포 결함이 아니라 우리 쪽 문제다(infrastructure_error).
     """
     names, report = [], {'databases': [], 'ready': False}
-    for kind, database in databases.items():
-        name = f'codereferee-check-db-{kind}-' + uuid4().hex[:12]
-        command = ['docker', 'run', '--detach', '--name', name, '--label', 'codereferee.temporary=true',
-            '--label', 'codereferee.request-id=' + request, '--memory', '512m', '--cpus', '1', '--pids-limit', '512']
-        if names:
-            command += ['--network', 'container:' + names[0]]
-        for key, value in container_environment(database).items():
-            command += ['--env', f'{key}={value}']
-        command += [DATABASE_IMAGES[kind], *container_arguments(database)]
-        started = subprocess.run(command, text=True, capture_output=True, env=environment, timeout=180)
-        if started.returncode:
-            report['error'] = started.stderr[-1000:]
-            return names, report
-        names.append(name)
-        report['databases'].append({'type': kind, 'source': database['source']})
-    for kind, database in databases.items():
-        name = next(n for n in names if f'-db-{kind}-' in n)
-        while True:
-            try:
-                ready = subprocess.run(['docker', 'exec', name, *readiness_command(database)], text=True,
-                    capture_output=True, env=environment, timeout=15).returncode == 0
-            except subprocess.TimeoutExpired:
-                ready = False
-            if ready:
-                break
-            if time.monotonic() > deadline:
-                logs = subprocess.run(['docker', 'logs', '--tail', '30', name], text=True, capture_output=True,
-                    env=environment, timeout=30)
-                report['error'] = f'{kind} did not become ready: ' + (logs.stdout + logs.stderr)[-1500:]
+    try:
+        for kind, database in databases.items():
+            name = f'codereferee-check-db-{kind}-' + uuid4().hex[:12]
+            command = ['docker', 'run', '--detach', '--name', name, '--label', 'codereferee.temporary=true',
+                '--label', 'codereferee.request-id=' + request, '--memory', '512m', '--cpus', '1', '--pids-limit', '512']
+            if names:
+                command += ['--network', 'container:' + names[0]]
+            for key, value in container_environment(database).items():
+                command += ['--env', f'{key}={value}']
+            image = 'pgvector/pgvector:pg17' if database.get('extensions') == ['vector'] else DATABASE_IMAGES[kind]
+            command += [image, *container_arguments(database)]
+            names.append(name)  # docker run may create the container before timing out
+            started = subprocess.run(command, text=True, capture_output=True, env=environment, timeout=180)
+            if started.returncode:
+                report['error'] = started.stderr[-1000:]
                 return names, report
-            time.sleep(2)
-    report['ready'] = True
-    return names, report
+            report['databases'].append({'type': kind, 'source': database['source'], 'image': image})
+        for kind, database in databases.items():
+            name = next(n for n in names if f'-db-{kind}-' in n)
+            while True:
+                try:
+                    ready = subprocess.run(['docker', 'exec', name, *readiness_command(database)], text=True,
+                        capture_output=True, env=environment, timeout=15).returncode == 0
+                except subprocess.TimeoutExpired:
+                    ready = False
+                if ready:
+                    break
+                if time.monotonic() > deadline:
+                    report['timed_out'] = True
+                    logs = subprocess.run(['docker', 'logs', '--tail', '30', name], text=True, capture_output=True,
+                        env=environment, timeout=30)
+                    report['error'] = f'{kind} did not become ready: ' + (logs.stdout + logs.stderr)[-1500:]
+                    return names, report
+                time.sleep(2)
+        report['ready'] = True
+        return names, report
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        report['error'] = 'Temporary check database setup failed or exceeded its execution window.'
+        report['timed_out'] = isinstance(exc, subprocess.TimeoutExpired)
+        return names, report
+
 
 
 def remove_check_databases(names: list[str], environment: dict) -> dict:
@@ -275,12 +307,14 @@ def verify_repository(repository: Path, cache: Path, request: str, *, timeout: i
             raise CheckFailure(report)
         network = None
         databases = detect_local_databases(inside(repository, plan['workingDirectory']))
+        databases.update(plan['databases'])
         if databases:
             database_names, database_report = start_check_databases(databases, request, environment,
                 deadline=time.monotonic() + min(180, max(1, timeout - (time.monotonic() - started))))
             if not database_report['ready']:
                 report.update(steps=[{'name': 'prepare', 'stderr': database_report.get('error', '')}],
                     failed_step='prepare', exit_code=None, infrastructure_error=True, local_databases=database_report,
+                    timed_out=bool(database_report.get('timed_out')),
                     outcome='failed', test_execution='not_attempted', verification_declared=plan['declared'])
                 raise CheckFailure(report)
             network = 'container:' + database_names[0]
