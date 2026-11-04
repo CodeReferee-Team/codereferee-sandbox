@@ -126,7 +126,7 @@ def check_plan(repository: Path) -> dict:
 # Docker Desktop(맥, 윈도우)은 bind 마운트의 소유권을 가상화해서 이 검사가 사실상
 # 적용되지 않는다. 그래서 네이티브 Linux 에서만 드러났다.
 #
-# Windows 에는 getuid 가 없고 소유권 문제도 없으므로 기존 동작을 그대로 둔다.
+# Windows에는 getuid가 없으므로 캐시 준비와 검사 모두 1000:1000을 사용한다.
 CHECK_OWNER = f'{os.getuid()}:{os.getgid()}' if hasattr(os, 'getuid') else None
 # 캐시 볼륨 안에서 쓰기 가능해야 하는 경로. 이미지에 없는 uid 로 돌면 HOME 이
 # 쓰기 불가가 되어 Maven 의 ~/.m2 나 pip 캐시가 같은 이유로 막힌다.
@@ -316,11 +316,10 @@ def _verify_repository(repository: Path, cache_name: str, request: str, *, timeo
     environment = kubectl_environment()
     # Installed packages persist across check steps, but stay in the disposable
     # request cache instead of the API host or the app Docker build context.
-    env = {'GRADLE_USER_HOME': '/cache/gradle', 'PYTHONUSERBASE': '/cache/python'}
-    if CHECK_OWNER:
-        # 이미지에 없는 uid 로 돌면 HOME 이 쓰기 불가가 된다. Maven 의 ~/.m2 와
-        # pip 캐시가 거기로 떨어지므로 캐시 볼륨 안을 가리킨다.
-        env['HOME'] = '/cache/home'
+    # Setup chowns the cache to CHECK_OWNER or 1000:1000. The check process
+    # must use that same identity on Docker Desktop as well as native Linux.
+    env = {'GRADLE_USER_HOME': '/cache/gradle', 'PYTHONUSERBASE': '/cache/python',
+           'HOME': '/cache/home'}
     if plan['stack'] == 'node':
         # Native package archives preserve ownership when extracted as root.
         # Run npm as an unprivileged user instead of granting CAP_CHOWN or
@@ -355,11 +354,9 @@ def _verify_repository(repository: Path, cache_name: str, request: str, *, timeo
         if network:
             command.extend(['--network', network])
         # 호스트 uid 로 돌아야 bind 마운트한 레포에 쓸 수 있다. 자세한 근거는
-        # CHECK_OWNER 주석 참조. Windows 는 기존대로 node 만 고정 uid 를 쓴다.
-        if CHECK_OWNER:
-            command.extend(['--user', CHECK_OWNER])
-        elif plan['stack'] == 'node':
-            command.extend(['--user', '1000:1000'])
+        # CHECK_OWNER 주석 참조. Windows also uses the cache's fixed owner;
+        # root without CAP_DAC_OVERRIDE cannot write a 1000-owned 755 volume.
+        command.extend(['--user', CHECK_OWNER or '1000:1000'])
         for key, value in env.items(): command.extend(['--env', key + '=' + value])
         command.extend([plan['image'], *executable])
         started = time.monotonic()
