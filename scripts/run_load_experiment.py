@@ -65,8 +65,8 @@ def request():
 class BusinessProbeFailure(Exception):
  def __init__(self,status,error): self.status=status; self.error=error
 def stage(users):
- records=[]; lock=threading.Lock(); go=threading.Event(); window={}
- def user():
+ records=[]; participants=set(); lock=threading.Lock(); go=threading.Event(); window={}
+ def user(index):
   go.wait(); time.sleep(random.random()*THINK)
   while time.monotonic()<window["stop"]:
    started=time.monotonic(); status=None; error=None
@@ -74,9 +74,10 @@ def stage(users):
    except BusinessProbeFailure as exc: status=exc.status; error=exc.error or 'BusinessProbeFailure'
    except Exception as exc: error=type(exc).__name__
    latency=(time.monotonic()-started)*1000
-   with lock: records.append((latency,status,error))
+   with lock:
+    records.append((latency,status,error)); participants.add(index)
    time.sleep(max(0.0,THINK-(time.monotonic()-started)))
- threads=[threading.Thread(target=user,daemon=True) for _ in range(users)]
+ threads=[threading.Thread(target=user,args=(i,),daemon=True) for i in range(users)]
  for t in threads: t.start()
  begun=time.monotonic(); window["stop"]=begun+STAGE_SECONDS; go.set()
  # One deadline for the whole stage: a per-thread join timeout adds up across stuck users
@@ -84,21 +85,27 @@ def stage(users):
  deadline=begun+STAGE_SECONDS+WORKFLOW_TIMEOUT+THINK+5
  for t in threads: t.join(max(0.0,deadline-time.monotonic()))
  elapsed=time.monotonic()-begun
- failed=[r for r in records if r[2] is not None or r[1] is None or r[1]>=500 or r[1]==429]
+ unfinished_users=sum(t.is_alive() for t in threads)
+ # Late workers must not mutate a reported stage or overlap the next stage's load.
+ with lock:
+  samples=tuple(records); participating_users=len(participants)
+ failed=[r for r in samples if r[2] is not None or r[1] is None or r[1]>=500 or r[1]==429]
  statuses={}; errors={}
- for latency,status,error in records:
+ for latency,status,error in samples:
   if status is not None: statuses[str(status)]=statuses.get(str(status),0)+1
   if error: errors[error]=errors.get(error,0)+1
- answered=[r[0] for r in records if r[2] is None]
- return {"users":users,"duration_seconds":round(elapsed,2),"requests":len(records),"failed_requests":len(failed),
-  "error_rate":round(len(failed)/len(records),4) if records else None,
-  "throughput_rps":round(len(records)/elapsed,2) if elapsed else None,"offered_rps":round(users/THINK,2),
+ answered=[r[0] for r in samples if r[2] is None]
+ return {"users":users,"duration_seconds":round(elapsed,2),"requests":len(samples),"failed_requests":len(failed),
+  "error_rate":round(len(failed)/len(samples),4) if samples else None,
+  "throughput_rps":round(len(samples)/elapsed,2) if elapsed else None,"offered_rps":round(users/THINK,2),
   "p50_latency_ms":percentile(answered,50),"p95_latency_ms":percentile(answered,95),"p99_latency_ms":percentile(answered,99),
-  "status_counts":statuses,"error_counts":errors,"unfinished_users":sum(t.is_alive() for t in threads)}
+  "status_counts":statuses,"error_counts":errors,"participating_users":participating_users,
+  "unfinished_users":unfinished_users}
 results=[]
 for users in STAGES:
  results.append(stage(users))
  print(json.dumps({"progress":results[-1]}),file=sys.stderr,flush=True)
+ if results[-1]["unfinished_users"]: break
 print(json.dumps({"stages":results}),flush=True)
 '''
 
@@ -132,7 +139,7 @@ def main() -> int:
             args.recovery_timeout_seconds, args.recovery_probes)
     restarts_after = restart_count(args.namespace, args.label_selector)
 
-    summary = summarize(load['stages'], args.target_users)
+    summary = summarize(load.get('stages', []), args.target_users, expected_stages=stages)
     denominator = 'in-cluster HTTP probes before and after the load; load requests are reported per stage'
     baseline_metrics = metrics_from_probes(baseline['probes'])
     baseline_metrics['error_rate_denominator'] = 'HTTP probes collected before the load'
@@ -162,7 +169,7 @@ def main() -> int:
             'restart_count_delta': (restarts_after - restarts_before
                                     if restarts_before is not None and restarts_after is not None else None),
             'load': {
-                'stages': load['stages'],
+                'stages': load.get('stages', []),
                 **summary,
                 'request_path': args.probe_path,
                 'think_seconds': args.think_seconds,
@@ -181,8 +188,14 @@ def main() -> int:
         },
         'source': {'real_execution_observed': True, 'target': args.deployment},
     }
+    if not summary['measurement_valid']:
+        # A generator that did not measure the requested stages supplies no capacity verdict.
+        # Keep raw observations, including post-load recovery, without blaming the app.
+        output.update(observationStatus='infrastructure_error', exitCode=None, timedOut=False,
+                      infraError='load_measurement_incomplete',
+                      stderr='Load measurement is incomplete: ' + json.dumps(summary['measurement_issues']))
     print(json.dumps(output, ensure_ascii=False, indent=2))
-    return 0 if recovered else 1
+    return 0 if recovered and summary['measurement_valid'] else 1
 
 
 def with_target(stages: list[int], target: int | None) -> list[int]:
@@ -190,25 +203,59 @@ def with_target(stages: list[int], target: int | None) -> list[int]:
     return sorted({*stages, target}) if target else stages
 
 
-def summarize(stages: list[dict[str, Any]], target_users: int | None = None) -> dict[str, Any]:
+def stage_measurement_issues(stage: dict[str, Any]) -> list[str]:
+    """Validate completion separately from service failures (timeouts/5xx remain measurements)."""
+    counts = ('users', 'requests', 'failed_requests', 'unfinished_users', 'participating_users')
+    if any(type(stage.get(key)) is not int or stage[key] < 0 for key in counts):
+        return ['invalid_or_missing_counts']
+    reasons = []
+    if stage['users'] < 1 or stage['failed_requests'] > stage['requests']:
+        reasons.append('invalid_counts')
+    if stage['requests'] == 0:
+        reasons.append('no_requests')
+    if stage['unfinished_users']:
+        reasons.append('unfinished_users')
+    if stage['participating_users'] != stage['users'] or stage['requests'] < stage['participating_users']:
+        reasons.append('users_not_measured')
+    return reasons
+
+
+def summarize(stages: list[dict[str, Any]], target_users: int | None = None,
+              *, expected_stages: list[int] | None = None) -> dict[str, Any]:
     """Where the service stopped answering everyone. No latency threshold is applied here.
 
     With target_users, target_met says whether every stage up to that many users answered
     everyone. The requester set that number, so the AI may turn a miss into a Fail.
     """
-    clean = [s['users'] for s in stages if s.get('requests') and s.get('failed_requests') == 0]
-    failing = next((s for s in stages if s.get('failed_requests')), None)
+    issues = [{'users': s.get('users'), 'reasons': reasons} for s in stages
+              if (reasons := stage_measurement_issues(s))]
+    if not stages:
+        issues.append({'users': None, 'reasons': ['no_stages']})
+    if expected_stages is not None and [s.get('users') for s in stages] != expected_stages:
+        issues.append({'users': None, 'reasons': ['stage_sequence_mismatch']})
+    # Do not claim capacity beyond a gap, even if a later stage happened to finish.
+    valid_prefix = []
+    for index, stage in enumerate(stages):
+        if (stage_measurement_issues(stage) or
+                (expected_stages is not None and
+                 (index >= len(expected_stages) or stage['users'] != expected_stages[index]))):
+            break
+        valid_prefix.append(stage)
+    clean = [s['users'] for s in valid_prefix if s['failed_requests'] == 0]
+    failing = next((s for s in valid_prefix if s['failed_requests']), None)
     first_failing = failing['users'] if failing else None
     return {
         # Highest stage below the first failing one. A clean stage after a failing one does not count.
         'max_users_without_errors': max((u for u in clean if first_failing is None or u < first_failing),
                                         default=None),
         'first_users_with_errors': first_failing,
-        'all_stages_clean': failing is None and bool(clean),
-        'latency_growth': latency_growth(stages),
+        'all_stages_clean': not issues and failing is None and bool(clean),
+        'measurement_valid': not issues,
+        'measurement_issues': issues,
+        'latency_growth': latency_growth(valid_prefix),
         'overload_behavior': overload_behavior(failing),
         'target_users': target_users,
-        'target_met': (None if not target_users or not any(s['users'] == target_users for s in stages)
+        'target_met': (None if issues or not target_users or not any(s['users'] == target_users for s in stages)
                        else first_failing is None or first_failing > target_users),
     }
 
@@ -282,11 +329,23 @@ def run_generator(args: argparse.Namespace, url: str, stages: list[int]) -> dict
         logs = kubectl(args.namespace, 'logs', name).stdout
         if phase != 'Succeeded':
             raise RuntimeError('Load generator failed: ' + logs[-500:])
-        return json.loads(logs.strip().splitlines()[-1])
+        return generator_result(logs)
     finally:
         subprocess.run(kubectl_command('-n', args.namespace, 'delete', 'pod', name, '--ignore-not-found=true',
                                        '--wait=false'), capture_output=True, text=True,
                        env=kubectl_environment(), timeout=30)
+
+
+def generator_result(logs: str) -> dict[str, Any]:
+    """kubectl logs merges progress (stderr) and result (stdout); the last line need not be the result."""
+    for line in reversed(logs.splitlines()):
+        try:
+            result = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(result, dict) and isinstance(result.get('stages'), list):
+            return result
+    raise RuntimeError('Load generator produced no final stage result. ' + logs[-500:])
 
 
 STUCK_WAITING_REASONS = ('ErrImagePull', 'ImagePullBackOff', 'InvalidImageName', 'CreateContainerConfigError',
