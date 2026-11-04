@@ -76,8 +76,8 @@ class RuntimeFaultTests(unittest.TestCase):
             result = next(attempts)
             if isinstance(result, Exception):
                 raise result
-            return result
-        scope['call'] = call_step
+            return result, True
+        scope['client'].call = call_step
         handler = object.__new__(scope['Handler'])
         handler.wfile = io.BytesIO()
         handler.send_response = lambda *args: None
@@ -87,7 +87,7 @@ class RuntimeFaultTests(unittest.TestCase):
         result = json.loads(handler.wfile.getvalue())
         self.assertFalse(result['success'])
         self.assertIsNone(result['status_code'])
-        self.assertEqual(result['error'], 'redis timeout')
+        self.assertEqual(result['error'], 'TimeoutError')
     def test_observer_http_has_framed_response_and_valid_code(self):
         compile(OBSERVER_CODE, '<observer>', 'exec')
         self.assertIn('Content-Length', OBSERVER_CODE)
