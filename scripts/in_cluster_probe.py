@@ -73,7 +73,9 @@ class InClusterProbe:
         self.timeout = timeout
         self.local_port = local_port
         self.forward = None
-        self.spec = validate_probe_spec(spec) if spec is not None else environment_probe_spec() or {}
+        # Explicit {} selects the caller's path-only probe, even if the parent
+        # scenario supplies a different authenticated workflow.
+        self.spec = (validate_probe_spec(spec) if spec else {}) if spec is not None else environment_probe_spec() or {}
         self.context = context or {}
         self.log_handles = []
 
@@ -94,7 +96,7 @@ class InClusterProbe:
                 'readinessProbe': {'tcpSocket': {'port': 8080}, 'periodSeconds': 1}}]}}
         try:
             self.run('apply', '-f', '-', input_text=json.dumps(manifest))
-            self.run('wait', '--for=condition=Ready', f'pod/{self.name}', '--timeout=120s')
+            self.wait_ready()
             # kubectl emits a line for every connection. Undrained PIPE buffers
             # can block port-forward on Windows during a long observation.
             log_dir = Path(__file__).resolve().parents[1] / '.runtime' / 'probe-logs'
@@ -132,6 +134,10 @@ class InClusterProbe:
                             error = json.loads(line).get('probe_setup_error')
                             if isinstance(error, dict):
                                 diagnosis['setup'] = {key: error.get(key) for key in ('step', 'status_code')}
+                                if error.get('type') in {'TimeoutError', 'ConnectionRefusedError', 'gaierror',
+                                    'JSONDecodeError', 'KeyError', 'ValueError', 'RuntimeError', 'RemoteDisconnected',
+                                    'ConnectionResetError', 'IncompleteRead', 'InvalidURL', 'BadStatusLine', 'OSError'}:
+                                    diagnosis['setup']['error_class'] = error['type']
                         except (ValueError, AttributeError):
                             pass
                 except Exception:
@@ -155,6 +161,23 @@ class InClusterProbe:
                 if attempt < 2:
                     time.sleep(0.2)
         raise RuntimeError('Observer transport failed after 3 attempts: ' + '; '.join(errors))
+
+    def wait_ready(self):
+        deadline = time.monotonic() + 120
+        while True:
+            pod = json.loads(self.run('get', 'pod', self.name, '-o', 'json').stdout)
+            status = pod.get('status', {})
+            if status.get('phase') in ('Failed', 'Succeeded'):
+                raise RuntimeError('Observer exited before becoming ready.')
+            if any(item.get('type') == 'Ready' and item.get('status') == 'True' for item in status.get('conditions', [])):
+                return
+            waiting = [(item.get('state', {}).get('waiting') or {}).get('reason')
+                       for item in status.get('containerStatuses', [])]
+            if any(reason in ('ErrImagePull', 'ImagePullBackOff', 'CreateContainerConfigError', 'InvalidImageName') for reason in waiting):
+                raise RuntimeError('Observer container could not start.')
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Observer did not become ready within 120 seconds.')
+            time.sleep(1)
 
     def request_once(self) -> dict:
         with build_opener(ProxyHandler({})).open(f'http://127.0.0.1:{self.local_port}/',

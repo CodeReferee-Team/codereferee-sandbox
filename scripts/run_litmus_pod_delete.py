@@ -280,7 +280,7 @@ def main() -> int:
                                     "target_configuration": target_configuration,
                                     "observation_window": {"baseline_probe_count": args.baseline_probes,
                                       "recovery_timeout_seconds": args.timeout_seconds,
-                                      "error_rate_denominator": "all in-cluster HTTP requests during baseline, experiment, and recovery verification"},
+                                      "error_rate_denominator": "all measured in-cluster probe attempts during baseline, experiment, and recovery; setup/readiness excluded"},
                                     "abort_condition": {"triggered": result.get("verdict") == "Stopped",
                                       "reason": result.get("verdict") if result.get("verdict") != "Pass" else None}},
               "source": {"real_execution_observed": observation_status == 'observed',
@@ -293,8 +293,8 @@ def main() -> int:
         output["baseline"] = {"metrics": metrics_from_probes(baseline["probes"])}
         output["metrics"] = metrics_from_probes(probes)
         output['metrics']['restart_count'] = replacement_pod.get('restart_count')
-        output['metrics']['error_rate_denominator'] = 'all in-cluster HTTP requests during baseline, experiment, and recovery verification'
-        output['baseline']['metrics']['error_rate_denominator'] = 'baseline in-cluster HTTP requests only'
+        output['metrics']['error_rate_denominator'] = 'all measured in-cluster probe attempts during baseline, experiment, and recovery; setup/readiness excluded'
+        output['baseline']['metrics']['error_rate_denominator'] = 'baseline in-cluster probe attempts only; setup/readiness excluded'
         output['probes'] = {'baseline': baseline['probes'], 'experiment': recovery_probes}
     rendered = json.dumps(output, ensure_ascii=False, indent=2)
     if args.output:
