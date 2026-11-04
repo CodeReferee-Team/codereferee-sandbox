@@ -49,6 +49,13 @@ class BusinessProbeTests(unittest.TestCase):
         values = {}; exec(CLIENT_CODE, values)
         return values['WorkflowClient'](self.url, 1, validate_probe_spec(spec))
 
+    def test_api_imports_in_a_clean_process_without_scripts_on_pythonpath(self):
+        root=Path(__file__).resolve().parents[1]
+        code='import sys;sys.path.insert(0,sys.argv[1]);import app.main;print("API_IMPORT_OK")'
+        result=subprocess.run([sys.executable,'-I','-c',code,str(root)],capture_output=True,text=True,timeout=15)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('API_IMPORT_OK',result.stdout)
+
     def test_real_login_extract_authorization_assertion_and_no_redirect(self):
         client = self.client(self.spec); client.setup()
         self.assertEqual(client.measured(), (200, True, None))
