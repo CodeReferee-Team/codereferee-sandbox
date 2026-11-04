@@ -37,6 +37,7 @@ class LifecycleObservationTests(unittest.TestCase):
              patch.object(scale_runner, 'get_ready_pod', return_value={'uid': 'old'}), \
              patch.object(scale_runner, 'get_target_configuration', return_value={'replicas': 2}), \
              patch.object(scale_runner, 'InClusterProbe', return_value=observer), \
+             patch.object(scale_runner, 'wait_for_zero_pods', return_value=True), \
              patch.object(scale_runner, 'scale') as scale, contextlib.redirect_stdout(output):
             self.assertEqual(scale_runner.main(), 1)
         result = json.loads(output.getvalue())
