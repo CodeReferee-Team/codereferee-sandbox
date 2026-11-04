@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.request import ProxyHandler, build_opener
 
 from collect_baseline import kubectl_command, kubectl_environment, probe_success_below
+from business_probe import CLIENT_CODE, environment_probe_spec, validate_probe_spec
 from run_pod_kill_experiment import stop_process
 
 
@@ -35,45 +36,26 @@ opener=build_opener(ProxyHandler({}))
 spec=json.loads(os.environ.get("PROBE_SPEC","{}"))
 context=json.loads(os.environ.get("PROBE_CONTEXT","{}"))
 SUCCESS_BELOW=int(os.environ.get("PROBE_SUCCESS_BELOW","400"))
-def render(value):
- if isinstance(value,str):
-  for key,item in context.items(): value=value.replace("${"+key+"}",str(item))
-  return value
- if isinstance(value,dict): return {k:render(v) for k,v in value.items()}
- if isinstance(value,list): return [render(v) for v in value]
- return value
-def call(step):
- step=render(step)
- body=json.dumps(step["body"]).encode() if "body" in step else None
- headers={"Content-Type":"application/json",**step.get("headers",{})}
- request=Request(url.rstrip("/")+step.get("path","/"),data=body,headers=headers,method=step.get("method","GET"))
- with opener.open(request,timeout=timeout) as response:
-  payload=json.loads(response.read() or b"null")
-  for key,path in step.get("extract",{}).items():
-   value=payload
-   for part in path.split("."): value=value[part]
-   context[key]=value
-  return response.status
-for step in spec.get("setup",[]): call(step)
+client=WorkflowClient(url,timeout,spec,context) if spec else None
+if client: client.setup()
 class Handler(BaseHTTPRequestHandler):
  protocol_version="HTTP/1.1"
  def do_GET(self):
-  started=time.monotonic(); status=None; error=None
+  started=time.monotonic(); status=None; error=None; ok=False
   try:
-   if spec.get("steps"):
-    for step in spec["steps"]:
-     status=None
-     status=call(step)
+   if client:
+    status,ok,error=client.measured()
    else:
     with opener.open(url,timeout=timeout) as response:
      status=response.status; response.read(1024)
   except HTTPError as exc: status=exc.code; error=str(exc)
   except Exception as exc: error=str(exc)
-  body=json.dumps({"at":datetime.now(timezone.utc).isoformat(),"status_code":status,"latency_ms":round((time.monotonic()-started)*1000,2),"success":status is not None and 200<=status<SUCCESS_BELOW and (error is None or status>=400),"error":error}).encode()
+  body=json.dumps({"at":datetime.now(timezone.utc).isoformat(),"status_code":status,"latency_ms":round((time.monotonic()-started)*1000,2),"success":ok if client else status is not None and 200<=status<SUCCESS_BELOW and (error is None or status>=400),"error":error}).encode()
   self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(body))); self.send_header("Connection","close"); self.end_headers(); self.wfile.write(body); self.wfile.flush(); self.close_connection=True
  def log_message(self,*args): pass
 HTTPServer(("0.0.0.0",8080),Handler).serve_forever()
 '''
+OBSERVER_CODE = CLIENT_CODE + OBSERVER_CODE
 
 
 class InClusterProbe:
@@ -87,7 +69,7 @@ class InClusterProbe:
         self.timeout = timeout
         self.local_port = local_port
         self.forward = None
-        self.spec = spec or {}
+        self.spec = validate_probe_spec(spec) if spec is not None else environment_probe_spec() or {}
         self.context = context or {}
         self.log_handles = []
 
@@ -149,7 +131,7 @@ class InClusterProbe:
 
     def request_once(self) -> dict:
         with build_opener(ProxyHandler({})).open(f'http://127.0.0.1:{self.local_port}/',
-                                               timeout=self.timeout + 5) as response:
+                                               timeout=self.timeout * max(1, len(self.spec.get("steps", []))) + 5) as response:
             return json.loads(response.read())
 
     def collect(self, count: int) -> list[dict]:
