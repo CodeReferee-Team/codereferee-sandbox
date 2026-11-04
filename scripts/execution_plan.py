@@ -358,8 +358,13 @@ def normalize_dependencies(dependencies: dict) -> dict:
     for name, dependency in dependencies.items():
         if name == 'repository-api' or not re.fullmatch(r'[a-z][a-z0-9-]{0,40}', name) or not isinstance(dependency, dict):
             raise ConfigurationRequired('Invalid dependency declaration.')
-        if dependency.get('type') not in {'redis', 'postgres', 'mysql'} or set(dependency) - {'type', 'probePath', 'probeSpec'}:
+        if dependency.get('type') not in {'redis', 'postgres', 'mysql'} or set(dependency) - {'type', 'probePath', 'probeSpec', 'extensions'}:
             raise ConfigurationRequired('Only ephemeral redis/postgres/mysql dependencies and explicit business probes are supported.')
+        if 'extensions' in dependency and (dependency['type'] != 'postgres' or dependency['extensions'] != ['vector']):
+            raise ConfigurationRequired('Only explicit postgres extensions: [vector] is supported.')
+        if dependency.get('probeSpec') is not None:
+            from business_probe import validate_probe_spec
+            validate_probe_spec(dependency['probeSpec'])
     probe_kinds = [dependency['type'] == 'redis' for dependency in dependencies.values()
                    if dependency.get('probePath') or dependency.get('probeSpec')]
     if len(probe_kinds) != len(set(probe_kinds)):
@@ -576,6 +581,8 @@ def render_plan(plan: dict, namespace: str, image: str, *, workload: str = 'repo
         kind = dependency['type']
         dep_port = DEPENDENCY_PORTS[kind]
         dep_image = {'redis': 'redis:7-alpine', 'postgres': 'postgres:17-alpine', 'mysql': 'mysql:8.4'}.get(kind)
+        if dependency.get('extensions') == ['vector']:
+            dep_image = 'pgvector/pgvector:pg17'
         dep_labels = {'app.kubernetes.io/name': name}
         dep_container = {'name': kind, 'image': dep_image, 'ports': [{'containerPort': dep_port}],
                          'resources': {'requests': {'cpu': '50m', 'memory': '64Mi'}, 'limits': {'cpu': '500m', 'memory': '256Mi'}}}
