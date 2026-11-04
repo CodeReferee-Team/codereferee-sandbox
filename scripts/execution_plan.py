@@ -14,8 +14,12 @@ from typing import Any
 
 import yaml
 
-from local_databases import (FORWARDER, IMAGES as LOCAL_DATABASE_IMAGES, container_arguments,
-                             container_environment, detect_local_databases)
+try:
+    from .local_databases import (FORWARDER, IMAGES as LOCAL_DATABASE_IMAGES, container_arguments,
+                                  container_environment, detect_local_databases)
+except ImportError:
+    from local_databases import (FORWARDER, IMAGES as LOCAL_DATABASE_IMAGES, container_arguments,
+                                 container_environment, detect_local_databases)
 
 try:
     import tomllib
