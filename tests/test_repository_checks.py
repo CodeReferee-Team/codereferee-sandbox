@@ -65,12 +65,35 @@ class RepositoryChecksTests(unittest.TestCase):
 
         step = next(c.args[0] for c in run.call_args_list if '--workdir' in c.args[0])
         self.assertIn('target=/workspace', ' '.join(step))
-        if repository_checks.CHECK_OWNER:
-            self.assertEqual(repository_checks.CHECK_OWNER, step[step.index('--user') + 1])
-            # 이미지에 없는 uid 로 돌면 HOME 이 쓰기 불가가 된다.
-            self.assertIn('HOME=/cache/home', step)
-        else:
-            self.assertNotIn('--user', step)
+        self.assertEqual(repository_checks.CHECK_OWNER or '1000:1000', step[step.index('--user') + 1])
+        self.assertIn('HOME=/cache/home', step)
+
+    @patch('repository_checks.subprocess.run')
+    def test_cache_setup_and_jvm_process_use_the_same_owner_on_both_platforms(self, run):
+        self.write('build.gradle', 'plugins { id "java" }')
+        self.write('gradlew', '#!/bin/sh\n')
+        for owner in (None, '1001:1001'):
+            with self.subTest(owner=owner), patch.object(repository_checks, 'CHECK_OWNER', owner):
+                run.reset_mock()
+                run.return_value = subprocess.CompletedProcess([], 0, '', '')
+                verify_repository(self.root, self.cache, 'test')
+                setup = next(c.args[0] for c in run.call_args_list if '--cap-add' in c.args[0])
+                step = next(c.args[0] for c in run.call_args_list if '--workdir' in c.args[0])
+                expected = owner or '1000:1000'
+                self.assertIn('chown ' + expected, setup[-1])
+                self.assertEqual(step[step.index('--user') + 1], expected)
+                self.assertIn('HOME=/cache/home', step)
+                self.assertNotIn('--cap-add', step)
+
+    @patch('repository_checks.subprocess.run')
+    def test_windows_python_checks_also_use_the_cache_owner(self, run):
+        self.write('app.py', 'print("ready")')
+        run.return_value = subprocess.CompletedProcess([], 0, '', '')
+        with patch.object(repository_checks, 'CHECK_OWNER', None):
+            verify_repository(self.root, self.cache, 'test')
+        step = next(c.args[0] for c in run.call_args_list if '--workdir' in c.args[0])
+        self.assertEqual(step[step.index('--user') + 1], '1000:1000')
+        self.assertIn('HOME=/cache/home', step)
 
     @patch('repository_checks.subprocess.run')
     def test_cache_volume_is_owned_by_the_user_that_runs_the_checks(self, run):
