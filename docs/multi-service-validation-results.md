@@ -48,8 +48,7 @@ gateway → edge → API → storage → 실제 Redis로 연결한 별도 로컬
   실제 CrashLoopBackOff와 `failed_service: edge`, Pod 진단을 확인했다.
 - 정상·실패 실행 모두 namespace, 요청 이미지 4개(호스트·kind), workspace 정리를 확인했다.
 
-4개 구성에서 13종을 모두 반복한 것은 아니다. 전체 13종은 앞의 2개 앱 구성에서 실행했고,
-최대 구성에서는 서비스 간 연결·장애 대상 분리·중간 기동 실패·전체 회수를 중점 검증했다.
+이후 4개 앱에서도 전체 13종을 별도로 실행했다. 추가 실측 표는 이 문서 마지막 절에 기록한다.
 
 ### 복제본 변경
 
@@ -100,3 +99,31 @@ Scale Down은 명령 수락만 확인하지 않고 **2 → 실제 Pod 0개 → R
 
 멀티레포 그룹, 여러 EC2 배정, EC2 자동 기동·종료, 여러 Compose 앱의 자동 변환,
 정확한 사전 실행 시간 예측, AI의 version 2 수정 정책, AWS 배포 및 프론트부터의 전체 자가치유 시연은 별도 작업이다.
+
+## 앱 4개 전체 13종 추가 실측
+
+gateway → edge → API → storage를 연결하고 API가 실제 Redis·PostgreSQL에도 접근하는 구성이다.
+4개 업무 앱 모두 256Mi이며, 이전 2개 앱 기록과 별도로 실행했다. 13종 모두 observed / exitCode 0, 미실행 없음이다.
+
+| 모드 | 실패 HTTP / 전체 |
+| --- | ---: |
+| load_concurrent_users | 0 / 6 |
+| litmus_container_kill | 2 / 45 |
+| litmus_pod_delete | 3 / 39 |
+| litmus_pod_cpu_hog | 0 / 23 |
+| litmus_pod_network_latency | 1 / 21 |
+| litmus_pod_network_loss | 1 / 23 |
+| service_selector_blackhole | 8 / 14 |
+| deployment_scale_down | 12 / 18 |
+| rollout_restart | 0 / 10 |
+| litmus_pod_memory_hog | 0 / 24 |
+| litmus_pod_memory_oom | 5 / 18 |
+| dependency_database_outage | 6 / 27 |
+| dependency_redis_outage | 5 / 27 |
+
+DB·Redis 장애 때 업무 HTTP 실패가 실제 발생했고, 앱 OOM은 대상 컨테이너 증거를 확인했다.
+4개 앱의 실제 묶음 응답도 현재 AI 파서로 읽어 서비스별 자원 출처·업무 진입점·장애 대상 필드 보존을 확인했다.
+namespace·이미지 4개·workspace 정리를 확인했다. 별도 중간 앱 기동 실패 검증도 앞 절의 기록대로 완료했다.
+처음에는 검증 드라이버의 12초 DB 준비 대기가 부족해 준비 단계 infrastructure_error로 중단됐다.
+이 실패 및 전체 회수 기록을 보존하고, 운영 기본 240초보다 짧은 120초 준비 대기로 새로 실행한 결과가 위 표다.
+제품의 시간 상한을 늘린 수정은 없다. 단축 부하·장애 시간, 테스트 기한 3600초 및 기존 검증 경계는 그대로 적용한다.
