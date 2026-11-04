@@ -89,8 +89,10 @@ class WorkflowClient:
    return status,True
   finally: connection.close()
  def setup(self):
-  for step in self.spec.get("setup",[]):
-   if not self.call(step)[1]: raise RuntimeError("Business probe setup failed")
+  for index,step in enumerate(self.spec.get("setup",[])):
+   self.setup_step=index; self.setup_status=None
+   self.setup_status,success=self.call(step)
+   if not success: raise RuntimeError("Business probe setup failed")
  def measured(self):
   status=None
   try:

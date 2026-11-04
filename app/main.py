@@ -397,7 +397,9 @@ def attach_repository_checks(result: dict, deployed: dict) -> None:
         return
     report = result.setdefault('sandboxReport', {})
     report.update({key: checks[key] for key in ('detected_stack', 'verification_declared',
-        'test_execution', 'test_count', 'steps', 'check_cache_cleanup', 'services', 'service_timings') if key in checks})
+        'test_execution', 'test_count', 'steps', 'check_cache_cleanup', 'check_database_cleanup',
+        'local_databases', 'verification_scope', 'verification_service_group',
+        'services', 'service_timings') if key in checks})
     report['repository_check_outcome'] = checks.get('outcome')
 
 

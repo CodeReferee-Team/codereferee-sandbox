@@ -18,7 +18,7 @@ from multi_service import render_services
 import deploy_repository as deploy
 from in_cluster_probe import InClusterProbe
 from artifact_cleanup import cleanup_request_image
-from app.main import ChaosTarget, probe_environment
+from app.main import ChaosTarget, probe_environment, attach_repository_checks
 
 
 class MultiServiceTests(unittest.TestCase):
@@ -190,13 +190,22 @@ class MultiServiceTests(unittest.TestCase):
                 deploy.build_and_deploy_service_group(self.root, self.root, 'test', 'codereferee-test',
                     'a'*40, {}, argparse.Namespace(), {'checks':checks})
 
+    def test_shared_verification_scope_and_db_cleanup_reach_ai_report(self):
+        checks = {'outcome':'passed','verification_scope':'repository',
+                  'verification_service_group':['edge','auth'], 'check_database_cleanup':{'removed':True},
+                  'local_databases':{'ready':True,'databases':[{'type':'postgres','image':'pgvector/pgvector:0.8.7-pg17'}]}}
+        result = {}
+        attach_repository_checks(result, {'sandboxReport':checks})
+        for key in checks.keys() - {'outcome'}:
+            self.assertEqual(result['sandboxReport'][key], checks[key])
+
     def test_business_spec_and_pgvector_are_kept_in_internal_target(self):
         self.data['dependencies']['db']['extensions'] = ['vector']
         self.data['probeSpec'] = {'steps':[{'path':'/private','headers':{'Authorization':'Bearer dummy'}}]}
         rendered, target, _ = render_services(self.resolve(), 'codereferee-test', {'api':'api','gateway':'web'})
         self.assertEqual(target['probeSpec'], self.data['probeSpec'])
         db = next(o for o in yaml.safe_load_all(rendered) if o['kind']=='Deployment' and o['metadata']['name']=='db')
-        self.assertEqual(db['spec']['template']['spec']['containers'][0]['image'], 'pgvector/pgvector:pg17')
+        self.assertEqual(db['spec']['template']['spec']['containers'][0]['image'], 'pgvector/pgvector:0.8.7-pg17')
 
     def test_five_services_deploy_in_order_and_six_are_rejected(self):
         self.add_four_service_chain()
