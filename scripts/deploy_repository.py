@@ -72,7 +72,7 @@ def main() -> int:
             payload = deploy_service_group(repository, workspace, request, namespace, commit_sha, plan, args, group_state)
             payload.update(repository={'url': args.repository_url, 'branch': args.branch, 'commitSha': commit_sha},
                            workspaceCleanup=cleanup_workspace(workspace))
-            print(json.dumps(payload, ensure_ascii=False))
+            print(json.dumps(payload))
             return 0
         stage = 'verify'
         if config_only:
@@ -139,7 +139,7 @@ def main() -> int:
             'workspaceCleanup': workspace_cleanup,
             'executionPlan': {'source': plan['source'], 'dockerfile': 'generated' if profile.get('generatedDockerfile') else profile.get('dockerfile', 'Dockerfile'),
                               'warnings': plan.get('warnings', []), 'servicePort': target['servicePort']},
-        }, ensure_ascii=False))
+        }))
         return 0
     except Exception as exc:
         if group_state:
@@ -202,7 +202,7 @@ def main() -> int:
             'stdout': '', 'stderr': message, 'serverStarted': False, 'serviceCheckAttempted': stage == 'run',
             'browserCheckAttempted': False, 'requestId': args.request_id,
             'sandboxReport': report,
-            'source': {'artifact_cleanup': cleanup, 'workspace_cleanup': cleanup['workspace_cleanup']}}}, ensure_ascii=False))
+            'source': {'artifact_cleanup': cleanup, 'workspace_cleanup': cleanup['workspace_cleanup']}}}))
         return 1
     finally:
         if workspace.exists():
