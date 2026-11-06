@@ -359,6 +359,7 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
                 spec = metrics_target.probe_spec
                 result.setdefault('source', {})['business_probe'] = {
                     'setup_steps': len(spec.get('setup', [])),
+                    'declared_setup_request_timeout_seconds': spec.get('setupRequestTimeoutSeconds'),
                     'measured_paths': [step.get('path', '/') for step in spec['steps']],
                     'success_policy': 'all_steps_2xx_and_declared_json_assertions',
                     'load_session_scope': 'one_shared_authenticated_session'}
