@@ -5,7 +5,7 @@
 - 실제 공개 레포: `prgrms-be-adv-devcourse/beadv7_7_GrafanaOn_BE`, commit `4062b36d406d8ab30d97aa658b6e0d30ffc8dacc`.
 - Windows + Docker Desktop + 기존 `kind-codereferee`에서 실행했다. AWS/Mac 실측이나 Frontend→Backend→AI 전체 E2E가 아니다.
 - 로컬 재현 설정으로 gateway / identity / commerce / financial / recommendation의 **5개 앱**과 PostgreSQL을 배포했다. 제품에 해당 레포명·API 경로 분기를 추가하지 않았다.
-- 실제 관측 업무: gateway → identity → PostgreSQL. 회원가입·로그인 후 인증 토큰으로 프로필을 조회하고 JSON 결과를 확인했다. 결제·검색·추천·외부 S3/AI 연동은 검증하지 않았다.
+- 실제 관측 업무는 회원가입의 gateway → identity → financial 지갑 생성 → DB와 로그인·프로필 조회의 gateway → identity → DB다. 회원가입·로그인 후 인증 토큰으로 프로필을 조회하고 JSON 결과를 확인했다. 결제·검색·추천·외부 S3/AI 연동은 검증하지 않았다.
 - 동일 원본 clone의 루트 빌드/테스트가 통과한 뒤 실제 production 배포 단계 함수를 실행했다. 외부 HTTP URL 요청부터 모든 단계를 다시 실행한 결과와 구분한다. 재현용 Dockerfile은 실제 빌드된 JAR를 패키징한다.
 
 ## 빌드·테스트
@@ -50,7 +50,7 @@
 
 - 초기 baseline 준비1회와 Pod Delete / CPU Hog / Rollout Restart / Memory Hog / DB 장애의 준비 단계에서 각1회 회원가입 HTTP503이 있었다. 장애 주입 전 observer setup에서 멈췄으며 원본 실패를 별도 보존했다.
 - 앱 Ready 및 활성 장애 없음을 확인한 뒤 사람이 해당 준비 단계를 한 번씩 다시 실행했다. 새로운 인증 세션을 사용했다. 최종12종 완료는 **수동 준비 재시도가 포함된 결과**이며 한번에 무오류로 완주한 실행이나 제품 자동 재시도 정책이 아니다.
-- 복구 직후의 gateway/auth 준비 상태와 첫 업무 요청의503 원인은 확정하지 않았다. cold-start SLO나 초기 무오류를 주장하지 않는다.
+- 당시 결과에는 준비503의 상태 코드까지 기록했다. 11월6일 추가 진단에서 financial 지갑 호출의 TimeLimiter timeout을 재현했고 설정을 명시한 비교와 별도 준비 제한을 검증했다. 추가 실행 범위는 [인증 준비 분석](authentication-preparation.md)에 기록한다.
 
 ## 정리
 
