@@ -62,6 +62,7 @@ dependencies:
   db:
     type: postgres
 probeSpec:
+  setupRequestTimeoutSeconds: 10
   setup:
     - method: POST
       path: /signup
@@ -85,6 +86,7 @@ probeSpec:
 
 경로·본문·JSON 응답 경로는 예시이며 해당 앱의 실제 계약으로 바꾼다. `expect`는 선택 사항이다. 이 예시는 edge를 통해 auth와 DB를 읽는 업무 경로이고, 장애 대상은 auth다. edge 자체 health만 확인하는 검사와 다르다.
 
+- `setupRequestTimeoutSeconds`는 준비 단계 HTTP 요청마다 적용하는 선택 제한이다. 1~30초를 명시할 수 있고 생략하면 기존 요청 제한을 사용한다. 측정 steps의 timeout과 별도로 적용하며 결과의 `declared_setup_request_timeout_seconds`에 선언 값을 남긴다. 전체 observer 준비·실험 단계의 상한도 함께 적용한다.
 - `setup`은 관측 Pod/부하 생성 Pod 시작 시 한 번 실행하며 측정 표본에서 제외한다. `${runId}`는 실행마다 다른 값이다.
 - `steps`의 요청이 모두 HTTP 2xx이고 선택적 JSON `expect`가 일치해야 업무 성공이다. 401/404/429/5xx, redirect, JSON 추출·검증 오류와 timeout은 업무 성공이 아니다.
 - 토큰은 응답에서 `extract`해 메모리에 보관한다. 결과 JSON에 응답 본문·토큰·probe 선언의 자격증명을 보내지 않는다.
@@ -131,3 +133,5 @@ dependencies:
 ## 정리 제한시간
 
 여러 JVM 앱과 실험 리소스를 삭제한 실행에서 `kubectl delete --wait`의 실패 반환과 실제 namespace 부재가 함께 관측됐다. 단순 대기 증가 후에도 반복돼 실제 부재를 직접 확인하도록 보완했다. 삭제 요청은 `--wait=false`로 보내고 namespace 조회가 실제 부재를 확인할 때까지 최대 120초 기다린다. 하위 kubectl 호출도 남은 예산과 15초 중 작은 값으로 제한한다. 빌드/테스트 기본 600초와 배포 단계 1200초는 유지한다. 삭제를 확인하지 못하면 kind 이미지를 강제로 지우지 않고 정리 실패를 기록한다. 지연 삭제 후 이미지 재회수를 맡을 별도 청소 기능은 후속 과제다.
+
+인증 준비503의 실제 원인과 시간 제한 분리 검증은 [인증 준비 분석](authentication-preparation.md)에 기록한다.
