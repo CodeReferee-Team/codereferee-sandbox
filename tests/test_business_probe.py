@@ -26,13 +26,24 @@ class BusinessProbeTests(unittest.TestCase):
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 self.rfile.read(int(self.headers.get('Content-Length', '0')))
-                self.send_response(200); self.end_headers()
-                self.wfile.write(b'{"data":{"accessToken":"dummy-token"}}')
+                if self.path == '/slow-login':
+                    time.sleep(0.4)
+                try:
+                    self.send_response(200); self.end_headers()
+                    self.wfile.write(b'{"data":{"accessToken":"dummy-token"}}')
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
             def do_GET(self):
+                if self.path == '/slow-private':
+                    time.sleep(0.4)
                 if self.path == '/redirect':
                     self.send_response(302); self.send_header('Location', '/private'); self.end_headers(); return
                 code = 200 if self.headers.get('Authorization') == 'Bearer dummy-token' else 401
-                self.send_response(code); self.end_headers(); self.wfile.write(b'{"ok":true}')
+                try:
+                    self.send_response(code); self.end_headers()
+                    self.wfile.write(b'{"ok":true}')
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
             def log_message(self, *args): pass
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
@@ -55,6 +66,43 @@ class BusinessProbeTests(unittest.TestCase):
         result=subprocess.run([sys.executable,'-I','-c',code,str(root)],capture_output=True,text=True,timeout=15)
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertIn('API_IMPORT_OK',result.stdout)
+
+    def test_setup_timeout_is_explicit_and_does_not_relax_measured_timeout(self):
+        spec = json.loads(json.dumps(self.spec))
+        spec['setup'][0]['path'] = '/slow-login'
+        values = {}
+        exec(CLIENT_CODE, values)
+        client_type = values['WorkflowClient']
+        with self.assertRaises(TimeoutError):
+            client_type(self.url, 0.15, validate_probe_spec(spec)).setup()
+        spec['setupRequestTimeoutSeconds'] = 1
+        client = client_type(self.url, 0.15, validate_probe_spec(spec))
+        client.setup()
+        self.assertTrue(client.measured()[1])
+        client.spec['steps'][0]['path'] = '/slow-private'
+        self.assertFalse(client.measured()[1])
+        self.assertEqual(client.timeout, 0.15)
+
+    def test_setup_timeout_bounds_and_public_contract(self):
+        for value in (0, 31, True, '10', None, float('nan'), float('inf')):
+            with self.subTest(value=value), self.assertRaises(ConfigurationRequired):
+                validate_probe_spec(dict(self.spec, setupRequestTimeoutSeconds=value))
+        target = ChaosTarget(namespace='n', deployment='d', service='s', servicePort=80,
+                            labelSelector='a=b', probeSpec=dict(self.spec, setupRequestTimeoutSeconds=10))
+        self.assertEqual(json.loads(probe_environment(target)['CODEREFEREE_PROBE_SPEC'])['setupRequestTimeoutSeconds'], 10)
+
+    def test_real_generator_uses_explicit_setup_timeout(self):
+        spec = json.loads(json.dumps(self.spec))
+        spec['setup'][0]['path'] = '/slow-login'
+        spec['setupRequestTimeoutSeconds'] = 1
+        env = dict(os.environ, TARGET_URL=self.url, REQUEST_TIMEOUT='0.15',
+                   STAGES='1', STAGE_SECONDS='1', THINK_SECONDS='0.2', PROBE_SPEC=json.dumps(spec))
+        result = subprocess.run([sys.executable, '-c', GENERATOR_CODE], env=env,
+                                capture_output=True, text=True, check=True, timeout=15)
+        stage = json.loads(result.stdout)['stages'][0]
+        self.assertGreater(stage['requests'], 0)
+        self.assertEqual(stage['failed_requests'], 0)
+        self.assertNotIn('dummy-token', result.stdout + result.stderr)
 
     def test_real_login_extract_authorization_assertion_and_no_redirect(self):
         client = self.client(self.spec); client.setup()

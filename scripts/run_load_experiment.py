@@ -175,6 +175,7 @@ def main() -> int:
                 'think_seconds': args.think_seconds,
                 'stage_seconds': args.stage_seconds,
                 'request_timeout_seconds': args.load_timeout_seconds,
+                'setup_request_timeout_seconds': (environment_probe_spec() or {}).get('setupRequestTimeoutSeconds', args.load_timeout_seconds),
                 'failure_definition': ('any workflow step fails 2xx/JSON checks or exceeds its timeout'
                                        if environment_probe_spec() else 'no HTTP answer within the timeout, or status 5xx or 429'),
                 'workflow_paths': [step.get('path','/') for step in (environment_probe_spec() or {}).get('steps',[])],
@@ -314,8 +315,10 @@ def run_generator(args: argparse.Namespace, url: str, stages: list[int]) -> dict
                     {'name': 'REQUEST_TIMEOUT', 'value': str(args.load_timeout_seconds)},
                     {'name': 'PROBE_SPEC', 'value': json.dumps(spec)}],
             'resources': GENERATOR_RESOURCES}]}}
+    setup_timeout = spec.get('setupRequestTimeoutSeconds', args.load_timeout_seconds)
+    setup_allowance = setup_timeout * len(spec.get('setup', []))
     limit = (len(stages) * (args.stage_seconds + args.load_timeout_seconds * max(1, len(spec.get('steps', [])))
-                           + args.think_seconds + 5) + args.load_timeout_seconds * len(spec.get('setup', [])) + 120)
+                           + args.think_seconds + 5) + setup_allowance + 120)
     try:
         kubectl(args.namespace, 'apply', '-f', '-', input_text=json.dumps(manifest))
         deadline = time.monotonic() + limit
