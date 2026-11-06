@@ -13,7 +13,7 @@ import deploy_repository as deploy
 
 
 class DeploymentImageCleanupTests(unittest.TestCase):
-    def run_failure(self, stage, namespace_removed=True):
+    def run_failure(self, stage, namespace_removed=True, output=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             args = argparse.Namespace(request_id='cleanup-test', repository_url='https://github.com/example/app',
@@ -32,10 +32,10 @@ class DeploymentImageCleanupTests(unittest.TestCase):
                  patch.object(deploy, 'load_profile', return_value=profile), patch.object(deploy, 'run', side_effect=run), \
                  patch.object(deploy, 'load_image_into_cluster', side_effect=RuntimeError('partial load') if stage == 'load' else None), \
                  patch.object(deploy, 'render_template', side_effect=RuntimeError('render failed') if stage == 'render' else None, return_value='manifest'), \
-                 patch.object(deploy, 'apply', side_effect=RuntimeError('apply failed')), \
+                 patch.object(deploy, 'apply', side_effect=RuntimeError('apply failed ✓')), \
                  patch.object(deploy, 'delete_namespace', return_value=namespace_removed) as delete, \
                  patch.object(deploy, 'cleanup_request_image') as cleanup:
-                with redirect_stdout(io.StringIO()):
+                with redirect_stdout(output if output is not None else io.StringIO()):
                     try:
                         # The original executor raises; the generic executor
                         # returns a structured failure. Both must clean images.
@@ -59,3 +59,13 @@ class DeploymentImageCleanupTests(unittest.TestCase):
 
     def test_namespace_removal_failure_does_not_remove_running_pod_images(self):
         self.assertEqual(self.run_failure('apply', namespace_removed=False), (False, 1))
+
+    def test_structured_json_survives_windows_console_encoding(self):
+        import json
+        buffer = io.BytesIO()
+        output = io.TextIOWrapper(buffer, encoding='cp949')
+        self.addCleanup(output.close)
+        self.run_failure('apply', output=output)
+        output.flush()
+        result = json.loads(buffer.getvalue().decode('cp949'))
+        self.assertIn('✓', result['result']['stderr'])
