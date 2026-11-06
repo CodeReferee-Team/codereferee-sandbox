@@ -1,7 +1,7 @@
 # 단일 레포 멀티서비스 실행
 
 하나의 레포에 업무 앱이 여러 개 있을 때 `.codereferee/validation.yaml`의 `version: 2`로 선언한다.
-지원 범위는 업무 앱 2~4개와 재현용 Redis·PostgreSQL·MySQL이다. 모든 자원은 요청 namespace 안에 생성한다.
+지원 범위는 업무 앱 2~5개와 재현용 Redis·PostgreSQL·MySQL이다. 모든 자원은 요청 namespace 안에 생성한다.
 기존 단일 `service`의 version 1과 사전 등록 profile 경로도 유지한다.
 
 ```yaml
@@ -49,6 +49,8 @@ dependencies:
 - Dockerfile을 생략하면 해당 buildContext에서 지원하는 스택 레시피를 찾는다. 판단할 수 없으면 설정을 요구한다.
 - 검사 기본 위치는 buildContext다. 공유 루트를 빌드하는 멀티모듈이라면 `verificationDirectory`로 검사할 모듈을
   레포 루트 기준으로 지정할 수 있다. 해당 디렉터리에 기존 verification 설정이 있으면 그 설정을 사용한다.
+- 루트에 공통 `verification`을 선언하면 서비스마다 반복하지 않고 레포 전체 검증을 한 번 수행한다.
+  검사 DB 및 인증이 필요한 업무 경로의 `probeSpec` 설정은 [추가 설정 안내](authenticated-multi-service.md)를 참고한다.
 - `{{service.NAME.host}}`, `.port`, `.url`로 내부 Service 주소를 참조한다. 생성되는 이름은 `cr-svc-NAME`이다.
 - `{{dependency.NAME.host}}`, `.port`, `.username`, `.database`, `.password`로 재현용 DB 값을 참조한다.
   같은 DB를 사용하는 앱들은 동일한 재현용 자격증명을 받는다. 운영 Secret이나 호스트 환경은 읽지 않는다.
@@ -57,7 +59,7 @@ dependencies:
 ## 실행과 결과
 
 1. 요청별 clone에 patchDiff를 적용한다.
-2. 각 서비스의 검사 위치에서 지원하는 설치·빌드·테스트를 실행한다. 테스트 미선언은 실행한 것으로 표시하지 않는다.
+2. 공통 verification이 있으면 루트에서 한 번, 없으면 각 서비스 검사 위치에서 설치·빌드·테스트를 실행한다. 테스트 미선언은 실행한 것으로 표시하지 않는다.
 3. 서비스마다 이미지를 빌드하고 kind에 적재한다.
 4. DB를 준비하고 dependsOn 순서로 앱을 배포한다.
 5. targetService에 장애를 넣고 entryService의 probePath로 실제 HTTP 요청을 보낸다.
@@ -66,6 +68,9 @@ dependencies:
 `deployment.services`는 서비스별 workload 정보를, `deployment.images`는 요청 이미지들을 담는다.
 `sandboxReport.services`는 서비스별 검사 결과이며 `service_timings`에는 검증·빌드·이미지 적재·롤아웃의
 실제 소요 시간이 서비스 이름과 함께 기록된다. 이 값은 완료된 실행 기록이며 사전 ETA는 아니다.
+공통 verification을 사용하면 `verification_scope: repository`, `verification_service_group`와 루트 검사 결과를 반환한다.
+이때 테스트 수는 실제 루트 실행 횟수 기준이며 서비스 수만큼 합산하지 않는다.
+`verification_service_group`은 이 공통 검사를 사용하는 앱 목록이며 서비스별 테스트 커버리지를 자동 추론한 결과가 아니다. 실제 검사 범위는 기록된 명령과 테스트 결과로 확인한다.
 
 각 서비스 target의 `resourceConfiguration`은 요청한 CPU·메모리 한도(`requestedLimits`)와 그 출처(`sources`)를
 각각 담는다. `repository_configuration`은 레포 설정에 명시한 값, `sandbox_default`는 Sandbox 기본값,

@@ -11,9 +11,9 @@ CodeReferee에서 레포를 실제로 실행하고, 부하와 장애를 주입�
 
 - **실행 계획 탐색**: `.codereferee/validation.yaml`이 있으면 그 설정을 따르고, 없으면 Compose, Dockerfile, 스택(Node·Python·Maven·Gradle)에서 자동으로 찾습니다. 판단이 모호하면 추측하지 않고 "설정 필요" 사유를 돌려줍니다. 자세한 내용은 [실행 설정·자동 탐색](docs/repository-execution-plans.md)에 있습니다.
 - **로컬 DB 재현**: 레포 설정이 `localhost`의 MySQL·PostgreSQL·MongoDB·Redis를 가리키면, 그 레포의 개발용 계정 그대로 임시 DB를 띄워 붙입니다.
-- **헬스 판정**: 레포가 헬스 경로를 정하지 않았으면 `GET /`를 봅니다. 이때 401·404 같은 4xx도 "응답함"으로 셉니다. 5xx와 무응답만 실패입니다.
+- **헬스 판정**: 레포가 헬스 경로를 정하지 않았으면 `GET /`를 봅니다. 이때 401·404 같은 4xx도 "응답함"으로 셉니다. 5xx와 무응답만 실패입니다. 인증 업무 `probeSpec`은 별도로 모든 단계의 2xx와 선언한 JSON 검증을 요구합니다.
 - **정리**: 요청마다 만든 namespace, 이미지, 검사 볼륨을 지웁니다.
-- **멀티서비스**: 한 레포의 업무 앱 2~4개를 `validation.yaml` version 2로 선언할 수 있습니다. 진입점과 장애 대상을 따로 정하고 공유 DB와 함께 요청 namespace에 배포합니다. [설정 예제·지원 범위](docs/multi-service-validation.md)를 참고하세요.
+- **멀티서비스**: 한 레포의 업무 앱 2~5개를 `validation.yaml` version 2로 선언할 수 있습니다. 진입점과 장애 대상을 따로 정하고 공유 DB와 함께 요청 namespace에 배포합니다. [기본 설정](docs/multi-service-validation.md) · [루트 검증·인증 업무 probe](docs/authenticated-multi-service.md)를 참고하세요.
 
 ## 시나리오와 검사 묶음
 
