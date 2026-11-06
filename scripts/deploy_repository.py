@@ -481,12 +481,8 @@ def wait_rollout(namespace: str, deployment: str, timeout: int) -> None:
 
 
 def delete_namespace(namespace: str) -> bool:
-    try:
-        result = subprocess.run(kubectl_command("delete", "namespace", namespace, "--ignore-not-found=true", '--wait=true', '--timeout=60s'),
-                       text=True, capture_output=True, env=kubectl_environment(), timeout=70)
-        return result.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+    from namespace_cleanup import delete_namespace_confirmed
+    return delete_namespace_confirmed(namespace)
 
 
 def run(command: list[str], *, cwd: Path | None = None, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
