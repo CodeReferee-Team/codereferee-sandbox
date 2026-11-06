@@ -11,8 +11,11 @@ except ImportError:
 def validate_probe_spec(spec):
     if spec is None:
         return None
-    if not isinstance(spec, dict) or set(spec) - {'setup', 'steps'} or not spec.get('steps'):
+    if not isinstance(spec, dict) or set(spec) - {'setup', 'steps', 'setupRequestTimeoutSeconds'} or not spec.get('steps'):
         raise ConfigurationRequired('probeSpec requires measured steps and optional setup.')
+    setup_timeout = spec.get('setupRequestTimeoutSeconds')
+    if 'setupRequestTimeoutSeconds' in spec and (type(setup_timeout) not in (int, float) or not 1 <= setup_timeout <= 30):
+        raise ConfigurationRequired('setupRequestTimeoutSeconds must be a number in 1..30.')
     if len(json.dumps(spec)) > 16384:
         raise ConfigurationRequired('probeSpec exceeds 16 KiB.')
     for phase in ('setup', 'steps'):
@@ -58,6 +61,7 @@ from urllib.parse import urlsplit
 class WorkflowClient:
  def __init__(self,url,timeout,spec,context=None):
   self.url=urlsplit(url); self.timeout=timeout; self.spec=spec
+  self.setup_timeout=spec.get("setupRequestTimeoutSeconds",timeout)
   self.context={"runId":uuid.uuid4().hex,**(context or {})}
  def render(self,value):
   if isinstance(value,str):
@@ -70,12 +74,12 @@ class WorkflowClient:
  def value(self,payload,path):
   for part in path.split("."): payload=payload[int(part)] if isinstance(payload,list) else payload[part]
   return payload
- def call(self,step):
+ def call(self,step,timeout=None):
   step=self.render(step); path=step.get("path","/")
   if not path.startswith("/") or path.startswith("//") or "\r" in path or "\n" in path: raise ValueError("Invalid probe path")
   body=json.dumps(step["body"]).encode() if "body" in step else None
   headers={"Content-Type":"application/json","Connection":"close",**step.get("headers",{})}
-  connection=http.client.HTTPConnection(self.url.hostname,self.url.port or 80,timeout=self.timeout)
+  connection=http.client.HTTPConnection(self.url.hostname,self.url.port or 80,timeout=self.timeout if timeout is None else timeout)
   try:
    connection.request(step.get("method","GET"),path,body=body,headers=headers)
    response=connection.getresponse(); status=response.status; raw=response.read(1048577)
@@ -91,7 +95,7 @@ class WorkflowClient:
  def setup(self):
   for index,step in enumerate(self.spec.get("setup",[])):
    self.setup_step=index; self.setup_status=None
-   self.setup_status,success=self.call(step)
+   self.setup_status,success=self.call(step,timeout=self.setup_timeout)
    if not success: raise RuntimeError("Business probe setup failed")
  def measured(self):
   status=None
