@@ -48,6 +48,7 @@ def main() -> int:
     stage = 'clone'
     checks = None
     pod_diagnostics = None
+    group_state: dict[str, Any] = {}
     started = time.monotonic()
     try:
         repository = workspace / "repository"
@@ -64,6 +65,15 @@ def main() -> int:
             apply_patch(repository, args.patch_file)
             config_only = only_scaling_changed(repository, before)
         commit_sha = run(["git", "rev-parse", "HEAD"], cwd=repository).stdout.strip()
+        config_path = inside(repository, '.codereferee/validation.yaml')
+        if not args.profile and config_path.is_file() and read_yaml(config_path).get('version') == 2:
+            stage = 'detect'
+            plan = resolve_plan(repository)
+            payload = deploy_service_group(repository, workspace, request, namespace, commit_sha, plan, args, group_state)
+            payload.update(repository={'url': args.repository_url, 'branch': args.branch, 'commitSha': commit_sha},
+                           workspaceCleanup=cleanup_workspace(workspace))
+            print(json.dumps(payload, ensure_ascii=False))
+            return 0
         stage = 'verify'
         if config_only:
             checks = skipped_checks(before)
@@ -132,10 +142,23 @@ def main() -> int:
         }, ensure_ascii=False))
         return 0
     except Exception as exc:
+        if group_state:
+            stage = group_state.get('stage', stage)
+            namespace_may_exist = group_state.get('namespace_may_exist', False)
+            pod_diagnostics = group_state.get('pod_diagnostics')
+            checks = group_state.get('checks')
         namespace_removed = not namespace_may_exist
         if namespace_may_exist:
             namespace_removed = delete_namespace(namespace)
         cleanup = {'namespace_removed': namespace_removed}
+        if group_state.get('images'):
+            cleanup['images'] = []
+            for name, group_image in group_state['images'].items():
+                try:
+                    cleanup['images'].append(dict(cleanup_request_image(group_image, namespace,
+                        remove_from_kind=name in group_state.get('loaded', set()) and namespace_removed), service=name))
+                except (OSError, subprocess.TimeoutExpired, ValueError):
+                    cleanup.setdefault('errors', []).append('Image cleanup failed for service ' + name)
         if image:
             try:
                 cleanup.update(cleanup_request_image(image, namespace, remove_from_kind=image_load_attempted and namespace_removed))
@@ -153,6 +176,10 @@ def main() -> int:
             (checks or {}).get('exit_code', 1))
         report = dict(checks or {}, schema_version='sandbox-result.v1', outcome='failed', failed_step=stage,
             configuration_required=isinstance(exc, ConfigurationRequired))
+        if group_state.get('service'):
+            report['failed_service'] = group_state['service']
+        if group_state.get('timings'):
+            report['service_timings'] = group_state['timings']
         report.setdefault('verification_declared', False)
         if timed_out:
             report['execution_limit'] = {'stage': stage,
@@ -180,6 +207,106 @@ def main() -> int:
     finally:
         if workspace.exists():
             cleanup_workspace(workspace)
+
+
+def deploy_service_group(repository: Path, workspace: Path, request: str, namespace: str,
+                         commit_sha: str, plan: dict, args: argparse.Namespace, state: dict) -> dict:
+    from multi_service import render_services, verification_report, workload_name
+    state.update(images={}, loaded=set(), timings=[], stage='verify')
+    reports = {}
+    def measured(stage, name, operation):
+        state.update(stage=stage, service=name)
+        started = time.monotonic()
+        try:
+            return operation()
+        finally:
+            state['timings'].append({'stage': stage, 'service': name,
+                                     'durationSeconds': round(time.monotonic() - started, 3)})
+    if plan.get('sharedVerification'):
+        try:
+            state['checks'] = measured('verify', None, lambda: verify_repository(repository, workspace / 'check-shared', request))
+            state['checks'].update(verification_scope='repository', verification_service_group=plan['serviceOrder'])
+        except CheckFailure as exc:
+            state['checks'] = dict(exc.report, verification_scope='repository')
+            raise
+    for name in ([] if plan.get('sharedVerification') else plan['serviceOrder']):
+        config = plan['services'][name]
+        try:
+            reports[name] = measured('verify', name, lambda: verify_repository(
+                inside(repository, config['verificationDirectory']), workspace / ('check-' + name), request))
+        except CheckFailure as exc:
+            state['checks'] = dict(exc.report, failed_service=name)
+            raise
+    if not plan.get('sharedVerification'):
+        state['checks'] = verification_report(reports)
+    return build_and_deploy_service_group(repository, workspace, request, namespace, commit_sha, plan, args, state)
+
+
+def build_and_deploy_service_group(repository: Path, workspace: Path, request: str, namespace: str,
+                                   commit_sha: str, plan: dict, args: argparse.Namespace, state: dict) -> dict:
+    """Deployment phase after real checks; also used by local phase-by-phase diagnostics.
+
+    The HTTP/CLI entry point always obtains state['checks'] from verify_repository.
+    There is no request option for supplying or skipping verification.
+    """
+    from multi_service import render_services, workload_name
+    if state.get('checks', {}).get('outcome') != 'passed':
+        raise RuntimeError('Service deployment requires successful repository checks.')
+    state.setdefault('images', {})
+    state.setdefault('loaded', set())
+    state.setdefault('timings', [])
+    def measured(stage, name, operation):
+        state.update(stage=stage, service=name)
+        started = time.monotonic()
+        try:
+            return operation()
+        finally:
+            state['timings'].append({'stage':stage, 'service':name,
+                                     'durationSeconds':round(time.monotonic()-started,3)})
+    for name in plan['serviceOrder']:
+        config = plan['services'][name]
+        image = f'codereferee/{request}/svc-{name}:{commit_sha[:12]}'
+        state['images'][name] = image
+        dockerfile = inside(repository, config['dockerfile'])
+        if config.get('generatedDockerfile'):
+            dockerfile = workspace / (name + '.Dockerfile')
+            dockerfile.write_text(config['generatedDockerfile'], encoding='utf-8')
+        measured('build', name, lambda: run(['docker', 'build', '--tag', image,
+            '--label', f'codereferee.request-id={request}', '--file', str(dockerfile),
+            str(inside(repository, config['buildContext']))]))
+        state['loaded'].add(name)  # a load can partially succeed before raising
+        measured('prepare', name, lambda: load_image_into_cluster(image))
+    state.update(stage='prepare', service=None)
+    rendered, target, targets = render_services(plan, namespace, state['images'])
+    documents = list(yaml.safe_load_all(rendered))
+    app_names = {workload_name(name) for name in plan['services']}
+    state['namespace_may_exist'] = True
+    base = [doc for doc in documents if doc['metadata']['name'] not in app_names]
+    apply(yaml.safe_dump_all(base))
+    state['stage'] = 'dependencies'
+    for dependency in plan['dependencies']:
+        measured('dependencies', None, lambda: wait_rollout(namespace, dependency, args.rollout_timeout_seconds))
+    for name in plan['serviceOrder']:
+        workload = workload_name(name)
+        state.update(stage='prepare', service=name)
+        apply(yaml.safe_dump_all([doc for doc in documents if doc['metadata']['name'] == workload]))
+        try:
+            measured('run', name, lambda: wait_rollout(namespace, workload, args.rollout_timeout_seconds))
+        except Exception:
+            try:
+                values, unresolved = manifest_redaction_values(rendered, namespace)
+                state['pod_diagnostics'] = dict(collect_pod_diagnostics(namespace, workload, values,
+                    include_text=not unresolved), service=name)
+            except Exception:
+                state['pod_diagnostics'] = {'pods': [], 'service': name,
+                                            'collection_errors': ['diagnostics_collection_failed']}
+            raise
+    return {'target': target, 'services': targets, 'images': list(state['images'].values()),
+            'image': state['images'][plan['targetService']], 'deploymentProfile': None,
+            'sandboxReport': dict(state['checks'], service_timings=state['timings']),
+            'executionPlan': {'source': plan['source'], 'entryService': plan['entryService'],
+                              'targetService': plan['targetService'], 'serviceOrder': plan['serviceOrder'],
+                              'servicePort': target['servicePort'], 'warnings': plan['warnings']}}
 
 
 def cleanup_workspace(workspace: Path) -> dict:
@@ -354,21 +481,18 @@ def wait_rollout(namespace: str, deployment: str, timeout: int) -> None:
 
 
 def delete_namespace(namespace: str) -> bool:
-    try:
-        result = subprocess.run(kubectl_command("delete", "namespace", namespace, "--ignore-not-found=true", '--wait=true', '--timeout=60s'),
-                       text=True, capture_output=True, env=kubectl_environment(), timeout=70)
-        return result.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+    from namespace_cleanup import delete_namespace_confirmed
+    return delete_namespace_confirmed(namespace)
 
 
 def run(command: list[str], *, cwd: Path | None = None, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
     buildx_config = RUNTIME_ROOT / "buildx"
     buildx_config.mkdir(parents=True, exist_ok=True)
     environment = kubectl_environment()
+    environment['PYTHONIOENCODING'] = 'utf-8'
     # Keep Docker Buildx state out of a developer's shared home directory.
     environment["BUILDX_CONFIG"] = str(buildx_config)
-    completed = subprocess.run(command, cwd=cwd, input=input_text, text=True, capture_output=True,
+    completed = subprocess.run(command, cwd=cwd, input=input_text, text=True, encoding='utf-8', errors='replace', capture_output=True,
                                env=environment, timeout=600)
     if completed.returncode:
         message = completed.stderr.strip() or completed.stdout.strip() or "command failed"

@@ -40,6 +40,9 @@ def main() -> int:
             fault_started = time.monotonic()
             started_at = now_utc()
             scale(target['namespace'], target['deployment'], 0)
+            # An accepted scale request is asynchronous. Restoring too soon can
+            # keep the original Pod alive throughout the supposed outage.
+            wait_for_zero_pods(target, min(60, args.recovery_timeout_seconds))
             fault_probes = []
             deadline = time.monotonic() + args.fault_seconds
             while time.monotonic() < deadline:
@@ -55,9 +58,9 @@ def main() -> int:
             scale(target['namespace'], target['deployment'], original_replicas)
 
     probes = [*baseline["probes"], *fault_probes, *recovery_probes["probes"]]
-    denominator = 'all measured in-cluster HTTP requests during baseline, scale-down, and recovery'
+    denominator = 'all measured in-cluster probe attempts during baseline, scale-down, and recovery'
     baseline_metrics = metrics_from_probes(baseline["probes"])
-    baseline_metrics["error_rate_denominator"] = "all HTTP GET / probes collected during baseline; readiness wait probes are excluded"
+    baseline_metrics["error_rate_denominator"] = "all measured probe attempts during baseline; setup and readiness wait probes are excluded"
     observed_metrics = metrics_from_probes(probes)
     observed_metrics["error_rate_denominator"] = denominator
     output = {
@@ -83,7 +86,8 @@ def main() -> int:
             "target_pod_uid": source_pod.get("uid"),
             "replacement_pod_uid": replacement_pod.get("uid"),
             "target_configuration": configuration,
-            "scale_operation": {"from_replicas": original_replicas, "to_replicas": 0, "restored_replicas": original_replicas},
+            "scale_operation": {"from_replicas": original_replicas, "to_replicas": 0,
+                                "zero_pods_observed": True, "restored_replicas": original_replicas},
             "observation_window": {
                 "baseline_probe_count": args.baseline_probes,
                 "fault_seconds": args.fault_seconds,
@@ -100,6 +104,20 @@ def main() -> int:
         args.output.write_text(rendered + "\n", encoding="utf-8")
     print(rendered)
     return 0 if recovered else 1
+
+
+def wait_for_zero_pods(target: dict, seconds: int) -> None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        completed = subprocess.run(kubectl_command('-n', target['namespace'], 'get', 'pods',
+            '-l', target['labelSelector'], '-o', 'json'), capture_output=True, text=True,
+            env=kubectl_environment(), timeout=30)
+        if completed.returncode:
+            raise RuntimeError('Cannot confirm scale-down: ' + completed.stderr.strip())
+        if not json.loads(completed.stdout).get('items'):
+            return
+        time.sleep(0.5)
+    raise RuntimeError('Scale-down was not observed: target Pods did not disappear before the confirmation deadline.')
 
 
 def parse_args() -> argparse.Namespace:

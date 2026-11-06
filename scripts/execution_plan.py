@@ -14,8 +14,12 @@ from typing import Any
 
 import yaml
 
-from local_databases import (FORWARDER, IMAGES as LOCAL_DATABASE_IMAGES, container_arguments,
-                             container_environment, detect_local_databases)
+try:
+    from .local_databases import (FORWARDER, IMAGES as LOCAL_DATABASE_IMAGES, container_arguments,
+                                  container_environment, detect_local_databases)
+except ImportError:
+    from local_databases import (FORWARDER, IMAGES as LOCAL_DATABASE_IMAGES, container_arguments,
+                                 container_environment, detect_local_databases)
 
 try:
     import tomllib
@@ -204,6 +208,9 @@ def resolve_plan(repository: Path, explicit_profile: str | None = None) -> dict[
     config_path = inside(repository, '.codereferee/validation.yaml')
     if config_path.is_file():
         data = read_yaml(config_path)
+        if data.get('version') == 2:
+            from multi_service import resolve_services
+            return resolve_services(repository, data)
         if isinstance(data.get('deploymentProfile'), str):
             return {'source': 'repository_profile', 'profile': data['deploymentProfile']}
         if data.get('version') != 1 or not isinstance(data.get('service'), dict):
@@ -248,6 +255,8 @@ def detected_plan_with_overrides(repository: Path, overrides: dict) -> dict[str,
     plan['replicas'] = replicas
     if 'resources' in overrides:
         plan['resources'] = normalize_resources(overrides['resources'])
+        plan['resourceSources'] = {key: 'repository_configuration' if key in overrides['resources'] else 'sandbox_default'
+                                   for key in ('cpu', 'memory')}
     plan['overrides'] = sorted(overrides)
     return plan
 
@@ -324,6 +333,8 @@ def normalize_service(repository: Path, service: dict) -> dict:
         raise ConfigurationRequired('env must contain explicit reproduction values, not host environment interpolation.')
     result['env'] = {k: str(v) for k, v in environment.items()}
     result['resources'] = normalize_resources(service.get('resources', {}))
+    result['resourceSources'] = {key: 'repository_configuration' if key in service.get('resources', {}) else 'sandbox_default'
+                                 for key in ('cpu', 'memory')}
     return result
 
 
@@ -351,8 +362,13 @@ def normalize_dependencies(dependencies: dict) -> dict:
     for name, dependency in dependencies.items():
         if name == 'repository-api' or not re.fullmatch(r'[a-z][a-z0-9-]{0,40}', name) or not isinstance(dependency, dict):
             raise ConfigurationRequired('Invalid dependency declaration.')
-        if dependency.get('type') not in {'redis', 'postgres', 'mysql'} or set(dependency) - {'type', 'probePath', 'probeSpec'}:
+        if dependency.get('type') not in {'redis', 'postgres', 'mysql'} or set(dependency) - {'type', 'probePath', 'probeSpec', 'extensions'}:
             raise ConfigurationRequired('Only ephemeral redis/postgres/mysql dependencies and explicit business probes are supported.')
+        if 'extensions' in dependency and (dependency['type'] != 'postgres' or dependency['extensions'] != ['vector']):
+            raise ConfigurationRequired('Only explicit postgres extensions: [vector] is supported.')
+        if dependency.get('probeSpec') is not None:
+            from business_probe import validate_probe_spec
+            validate_probe_spec(dependency['probeSpec'])
     probe_kinds = [dependency['type'] == 'redis' for dependency in dependencies.values()
                    if dependency.get('probePath') or dependency.get('probeSpec')]
     if len(probe_kinds) != len(set(probe_kinds)):
@@ -517,11 +533,13 @@ def stack_recipe(repository: Path, port: int | None = None) -> dict | None:
 DEPENDENCY_PORTS = {'redis': 6379, 'postgres': 5432, 'mysql': 3306, 'mongo': 27017}
 
 
-def render_plan(plan: dict, namespace: str, image: str) -> tuple[str, dict]:
-    dependency_values = {}
-    for name, dependency in plan['dependencies'].items():
-        dependency_values[name] = {'host': name, 'port': str(DEPENDENCY_PORTS[dependency['type']]),
-            'username': 'codereferee', 'database': 'codereferee', 'password': secrets.token_hex(24)}
+def render_plan(plan: dict, namespace: str, image: str, *, workload: str = 'repository-api',
+                dependency_values: dict | None = None) -> tuple[str, dict]:
+    if dependency_values is None:
+        dependency_values = {}
+        for name, dependency in plan['dependencies'].items():
+            dependency_values[name] = {'host': name, 'port': str(DEPENDENCY_PORTS[dependency['type']]),
+                'username': 'codereferee', 'database': 'codereferee', 'password': secrets.token_hex(24)}
     environment = {}
     for name, value in plan['env'].items():
         for dependency, values in dependency_values.items():
@@ -530,7 +548,7 @@ def render_plan(plan: dict, namespace: str, image: str) -> tuple[str, dict]:
         if '{{' in value or '}}' in value:
             raise ConfigurationRequired('Unknown reproduction environment template.')
         environment[name] = value
-    labels = {'app.kubernetes.io/name': 'repository-api'}
+    labels = {'app.kubernetes.io/name': workload}
     container = {'name': 'api', 'image': image, 'imagePullPolicy': 'IfNotPresent',
         'ports': [{'containerPort': plan['port']}], 'resources': plan['resources'],
         'env': [{'name': key, 'value': value} for key, value in environment.items()],
@@ -556,17 +574,20 @@ def render_plan(plan: dict, namespace: str, image: str) -> tuple[str, dict]:
             'command': ['python', '-c', FORWARDER, *forwards],
             'resources': {'requests': {'cpu': '10m', 'memory': '16Mi'}, 'limits': {'cpu': '200m', 'memory': '64Mi'}}})
     objects = [{'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': namespace}},
-        {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': {'name': 'repository-api', 'namespace': namespace},
+        {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': {'name': workload, 'namespace': namespace},
          'spec': {'replicas': plan['replicas'], 'selector': {'matchLabels': labels},
                   'template': {'metadata': {'labels': labels}, 'spec': {'automountServiceAccountToken': False,
                     'containers': containers, 'terminationGracePeriodSeconds': 10}}}},
-        {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': 'repository-api', 'namespace': namespace},
+        {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': workload, 'namespace': namespace},
          'spec': {'selector': labels, 'ports': [{'port': plan['port'], 'targetPort': plan['port']}]}}]
     target_dependencies = {}
     for name, dependency in plan['dependencies'].items():
         kind = dependency['type']
         dep_port = DEPENDENCY_PORTS[kind]
         dep_image = {'redis': 'redis:7-alpine', 'postgres': 'postgres:17-alpine', 'mysql': 'mysql:8.4'}.get(kind)
+        if dependency.get('extensions') == ['vector']:
+            from local_databases import PGVECTOR_IMAGE
+            dep_image = PGVECTOR_IMAGE
         dep_labels = {'app.kubernetes.io/name': name}
         dep_container = {'name': kind, 'image': dep_image, 'ports': [{'containerPort': dep_port}],
                          'resources': {'requests': {'cpu': '50m', 'memory': '64Mi'}, 'limits': {'cpu': '500m', 'memory': '256Mi'}}}
@@ -606,8 +627,10 @@ def render_plan(plan: dict, namespace: str, image: str) -> tuple[str, dict]:
             key = 'redis' if kind == 'redis' else 'database'
             target_dependencies[key] = dict(dependency, deployment=name, container=kind,
                 labelSelector='app.kubernetes.io/name=' + name)
-    target = {'name': 'repository-api', 'deployment': 'repository-api', 'service': 'repository-api',
-              'servicePort': plan['port'], 'labelSelector': 'app.kubernetes.io/name=repository-api',
+    target = {'name': workload, 'deployment': workload, 'service': workload,
+              'servicePort': plan['port'], 'labelSelector': 'app.kubernetes.io/name=' + workload,
               'probePath': plan['healthPath'], 'dependencies': target_dependencies,
               'probeAcceptsClientErrors': accepts_client_errors}
+    target['resourceConfiguration'] = {'requestedLimits': plan['resources'].get('limits', {}),
+        'sources': plan.get('resourceSources', {key: 'unknown' for key in ('cpu', 'memory')})}
     return yaml.safe_dump_all(objects, sort_keys=False), target

@@ -6,6 +6,7 @@ the cluster and crosses the target Service and Pod interface (including netem).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 import uuid
@@ -13,10 +14,17 @@ from pathlib import Path
 from urllib.request import ProxyHandler, build_opener
 
 from collect_baseline import kubectl_command, kubectl_environment, probe_success_below
+from business_probe import CLIENT_CODE, environment_probe_spec, validate_probe_spec
 from run_pod_kill_experiment import stop_process
 
 
-OBSERVER_CODE = '''import json, time
+def probe_destination(service: str, port: int) -> tuple[str, int]:
+    """The business entry point can differ from the Service receiving the fault."""
+    return (os.getenv('CODEREFEREE_PROBE_SERVICE') or service,
+            int(os.getenv('CODEREFEREE_PROBE_SERVICE_PORT') or port))
+
+
+OBSERVER_CODE = '''import json, time, sys
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.request import build_opener, ProxyHandler, Request
@@ -28,45 +36,30 @@ opener=build_opener(ProxyHandler({}))
 spec=json.loads(os.environ.get("PROBE_SPEC","{}"))
 context=json.loads(os.environ.get("PROBE_CONTEXT","{}"))
 SUCCESS_BELOW=int(os.environ.get("PROBE_SUCCESS_BELOW","400"))
-def render(value):
- if isinstance(value,str):
-  for key,item in context.items(): value=value.replace("${"+key+"}",str(item))
-  return value
- if isinstance(value,dict): return {k:render(v) for k,v in value.items()}
- if isinstance(value,list): return [render(v) for v in value]
- return value
-def call(step):
- step=render(step)
- body=json.dumps(step["body"]).encode() if "body" in step else None
- headers={"Content-Type":"application/json",**step.get("headers",{})}
- request=Request(url.rstrip("/")+step.get("path","/"),data=body,headers=headers,method=step.get("method","GET"))
- with opener.open(request,timeout=timeout) as response:
-  payload=json.loads(response.read() or b"null")
-  for key,path in step.get("extract",{}).items():
-   value=payload
-   for part in path.split("."): value=value[part]
-   context[key]=value
-  return response.status
-for step in spec.get("setup",[]): call(step)
+client=WorkflowClient(url,timeout,spec,context) if spec else None
+if client:
+ try: client.setup()
+ except Exception as exc:
+  print(json.dumps({"probe_setup_error":{"type":type(exc).__name__,"step":client.setup_step,"status_code":client.setup_status}}),file=sys.stderr,flush=True)
+  sys.exit(42)
 class Handler(BaseHTTPRequestHandler):
  protocol_version="HTTP/1.1"
  def do_GET(self):
-  started=time.monotonic(); status=None; error=None
+  started=time.monotonic(); status=None; error=None; ok=False
   try:
-   if spec.get("steps"):
-    for step in spec["steps"]:
-     status=None
-     status=call(step)
+   if client:
+    status,ok,error=client.measured()
    else:
     with opener.open(url,timeout=timeout) as response:
      status=response.status; response.read(1024)
   except HTTPError as exc: status=exc.code; error=str(exc)
   except Exception as exc: error=str(exc)
-  body=json.dumps({"at":datetime.now(timezone.utc).isoformat(),"status_code":status,"latency_ms":round((time.monotonic()-started)*1000,2),"success":status is not None and 200<=status<SUCCESS_BELOW and (error is None or status>=400),"error":error}).encode()
+  body=json.dumps({"at":datetime.now(timezone.utc).isoformat(),"status_code":status,"latency_ms":round((time.monotonic()-started)*1000,2),"success":ok if client else status is not None and 200<=status<SUCCESS_BELOW and (error is None or status>=400),"error":error}).encode()
   self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(body))); self.send_header("Connection","close"); self.end_headers(); self.wfile.write(body); self.wfile.flush(); self.close_connection=True
  def log_message(self,*args): pass
 HTTPServer(("0.0.0.0",8080),Handler).serve_forever()
 '''
+OBSERVER_CODE = CLIENT_CODE + OBSERVER_CODE
 
 
 class InClusterProbe:
@@ -74,12 +67,15 @@ class InClusterProbe:
                  local_port: int = 18080, path: str = '/', spec: dict | None = None,
                  context: dict | None = None):
         self.namespace = namespace
+        service, port = probe_destination(service, port)
         self.name = 'codereferee-observer-' + uuid.uuid4().hex[:8]
         self.url = f'http://{service}.{namespace}.svc.cluster.local:{port}{path}'
         self.timeout = timeout
         self.local_port = local_port
         self.forward = None
-        self.spec = spec or {}
+        # Explicit {} selects the caller's path-only probe, even if the parent
+        # scenario supplies a different authenticated workflow.
+        self.spec = (validate_probe_spec(spec) if spec else {}) if spec is not None else environment_probe_spec() or {}
         self.context = context or {}
         self.log_handles = []
 
@@ -100,7 +96,7 @@ class InClusterProbe:
                 'readinessProbe': {'tcpSocket': {'port': 8080}, 'periodSeconds': 1}}]}}
         try:
             self.run('apply', '-f', '-', input_text=json.dumps(manifest))
-            self.run('wait', '--for=condition=Ready', f'pod/{self.name}', '--timeout=120s')
+            self.wait_ready()
             # kubectl emits a line for every connection. Undrained PIPE buffers
             # can block port-forward on Windows during a long observation.
             log_dir = Path(__file__).resolve().parents[1] / '.runtime' / 'probe-logs'
@@ -120,8 +116,35 @@ class InClusterProbe:
                         raise RuntimeError('Observer port-forward failed; inspect .runtime/probe-logs.')
                     time.sleep(0.2)
             raise RuntimeError('Observer port-forward did not become available.')
-        except BaseException:
+        except BaseException as exc:
+            diagnosis = {}
+            if isinstance(exc, Exception):
+                try:
+                    pod = json.loads(self.run('get', 'pod', self.name, '-o', 'json').stdout)
+                    diagnosis['phase'] = pod.get('status', {}).get('phase')
+                    diagnosis['scheduling_reasons'] = [item.get('reason') for item in pod.get('status', {}).get('conditions', [])
+                                                      if item.get('type') == 'PodScheduled' and item.get('status') == 'False']
+                    diagnosis['containers'] = [
+                        {'name': item.get('name'), 'waiting_reason': (item.get('state', {}).get('waiting') or {}).get('reason'),
+                         'exit_code': (item.get('state', {}).get('terminated') or {}).get('exitCode')}
+                        for item in pod.get('status', {}).get('containerStatuses', [])]
+                    logs = self.run('logs', self.name, '--tail=10').stdout
+                    for line in logs.splitlines():
+                        try:
+                            error = json.loads(line).get('probe_setup_error')
+                            if isinstance(error, dict):
+                                diagnosis['setup'] = {key: error.get(key) for key in ('step', 'status_code')}
+                                if error.get('type') in {'TimeoutError', 'ConnectionRefusedError', 'gaierror',
+                                    'JSONDecodeError', 'KeyError', 'ValueError', 'RuntimeError', 'RemoteDisconnected',
+                                    'ConnectionResetError', 'IncompleteRead', 'InvalidURL', 'BadStatusLine', 'OSError'}:
+                                    diagnosis['setup']['error_class'] = error['type']
+                        except (ValueError, AttributeError):
+                            pass
+                except Exception:
+                    pass
             self.__exit__(None, None, None)
+            if diagnosis:
+                raise RuntimeError('Observer startup failed: ' + json.dumps(diagnosis)) from exc
             raise
 
     def probe(self) -> dict:
@@ -139,9 +162,26 @@ class InClusterProbe:
                     time.sleep(0.2)
         raise RuntimeError('Observer transport failed after 3 attempts: ' + '; '.join(errors))
 
+    def wait_ready(self):
+        deadline = time.monotonic() + 120
+        while True:
+            pod = json.loads(self.run('get', 'pod', self.name, '-o', 'json').stdout)
+            status = pod.get('status', {})
+            if status.get('phase') in ('Failed', 'Succeeded'):
+                raise RuntimeError('Observer exited before becoming ready.')
+            if any(item.get('type') == 'Ready' and item.get('status') == 'True' for item in status.get('conditions', [])):
+                return
+            waiting = [(item.get('state', {}).get('waiting') or {}).get('reason')
+                       for item in status.get('containerStatuses', [])]
+            if any(reason in ('ErrImagePull', 'ImagePullBackOff', 'CreateContainerConfigError', 'InvalidImageName') for reason in waiting):
+                raise RuntimeError('Observer container could not start.')
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Observer did not become ready within 120 seconds.')
+            time.sleep(1)
+
     def request_once(self) -> dict:
         with build_opener(ProxyHandler({})).open(f'http://127.0.0.1:{self.local_port}/',
-                                               timeout=self.timeout + 5) as response:
+                                               timeout=self.timeout * max(1, len(self.spec.get("steps", []))) + 5) as response:
             return json.loads(response.read())
 
     def collect(self, count: int) -> list[dict]:

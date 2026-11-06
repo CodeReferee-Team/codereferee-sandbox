@@ -49,7 +49,7 @@ def main():
     engine = f'codereferee-dependency-{args.scenario.split("_")[1]}-{int(time.time())}'
     probes = []
     with InClusterProbe(args.namespace, args.service, args.service_port, local_port=18083,
-                        path=config.get('probePath', '/'), spec=config.get('probeSpec'), context=context) as observer:
+                        path=config.get('probePath', '/'), spec=config.get('probeSpec', {}), context=context) as observer:
         baseline = observer.collect(5)
         if not all(p['success'] for p in baseline):
             raise RuntimeError('Business probe baseline failed; dependency fault was skipped.')

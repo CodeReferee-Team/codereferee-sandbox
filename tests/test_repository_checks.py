@@ -13,6 +13,50 @@ from repository_checks import CheckFailure, check_plan, verify_repository
 
 
 class RepositoryChecksTests(unittest.TestCase):
+    def test_declared_database_has_no_host_or_arbitrary_image_override(self):
+        from repository_checks import declared_check_databases
+        value = {'postgres':{'username':'root','password':'dummy','database':'dear_test'}}
+        self.assertEqual(declared_check_databases(value)['postgres']['source'], 'verification.databases')
+        self.assertEqual(declared_check_databases({'postgres':dict(value['postgres'], extensions=['vector'])})['postgres']['extensions'], ['vector'])
+        with self.assertRaises(ValueError): declared_check_databases({'redis':{'extensions':['vector']}})
+        for key in ('host','image','port'):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                declared_check_databases({'postgres':dict(value['postgres'], **{key:'external'})})
+
+    @patch('repository_checks.subprocess.run')
+    def test_declared_vector_check_database_uses_private_network_and_is_cleaned(self, run):
+        self.write('build.gradle', 'plugins { id "java" }')
+        self.write('gradlew', '#!/bin/sh\n')
+        self.write('.codereferee/validation.yaml', 'verification:\n  databases:\n    postgres:\n      username: test\n      password: dummy\n      database: testdb\n      extensions: [vector]\n')
+        run.return_value = subprocess.CompletedProcess([], 0, '', '')
+        report = verify_repository(self.root, self.cache, 'vector-test')
+        database = next(c.args[0] for c in run.call_args_list if '--detach' in c.args[0])
+        self.assertIn('pgvector/pgvector:0.8.7-pg17', database)
+        self.assertNotIn('-p', database)
+        self.assertNotIn('--publish', database)
+        check = next(c.args[0] for c in run.call_args_list if '--workdir' in c.args[0])
+        self.assertTrue(check[check.index('--network') + 1].startswith('container:codereferee-check-db-postgres-'))
+        self.assertTrue(report['check_database_cleanup']['removed'])
+        self.assertTrue(report['check_cache_cleanup']['removed'])
+
+    @patch('repository_checks.subprocess.run')
+    def test_timed_out_database_creation_still_cleans_attempted_container(self, run):
+        self.write('build.gradle', 'plugins { id "java" }')
+        self.write('gradlew', '#!/bin/sh\n')
+        self.write('.codereferee/validation.yaml', 'verification:\n  databases:\n    postgres: {username: test, password: dummy, database: testdb}\n')
+        def execute(command, **kwargs):
+            if '--detach' in command:
+                raise subprocess.TimeoutExpired(command, 1)
+            return subprocess.CompletedProcess(command, 0, '', '')
+        run.side_effect = execute
+        with self.assertRaises(repository_checks.CheckFailure) as caught:
+            verify_repository(self.root, self.cache, 'db-timeout')
+        self.assertTrue(caught.exception.report['infrastructure_error'])
+        self.assertTrue(caught.exception.report['timed_out'])
+        self.assertTrue(caught.exception.report['check_database_cleanup']['removed'])
+        removal = next(c.args[0] for c in run.call_args_list if '--volumes' in c.args[0])
+        self.assertTrue(any(name.startswith('codereferee-check-db-postgres-') for name in removal))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -65,12 +109,35 @@ class RepositoryChecksTests(unittest.TestCase):
 
         step = next(c.args[0] for c in run.call_args_list if '--workdir' in c.args[0])
         self.assertIn('target=/workspace', ' '.join(step))
-        if repository_checks.CHECK_OWNER:
-            self.assertEqual(repository_checks.CHECK_OWNER, step[step.index('--user') + 1])
-            # 이미지에 없는 uid 로 돌면 HOME 이 쓰기 불가가 된다.
-            self.assertIn('HOME=/cache/home', step)
-        else:
-            self.assertNotIn('--user', step)
+        self.assertEqual(repository_checks.CHECK_OWNER or '1000:1000', step[step.index('--user') + 1])
+        self.assertIn('HOME=/cache/home', step)
+
+    @patch('repository_checks.subprocess.run')
+    def test_cache_setup_and_jvm_process_use_the_same_owner_on_both_platforms(self, run):
+        self.write('build.gradle', 'plugins { id "java" }')
+        self.write('gradlew', '#!/bin/sh\n')
+        for owner in (None, '1001:1001'):
+            with self.subTest(owner=owner), patch.object(repository_checks, 'CHECK_OWNER', owner):
+                run.reset_mock()
+                run.return_value = subprocess.CompletedProcess([], 0, '', '')
+                verify_repository(self.root, self.cache, 'test')
+                setup = next(c.args[0] for c in run.call_args_list if '--cap-add' in c.args[0])
+                step = next(c.args[0] for c in run.call_args_list if '--workdir' in c.args[0])
+                expected = owner or '1000:1000'
+                self.assertIn('chown ' + expected, setup[-1])
+                self.assertEqual(step[step.index('--user') + 1], expected)
+                self.assertIn('HOME=/cache/home', step)
+                self.assertNotIn('--cap-add', step)
+
+    @patch('repository_checks.subprocess.run')
+    def test_windows_python_checks_also_use_the_cache_owner(self, run):
+        self.write('app.py', 'print("ready")')
+        run.return_value = subprocess.CompletedProcess([], 0, '', '')
+        with patch.object(repository_checks, 'CHECK_OWNER', None):
+            verify_repository(self.root, self.cache, 'test')
+        step = next(c.args[0] for c in run.call_args_list if '--workdir' in c.args[0])
+        self.assertEqual(step[step.index('--user') + 1], '1000:1000')
+        self.assertIn('HOME=/cache/home', step)
 
     @patch('repository_checks.subprocess.run')
     def test_cache_volume_is_owned_by_the_user_that_runs_the_checks(self, run):

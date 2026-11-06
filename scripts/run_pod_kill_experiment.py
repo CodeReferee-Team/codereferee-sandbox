@@ -354,7 +354,7 @@ def metrics_from_probes(probes: list[dict[str, Any]]) -> dict[str, Any]:
         "probe_count": len(probes),
         "success_count": successes,
         "failure_count": len(probes) - successes,
-        "error_rate_denominator": "all HTTP GET / probes collected during baseline, recovery, and replacement verification; readiness wait probes are excluded",
+        "error_rate_denominator": "all measured probe attempts; a configured workflow counts once; setup/readiness probes are excluded",
         "cpu_usage_percent": None,
         "memory_usage_mb": None,
         "restart_count": 0,
