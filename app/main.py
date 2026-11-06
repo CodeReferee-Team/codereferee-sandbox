@@ -639,16 +639,8 @@ def deploy_repository(request: RepositoryValidationRequest, budget: Budget | Non
 
 
 def cleanup_namespace(namespace: str) -> bool:
-    """Best-effort cleanup; evidence has already been returned or recorded."""
-    environment = os.environ.copy()
-    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
-        environment.pop(key, None)
-    try:
-        completed = subprocess.run(kubectl_command("delete", "namespace", namespace, "--ignore-not-found=true", "--wait=true", '--timeout=60s'),
-                       cwd=PROJECT_ROOT, capture_output=True, text=True, env=environment, timeout=70)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return completed.returncode == 0
+    from scripts.namespace_cleanup import delete_namespace_confirmed
+    return delete_namespace_confirmed(namespace)
 
 
 def timeout_code(exc: StageTimeout) -> str:
