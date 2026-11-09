@@ -496,6 +496,10 @@ def run(command: list[str], *, cwd: Path | None = None, input_text: str | None =
                                env=environment, timeout=600)
     if completed.returncode:
         message = completed.stderr.strip() or completed.stdout.strip() or "command failed"
+        static_configuration = re.search(
+            r'(?:^|\s)Error: (CODEREFEREE_STATIC_CONFIGURATION_REQUIRED:[^\r\n]+)', message)
+        if command[:2] == ['docker', 'build'] and static_configuration:
+            raise ConfigurationRequired(static_configuration.group(1))
         raise RuntimeError(f"{' '.join(command[:3])}: {message}")
     return completed
 

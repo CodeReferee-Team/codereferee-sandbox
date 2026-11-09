@@ -42,7 +42,7 @@ def resolve_services(repository: Path, data: dict) -> dict:
         if 'dockerfile' not in service and not inside(repository, 'Dockerfile').is_file():
             generated = stack_recipe(context, port=service.get('port'))
             if generated:
-                service['generatedDockerfile'] = generated['generatedDockerfile']
+                service = dict(generated, **service)
         normalized[name] = dict(normalize_service(repository, service), dependsOn=after,
                                 verificationDirectory=verification)
     entry = data.get('entryService')
