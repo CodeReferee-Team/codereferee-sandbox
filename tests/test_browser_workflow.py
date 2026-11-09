@@ -12,7 +12,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from execution_plan import ConfigurationRequired, resolve_plan
-from browser_probe import BrowserProbeRunner, validate_browser_probe
+from browser_probe import BROWSER_CODE, BrowserProbeRunner, validate_browser_probe
 from http_proxy import validate_proxy_routes, proxy_config
 from multi_service import render_services
 from app.main import (ChaosTarget, RepositoryValidationRequest, apply_browser_report,
@@ -30,6 +30,10 @@ TARGET = {'namespace': 'codereferee-browser-test', 'deployment': 'api', 'service
 
 
 class BrowserContractTests(unittest.TestCase):
+    def test_embedded_runner_compiles_and_bounds_complete_journey(self):
+        compile(BROWSER_CODE, '<browser-pod>', 'exec')
+        self.assertIn("async with asyncio.timeout(spec.get('timeoutSeconds', 30))", BROWSER_CODE)
+
     def test_declarative_journey_and_bounded_input(self):
         self.assertEqual(validate_browser_probe(SPEC), SPEC)
         for spec in ({'steps': []}, {'steps': [{'action': 'eval', 'value': 'alert(1)'}]},
