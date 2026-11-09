@@ -79,99 +79,136 @@ def validate_browser_probe(spec):
 # No DOM, response body, selector, entered value, URL query or browser exception
 # text is returned. Reproduction credentials stay inside the disposable Pod.
 BROWSER_CODE = r'''
-import json,os,time,uuid
+import asyncio
+import json
+import os
+import time
+import uuid
 from urllib.parse import urlsplit
-started=time.monotonic()
-report={'schemaVersion':'browser-probe.v1','observationStatus':'infrastructure_error',
-        'exitCode':None,'completedSteps':0,'failedStep':None,'errorCode':None,
-        'pageErrorCount':0,'blockedRequestCount':0,'httpStatusCounts':{}}
+started = time.monotonic()
+report = {'schemaVersion': 'browser-probe.v1', 'observationStatus': 'infrastructure_error',
+          'exitCode': None, 'completedSteps': 0, 'failedStep': None, 'errorCode': None,
+          'pageErrorCount': 0, 'blockedRequestCount': 0, 'httpStatusCounts': {}}
 def emit():
-    report['durationMillis']=round((time.monotonic()-started)*1000)
-    print(json.dumps(report),flush=True)
+    report['durationMillis'] = round((time.monotonic() - started) * 1000)
+    print(json.dumps(report), flush=True)
 try:
-    from playwright.sync_api import sync_playwright,expect,TimeoutError as BrowserTimeout
+    from playwright.async_api import async_playwright, expect, TimeoutError as BrowserTimeout
 except ImportError:
-    report['errorCode']='browser_runtime_missing';emit();raise SystemExit(2)
-spec=json.loads(os.environ['BROWSER_SPEC']);base=os.environ['TARGET_URL'].rstrip('/')
-origin=urlsplit(base);run_id=uuid.uuid4().hex
+    report['errorCode'] = 'browser_runtime_missing'
+    emit()
+    raise SystemExit(2)
+spec = json.loads(os.environ['BROWSER_SPEC'])
+base = os.environ['TARGET_URL'].rstrip('/')
+origin = urlsplit(base)
+run_id = uuid.uuid4().hex
 def same_origin(url):
-    parsed=urlsplit(url)
-    return (parsed.scheme,parsed.hostname,parsed.port or 80)==(origin.scheme,origin.hostname,origin.port or 80)
+    parsed = urlsplit(url)
+    return (parsed.scheme, parsed.hostname, parsed.port or 80) == (origin.scheme, origin.hostname, origin.port or 80)
 def render(value):
-    if isinstance(value,str):return value.replace('${runId}',run_id)
-    if isinstance(value,dict):return {k:render(v) for k,v in value.items()}
-    if isinstance(value,list):return [render(v) for v in value]
+    if isinstance(value, str):
+        return value.replace('${runId}', run_id)
+    if isinstance(value, dict):
+        return {key: render(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [render(item) for item in value]
     return value
-def lookup(value,path):
+def lookup(value, path):
     for part in path.split('.'):
-        value=value[int(part)] if isinstance(value,list) else value[part]
+        value = value[int(part)] if isinstance(value, list) else value[part]
     return value
-os.makedirs('/tmp/browser-home',exist_ok=True)
-with sync_playwright() as playwright:
-    try:
-        browser=playwright.chromium.launch(headless=True,chromium_sandbox=True)
-    except Exception:
-        report['errorCode']='browser_launch_failed';emit();raise SystemExit(2)
-    try:
-        report['browserVersion']=browser.version
-        context=browser.new_context(service_workers='block',accept_downloads=False)
-        def route_request(route):
-            try:
-                permitted=same_origin(route.request.url)
-            except ValueError:
-                permitted=False
-            if permitted:route.continue_()
+async def journey(browser):
+    context = await browser.new_context(service_workers='block', accept_downloads=False)
+    async def route_request(route):
+        try:
+            permitted = same_origin(route.request.url)
+        except ValueError:
+            permitted = False
+        if permitted:
+            await route.continue_()
+        else:
+            report['blockedRequestCount'] += 1
+            await route.abort()
+    async def close_socket(socket):
+        await socket.close()
+    await context.route('**/*', route_request)
+    await context.route_web_socket('**/*', close_socket)
+    page = await context.new_page()
+    def page_error(_):
+        report['pageErrorCount'] += 1
+    def response_event(response):
+        key = str(response.status)
+        report['httpStatusCounts'][key] = report['httpStatusCounts'].get(key, 0) + 1
+    page.on('pageerror', page_error)
+    page.on('response', response_event)
+    milliseconds = spec.get('stepTimeoutSeconds', 5) * 1000
+    page.set_default_timeout(milliseconds)
+    page.set_default_navigation_timeout(milliseconds)
+    for index, raw in enumerate(spec['steps']):
+        report['failedStep'] = index
+        step = render(raw)
+        action = step['action']
+        if action == 'goto':
+            response = await page.goto(base + step['path'], wait_until='domcontentloaded')
+            if response is None or not 200 <= response.status < 300:
+                raise AssertionError('navigation status')
+        elif action == 'fill':
+            await page.locator(step['selector']).fill(step['value'])
+        elif action == 'click':
+            expected = step.get('expectResponse')
+            if expected:
+                async with page.expect_response(lambda response: same_origin(response.url)
+                        and response.url == base + expected['path']) as pending:
+                    await page.locator(step['selector']).click()
+                response = await pending.value
+                if response.status != expected['status']:
+                    raise AssertionError('response status')
+                if expected.get('expect'):
+                    if len(await response.body()) > 1048576:
+                        raise AssertionError('response size')
+                    payload = await response.json()
+                    for path, value in expected['expect'].items():
+                        if lookup(payload, path) != value:
+                            raise AssertionError('response content')
             else:
-                report['blockedRequestCount']+=1;route.abort()
-        context.route('**/*',route_request)
-        context.route_web_socket('**/*',lambda socket:socket.close())
-        page=context.new_page()
-        def page_error(_):report['pageErrorCount']+=1
-        def response_event(response):
-            key=str(response.status)
-            report['httpStatusCounts'][key]=report['httpStatusCounts'].get(key,0)+1
-        page.on('pageerror',page_error);page.on('response',response_event)
-        deadline=time.monotonic()+spec.get('timeoutSeconds',30)
-        report.update(observationStatus='observed',exitCode=1)
-        for index,raw in enumerate(spec['steps']):
-            report['failedStep']=index
-            step=render(raw);remaining=deadline-time.monotonic()
-            if remaining<=0:raise BrowserTimeout('journey deadline')
-            milliseconds=max(1,min(spec.get('stepTimeoutSeconds',5),remaining)*1000)
-            page.set_default_timeout(milliseconds);page.set_default_navigation_timeout(milliseconds)
-            action=step['action']
-            if action=='goto':
-                response=page.goto(base+step['path'],wait_until='domcontentloaded')
-                if response is None or not 200<=response.status<300:raise AssertionError('navigation status')
-            elif action=='fill':page.locator(step['selector']).fill(step['value'])
-            elif action=='click':
-                expected=step.get('expectResponse')
-                if expected:
-                    with page.expect_response(lambda response:same_origin(response.url) and
-                            response.url==base+expected['path'],timeout=milliseconds) as pending:
-                        page.locator(step['selector']).click()
-                    response=pending.value
-                    if response.status!=expected['status']:raise AssertionError('response status')
-                    if expected.get('expect'):
-                        if len(response.body())>1048576:raise AssertionError('response size')
-                        payload=response.json()
-                        for path,value in expected['expect'].items():
-                            if lookup(payload,path)!=value:raise AssertionError('response content')
-                else:page.locator(step['selector']).click()
-            elif action=='assertText':expect(page.locator(step['selector'])).to_contain_text(step['text'],timeout=milliseconds)
-            elif action=='assertVisible':expect(page.locator(step['selector'])).to_be_visible(timeout=milliseconds)
-            if not same_origin(page.url):raise AssertionError('navigation origin')
-            report['completedSteps']+=1
-        if report['blockedRequestCount']:raise AssertionError('external request')
-        report.update(exitCode=0,failedStep=None)
-    except BrowserTimeout:
-        report['errorCode']='browser_action_timeout'
-    except Exception:
-        report['errorCode']='browser_assertion_failed'
-    finally:
-        browser.close()
+                await page.locator(step['selector']).click()
+        elif action == 'assertText':
+            await expect(page.locator(step['selector'])).to_contain_text(step['text'], timeout=milliseconds)
+        elif action == 'assertVisible':
+            await expect(page.locator(step['selector'])).to_be_visible(timeout=milliseconds)
+        if not same_origin(page.url):
+            raise AssertionError('navigation origin')
+        report['completedSteps'] += 1
+    if report['blockedRequestCount']:
+        raise AssertionError('external request')
+    report.update(exitCode=0, failedStep=None)
+
+
+async def main():
+    os.makedirs('/tmp/browser-home', exist_ok=True)
+    async with async_playwright() as playwright:
+        try:
+            browser = await playwright.chromium.launch(headless=True,chromium_sandbox=True)
+        except Exception:
+            report['errorCode'] = 'browser_launch_failed'
+            return
+        report['browserVersion'] = browser.version
+        report.update(observationStatus='observed', exitCode=1)
+        try:
+            # Includes response body reads and the complete click/response pair.
+            async with asyncio.timeout(spec.get('timeoutSeconds', 30)):
+                await journey(browser)
+        except (BrowserTimeout, TimeoutError):
+            report['errorCode'] = 'browser_action_timeout'
+        except Exception:
+            report['errorCode'] = 'browser_assertion_failed'
+        finally:
+            await browser.close()
+
+
+asyncio.run(main())
 emit()
-raise SystemExit(0 if report['exitCode']==0 else 1)
+raise SystemExit(2 if report['exitCode'] is None else report['exitCode'])
 '''
 
 
