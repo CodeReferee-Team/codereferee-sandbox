@@ -72,6 +72,7 @@ sudo docker exec codereferee-control-plane crictl rmi --prune
 
 - [Chaos v1 Sandbox 계약](docs/chaos-v1-contract.md)
 - [범용 레포 실행 설정·자동 탐색](docs/repository-execution-plans.md)
+- [Vite 정적 프론트 실행·검증 범위](docs/frontend-static-validation.md)
 - [validation.yaml 작성법](docs/validation-yaml.md)
 - [Runtime Chaos 시나리오·검사 묶음·전체 연동](docs/runtime-chaos-scenarios.md)
 - [Litmus 전체·단일 Pod 장애 범위](docs/single-pod-chaos-scope.md)
