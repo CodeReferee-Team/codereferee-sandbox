@@ -80,7 +80,32 @@ def node_major(root: Path, package: dict | None = None) -> str:
         if isinstance(engine, str):
             bounds = [int(m[1]) for part in engine.split('||') if (m := re.search(r'(\d+)', part))]
             wanted = min(bounds) if bounds else None
-    return str(min(max(wanted or 20, 20), 26))
+    dependencies = (package.get('dependencies') or {}) if isinstance(package, dict) else {}
+    development = (package.get('devDependencies') or {}) if isinstance(package, dict) else {}
+    default = 22 if isinstance(dependencies, dict) and isinstance(development, dict) and 'vite' in {**dependencies, **development} else 20
+    return str(min(max(wanted or default, 20), 26))
+
+
+def node_commands(root: Path, package: dict) -> tuple[list[str], list[str]]:
+    """Use the repository's pinned package manager for checks and image builds."""
+    manager = package.get('packageManager', '')
+    if not isinstance(manager, str):
+        raise ConfigurationRequired('packageManager must be a versioned package manager string.')
+    if inside(root, 'pnpm-lock.yaml').is_file() and inside(root, 'package-lock.json').is_file():
+        raise ConfigurationRequired('Conflicting Node lockfiles require an explicit package manager/build contract.')
+    if manager.startswith('pnpm@'):
+        if not re.fullmatch(r'pnpm@\d+\.\d+\.\d+(?:\+sha(?:224|512)\.[A-Za-z0-9+/=]+)?', manager):
+            raise ConfigurationRequired('pnpm requires an exact packageManager version.')
+        prefix = ['npx', '--yes', '--package=' + manager.split('+')[0], 'pnpm']
+        frozen = ['--frozen-lockfile'] if inside(root, 'pnpm-lock.yaml').is_file() else []
+        return prefix + ['install', *frozen], prefix + ['run']
+    if manager and not re.fullmatch(r'npm@\d+\.\d+\.\d+', manager):
+        raise ConfigurationRequired('This Node runner supports npm or pinned pnpm; other package managers require additional runner support.')
+    if not manager and any(inside(root, name).is_file() for name in ('pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb')):
+        raise ConfigurationRequired('Declare a pinned supported packageManager for this lockfile.')
+    prefix = ['npx', '--yes', '--package=' + manager, 'npm'] if manager else ['npm']
+    install = 'ci' if inside(root, 'package-lock.json').is_file() else 'install'
+    return prefix + [install], prefix + ['run']
 
 
 def _poetry_spec(name: str, constraint) -> str:
@@ -233,7 +258,7 @@ def resolve_plan(repository: Path, explicit_profile: str | None = None) -> dict[
         elif 'dockerfile' not in service and not inside(repository, 'Dockerfile').is_file():
             generated = stack_recipe(context, port=service.get('port'))
             if generated:
-                service.update(generatedDockerfile=generated['generatedDockerfile'])
+                service = dict(generated, **service)
         plan = normalize_service(repository, service)
         plan.update(source='repository_configuration', dependencies=normalize_dependencies(data.get('dependencies', {})))
         return plan
@@ -466,16 +491,37 @@ def stack_recipe(repository: Path, port: int | None = None) -> dict | None:
         if not isinstance(package, dict) or not isinstance(package.get('scripts', {}), dict):
             raise ConfigurationRequired('package.json scripts must be an object.')
         scripts = package.get('scripts', {})
+        if any(not isinstance(package.get(key, {}), dict) for key in ('dependencies', 'devDependencies')):
+            raise ConfigurationRequired('package.json dependencies must be objects.')
+        dependencies = {**package.get('dependencies', {}), **package.get('devDependencies', {})}
+        entry = scripts.get('start') or scripts.get('dev')
+        vite_entry = not entry or isinstance(entry, str) and re.match(r'^\s*vite(?:\s|$)', entry)
+        if 'vite' in dependencies and inside(repository, 'index.html').is_file() and vite_entry:
+            try:
+                from .vite_static import build_options, dockerfile
+            except ImportError:
+                from vite_static import build_options, dockerfile
+            try:
+                options = build_options(scripts.get('build', ''))
+            except ValueError as exc:
+                raise ConfigurationRequired(str(exc)) from exc
+            static_port = port if port is not None else 8080
+            if isinstance(static_port, bool) or not isinstance(static_port, int) or not 1024 <= static_port <= 65535:
+                raise ConfigurationRequired('Generated static frontend service.port must be in 1024..65535.')
+            install, command = node_commands(repository, package)
+            node = node_major(repository, package)
+            return {'port': static_port, 'healthPath': '/',
+                    'generatedDockerfile': dockerfile(node, install, command + ['build'], options, static_port)}
         script = 'start' if isinstance(scripts.get('start'), str) else ('dev' if isinstance(scripts.get('dev'), str) else None)
         if script is None:
             return None
-        install = 'npm ci' if inside(repository, 'package-lock.json').is_file() else 'npm install'
+        install, command = node_commands(repository, package)
         node_port = port if port is not None else (node_entry_port(repository, package, script) or 3000)
         if isinstance(node_port, bool) or not isinstance(node_port, int) or not 1 <= node_port <= 65535:
             raise ConfigurationRequired('service.port must be an integer in 1..65535.')
         recipe = (f"FROM node:{node_major(repository, package)}-bookworm-slim\nWORKDIR /app\n"
                   "RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*\n"
-                  f"COPY . .\nRUN {install}\nENV PORT={node_port} HOST=0.0.0.0\nEXPOSE {node_port}\nCMD {json.dumps(['npm', 'run', script], separators=(',', ':'))}\n")
+                  f"COPY . .\nRUN {json.dumps(install)}\nENV PORT={node_port} HOST=0.0.0.0\nEXPOSE {node_port}\nCMD {json.dumps(command + [script], separators=(',', ':'))}\n")
         return {'port': node_port, 'generatedDockerfile': recipe}
     for entry in ('app.py', 'main.py', 'app/main.py'):
         path = inside(repository, entry)

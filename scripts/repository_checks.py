@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from collect_baseline import kubectl_environment
 from local_databases import IMAGES as DATABASE_IMAGES, PGVECTOR_IMAGE, container_arguments, container_environment, detect_local_databases, readiness_command
-from execution_plan import MAVEN_IMAGES, ConfigurationRequired, inside, java_release, node_major, poetry_requirements, read_yaml
+from execution_plan import MAVEN_IMAGES, ConfigurationRequired, inside, java_release, node_commands, node_major, poetry_requirements, read_yaml
 
 
 class CheckFailure(RuntimeError):
@@ -76,9 +76,10 @@ def check_plan(repository: Path) -> dict:
         scripts = package.get('scripts', {}) if isinstance(package, dict) else None
         if not isinstance(scripts, dict): raise ConfigurationRequired('package.json scripts must be an object.')
         image = f'node:{node_major(root, package)}-bookworm'
-        install = [['npm', 'ci' if inside(root, 'package-lock.json').is_file() else 'install']]
-        if scripts.get('build'): build = ['npm', 'run', 'build']
-        if scripts.get('test'): test = ['npm', 'test']
+        installation, command = node_commands(root, package)
+        install = [installation]
+        if scripts.get('build'): build = command + ['build']
+        if scripts.get('test'): test = (['npm', 'test'] if command == ['npm', 'run'] else command + ['test'])
     elif stack == 'python':
         # slim에는 gcc·pkg-config가 없어 휠이 없는 패키지(multidict, PyICU)가 설치되지 않는다.
         # 검사 컨테이너는 root가 아니라 apt를 못 쓰므로 빌드 도구가 든 이미지를 쓴다. Node 검사와 같은 bookworm이다.
