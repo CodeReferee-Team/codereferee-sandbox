@@ -102,6 +102,9 @@ dependencies:
   `main`, `server.js`·`app.js`·`index.js` 순)이 `process.env.PORT`를 읽지 않고 1024 이상 포트를 정확히 하나 박아 두었으면
   그 포트를 쓴다(node-role-based-authorization-api의 4000). 둘 이상이면 고르지 않고 3000으로 두며, 그때는 YAML 필요.
   Node 이미지는 `.nvmrc`(또는 `.node-version`)의 주 버전, 없으면 `engines.node`의 하한을 따른다. 20보다 낮추지 않고 26을 넘지 않는다.
+  Vite SPA는 정적 빌드·Nginx 서빙 경로를 사용한다. 버전 선언이 없는 Vite 앱의 기본은 Node 22이고,
+  검사와 이미지 빌드에서 npm 또는 고정 pnpm을 함께 사용한다. 독립 Node 서버의 선언은 유지한다.
+  지원 조건·설정·실측은 [프론트 정적 실행](frontend-static-validation.md)을 참고한다.
 - Python: 제한된 Flask/FastAPI 진입점. factory/복잡한 패키지는 명시적 Dockerfile 필요.
   Flask는 `--app` 대신 `FLASK_APP`으로 넘겨 레포가 고정한 Flask 1.x에서도 기동한다.
   설치할 의존성이 있으면 `build-essential pkg-config`를 먼저 깐다. 휠이 없는 패키지(multidict, PyICU)가 slim에서 설치되지

@@ -82,7 +82,7 @@ services:
 | --- | --- |
 | package.json의 의존성 설치·빌드·선언된 테스트 | Node 검사 경로로 실행 가능 |
 | Dockerfile/명시적 설정으로 정적 파일을 서빙하는 앱 | 배포와 HTTP 응답·적용 가능한 서버 장애/부하 관측 가능 |
-| 설정 없이 React/Vite URL 자동 실행 | 보완 필요. 현재 기본 Node 실행은3000/dev이고 Vite 기본은 localhost:5173이다. 허용 host도 확인해야 한다. |
+| 설정 없이 React/Vite URL 자동 실행 | 후속 작업 브랜치에서 Vite SPA 정적 빌드·서빙을 구현하고 실제 두 레포로 검증했다. [조건과 실행 범위](frontend-static-validation.md) 참고. |
 | 버튼 클릭·로그인 UI·클라이언트 라우팅·브라우저 API/CORS 검증 | 별도 브라우저 E2E 후속 범위 |
 
-로컬 codereferee-frontend의 계획 해석은 `stack_detection`, port3000, `npm run dev`로 확인했다. 이번 진단에서 프론트 빌드·배포 실측을 추가 실행한 것은 아니다. Vite의 실행 설정은 [공식 서버 옵션](https://vite.dev/config/server-options.html)을 참고한다.
+인증 준비 진단 당시 프론트 계획은 `stack_detection`, port3000, `npm run dev`였다. 프론트의 실제 빌드·배포·장애 검증은 이후 별도 작업에서 수행했으며 위 링크에 기록한다. Vite의 개발 서버 설정은 [공식 서버 옵션](https://vite.dev/config/server-options.html)을 참고한다.
