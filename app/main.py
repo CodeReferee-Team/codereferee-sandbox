@@ -16,6 +16,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from scripts.business_probe import validate_probe_spec
+from scripts.browser_probe import BrowserProbeRunner, validate_browser_probe
 from app.scenarios import ALIASES, SCENARIOS, SUITES, resolve_scenarios
 from scripts.disk_guard import DiskLow, ensure_free_disk
 
@@ -77,11 +78,17 @@ class ChaosTarget(BaseModel):
     dependencies: dict[str, Any] = Field(default_factory=dict)
     probe_path: str = Field(default='/', alias='probePath')
     probe_spec: dict[str, Any] | None = Field(default=None, alias='probeSpec')
+    browser_probe: dict[str, Any] | None = Field(default=None, alias='browserProbe')
 
     @field_validator('probe_spec')
     @classmethod
     def valid_probe_spec(cls, value):
         return validate_probe_spec(value)
+
+    @field_validator('browser_probe')
+    @classmethod
+    def valid_browser_probe(cls, value):
+        return validate_browser_probe(value)
     # 헬스 경로를 선언하지 않은 자동 배포 대상은 4xx도 응답으로 센다(collect_baseline.answered).
     # 필드가 없으면 pydantic이 조용히 버리므로 여기 자리를 둔다.
     probe_accepts_client_errors: bool = Field(default=False, alias='probeAcceptsClientErrors')
@@ -220,6 +227,8 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
     budget = Budget(request.deadline_seconds, request_started)
     stage = 'deploy'
     metrics_session = None
+    browser_runner = None
+    browser_reports = []
     try:
         deployed: dict[str, Any] | None = None
         deployed_target: ChaosTarget | None = None
@@ -230,6 +239,20 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
             deployed_target = ChaosTarget.model_validate(deployed["target"])
         metrics_target = deployed_target or request.chaos_target
         require_declared_dependencies(modes or [], metrics_target)
+        if metrics_target is not None and metrics_target.browser_probe:
+            browser_runner = BrowserProbeRunner(metrics_target)
+            stage = 'browser:baseline'
+            seconds, _ = budget.timeout_for(150)
+            browser_report = browser_runner.run(metrics_target.browser_probe, timeout_seconds=seconds)
+            browser_reports.append(dict(browser_report, phase=stage))
+            if browser_report.get('exitCode') != 0:
+                result = browser_failure_result(browser_report, request, stage)
+                result.setdefault('source', {}).update(chaos_injected=False, not_executed_scenarios=modes or [])
+                if deployed:
+                    result['deployment'] = deployed
+                    result['commitSha'] = deployed['repository']['commitSha']
+                    attach_repository_checks(result, deployed)
+                return result
         if metrics_target is not None:
             from scripts.metrics_lifecycle import RequestMetrics
             metrics_session = RequestMetrics(request.request_id or str(uuid4()), metrics_target.model_dump(by_alias=True))
@@ -243,6 +266,12 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
             completed = run_bounded(command, stage=stage, seconds=seconds, budget_bound=bound,
                                     env=probe_environment(deployed_target))
             result = parse_experiment_result(completed)
+            if browser_runner is not None:
+                stage = 'browser:after_smoke'
+                seconds, _ = budget.timeout_for(150)
+                browser_report = browser_runner.run(metrics_target.browser_probe, timeout_seconds=seconds)
+                browser_reports.append(dict(browser_report, phase=stage))
+                apply_browser_report(result, browser_report, request, stage)
             attach_repository_checks(result, deployed)
             result.update(requestId=request.request_id, repositoryUrl=request.repository_url,
                           commitSha=deployed['repository']['commitSha'], deployment=deployed)
@@ -272,6 +301,12 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
                 scenario_results.append(skipped_scenario(mode, timeout_code(exc), str(exc)))
                 continue
             result = parse_experiment_result(completed)
+            if browser_runner is not None:
+                stage = f'browser:after:{mode}'
+                seconds, _ = budget.timeout_for(150)
+                browser_report = browser_runner.run(metrics_target.browser_probe, timeout_seconds=seconds)
+                browser_reports.append(dict(browser_report, phase=stage))
+                apply_browser_report(result, browser_report, request, stage)
             result['chaosMode'] = mode
             scenario_results.append(result)
             # A scenario the infrastructure could not run says nothing about the
@@ -351,6 +386,14 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
                 if 'result' in locals():
                     result.setdefault('source', {})['artifact_cleanup'] = report
         if 'result' in locals():
+            if browser_reports:
+                result['browserCheckAttempted'] = True
+                result['browserLoaded'] = all(r.get('observationStatus') == 'observed' and r.get('exitCode') == 0
+                                              for r in browser_reports)
+                result.setdefault('source', {})['browser_validation'] = {
+                    'checks': browser_reports, 'image': browser_runner.image,
+                    'checkpoints': 'before_injection_and_after_each_executed_scenario',
+                    'during_fault_measurement': 'http_business_probe' if metrics_target.probe_spec else 'http_service_probe'}
             # probeSpec may contain reproduction credentials. Keep it only in
             # the internal subprocess contract, never in the public result.
             strip_private_probe_specs(result)
@@ -382,6 +425,8 @@ def strip_private_probe_specs(value):
     if isinstance(value, dict):
         value.pop('probeSpec', None)
         value.pop('probe_spec', None)
+        value.pop('browserProbe', None)
+        value.pop('browser_probe', None)
         for nested in value.values():
             strip_private_probe_specs(nested)
     elif isinstance(value, list):
@@ -402,6 +447,37 @@ def attach_repository_checks(result: dict, deployed: dict) -> None:
         'local_databases', 'verification_scope', 'verification_service_group',
         'services', 'service_timings') if key in checks})
     report['repository_check_outcome'] = checks.get('outcome')
+
+
+def browser_failure_result(report, request, phase):
+    result = infrastructure_error('Browser runtime could not complete the declared journey.', request,
+        timed_out=bool(report.get('timedOut')), stage=phase, code=report.get('errorCode', 'browser_runtime_unavailable'))
+    if report.get('observationStatus') == 'observed':
+        result.update(observationStatus='observed', exitCode=1, infraError=None,
+                      failureKind='browser_workflow', stderr='Declared browser workflow did not pass.',
+                      serviceCheckAttempted=True, serverStarted=report.get('completedSteps', 0) > 0)
+    return result
+
+
+def apply_browser_report(result, report, request, phase):
+    result['browserCheckAttempted'] = True
+    result['browserLoaded'] = report.get('observationStatus') == 'observed' and report.get('exitCode') == 0
+    if report.get('observationStatus') == 'observed' and report.get('exitCode') == 0:
+        return
+    if result.get('observationStatus') == 'infrastructure_error' or result.get('exitCode') != 0:
+        return
+    result.setdefault('source', {})['http_execution'] = {
+        'observationStatus': result.get('observationStatus'), 'exitCode': result.get('exitCode')}
+    failure = browser_failure_result(report, request, phase)
+    observation = result.get('chaos_observation')
+    if report.get('observationStatus') == 'observed' and observation:
+        # HTTP recovery alone does not satisfy a declared browser business
+        # contract. Preserve that measurement independently, including its time.
+        result['source']['http_execution']['chaos_observation'] = observation
+        result['chaos_observation'] = dict(observation, recovered=False, recovery_seconds=None,
+            recovery_basis='http_and_declared_browser_workflow')
+    for field in ('observationStatus', 'exitCode', 'infraError', 'timedOut', 'failureKind', 'failurePhase', 'stoppedAt', 'stderr'):
+        result[field] = failure[field]
 
 
 def aggregate_scenarios(mode: str, planned: list[str], results: list[dict[str, Any]]) -> dict[str, Any]:
