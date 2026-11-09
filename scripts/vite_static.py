@@ -46,6 +46,7 @@ const configText = `server {
   absolute_redirect off;
   root /usr/share/nginx/html;
   include /etc/nginx/mime.types;
+  include /etc/nginx/codereferee-proxy/*.conf;
   location ~* \\.(?:js|mjs|css|map|json|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|wasm)$ { try_files $uri =404; }
   location ${base} { try_files $uri $uri/ ${base}index.html; }
   ${base === '/' ? '' : 'location = / { return 302 ' + base + '; } location / { return 404; }'}
