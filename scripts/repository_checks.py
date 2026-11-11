@@ -14,6 +14,7 @@ from uuid import uuid4
 from collect_baseline import kubectl_environment
 from local_databases import IMAGES as DATABASE_IMAGES, PGVECTOR_IMAGE, container_arguments, container_environment, detect_local_databases, readiness_command
 from execution_plan import MAVEN_IMAGES, ConfigurationRequired, inside, java_release, node_commands, node_major, poetry_requirements, read_yaml
+from execution_control import record_phase, record_resource, remaining_timeout
 
 
 class CheckFailure(RuntimeError):
@@ -161,7 +162,7 @@ CACHE_DIRECTORIES = ('/cache/home', '/cache/gradle', '/cache/python', '/cache/wo
 # 설치 단계에서 패키지 저장소에 닿지 못했다는 정확한 문구. 레포 결함이 아니라 인프라 문제다.
 # 로그 문구로 분기하는 예외 경로라 성공 로그에도 나오는 낱말은 쓰지 않는다. 레포가 이 문구를
 # 일부러 찍어도 결과는 FAILED가 ERROR(판정 불가)로 바뀔 뿐 합격이 되지는 않는다.
-REGISTRY_UNREACHABLE = ('CERTIFICATE_VERIFY_FAILED', 'Temporary failure in name resolution',
+REGISTRY_UNREACHABLE = ('RemoteDisconnected', '503 Server Error', 'CERTIFICATE_VERIFY_FAILED', 'Temporary failure in name resolution',
     'Failed to establish a new connection', 'EAI_AGAIN', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNREFUSED', 'ECONNRESET',
     'SELF_SIGNED_CERT_IN_CHAIN', 'toomanyrequests', '429 Too Many Requests', 'java.net.UnknownHostException',
     'Connect timed out')
@@ -169,6 +170,50 @@ REGISTRY_UNREACHABLE = ('CERTIFICATE_VERIFY_FAILED', 'Temporary failure in name 
 
 def registry_unreachable(phase: str, stdout: str, stderr: str) -> bool:
     return phase == 'install' and any(term in stdout or term in stderr for term in REGISTRY_UNREACHABLE)
+
+
+class CheckCommandTimeout(subprocess.TimeoutExpired):
+    def __init__(self, command, limit, attempts, stdout=None, stderr=None):
+        super().__init__(command, limit, output=stdout, stderr=stderr)
+        self.attempts = attempts
+
+
+def run_check_command(command, environment, phase, deadline):
+    """Retry transient downloads inside one phase budget, sharing its cache."""
+    started = time.monotonic()
+    limit = min(deadline - started, remaining_timeout(600, phase))
+    phase_deadline = started + limit
+    attempts = []
+    delay = 2.0
+    enabled = os.getenv('CODEREFEREE_RETRY_DOWNLOADS') == '1' and phase == 'install'
+    while True:
+        remaining = phase_deadline - time.monotonic()
+        if remaining <= 0:
+            raise CheckCommandTimeout(command, limit, attempts)
+        invoked = time.monotonic()
+        try:
+            completed = subprocess.run(command, text=True, capture_output=True, encoding='utf-8',
+                errors='replace', env=environment, timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            attempts.append({'invocation': len(attempts)+1, 'timed_out': True,
+                             'duration_ms': round((time.monotonic()-invoked)*1000)})
+            raise CheckCommandTimeout(command, limit, attempts, exc.stdout, exc.stderr) from None
+        attempts.append({'invocation': len(attempts)+1, 'exit_code': completed.returncode,
+                         'duration_ms': round((time.monotonic()-invoked)*1000)})
+        certificate_error = any(term in completed.stdout or term in completed.stderr for term in
+                                ('CERTIFICATE_VERIFY_FAILED', 'SELF_SIGNED_CERT_IN_CHAIN'))
+        if (not enabled or completed.returncode == 0 or certificate_error or
+                not registry_unreachable(phase, completed.stdout, completed.stderr)):
+            return completed, attempts if enabled else []
+        remaining = phase_deadline - time.monotonic()
+        if remaining <= 0:
+            raise CheckCommandTimeout(command, limit, attempts, completed.stdout, completed.stderr)
+        pause = min(delay, remaining)
+        attempts[-1].update(retry_reason='dependency_transport_error', retry_delay_seconds=pause)
+        time.sleep(pause)
+        delay = min(30, delay * 2)
+        if time.monotonic() >= phase_deadline:
+            raise CheckCommandTimeout(command, limit, attempts, completed.stdout, completed.stderr)
 
 
 def junit_test_count(repository: Path, stack: str) -> int | None:
@@ -206,6 +251,7 @@ def start_check_databases(databases: dict, request: str, environment: dict, dead
             image = PGVECTOR_IMAGE if database.get('extensions') == ['vector'] else DATABASE_IMAGES[kind]
             command += [image, *container_arguments(database)]
             names.append(name)  # docker run may create the container before timing out
+            record_resource('containers', name)
             started = subprocess.run(command, text=True, capture_output=True, env=environment, timeout=180)
             if started.returncode:
                 report['error'] = started.stderr[-1000:]
@@ -249,13 +295,16 @@ def remove_check_databases(names: list[str], environment: dict) -> dict:
 
 
 def verify_repository(repository: Path, cache: Path, request: str, *, timeout: int = 600) -> dict:
+    timeout = remaining_timeout(7200) if os.getenv('CODEREFEREE_EXECUTION_DEADLINE') else timeout
     started = time.monotonic()
     # Validate before creating any resources. Linux package caches do not belong
     # on a slow Windows bind mount or in the submitted source/build context.
     plan = check_plan(repository)
+    record_phase('prepare')
     if not plan['image']:
         return _verify_repository(repository, '', request, timeout=timeout)
     volume = 'codereferee-check-cache-' + uuid4().hex
+    record_resource('volumes', volume)
     environment = kubectl_environment()
     created = subprocess.run(['docker', 'volume', 'create', '--label', 'codereferee.temporary=true',
         '--label', 'codereferee.request-id=' + request, volume], text=True, capture_output=True,
@@ -280,6 +329,7 @@ def verify_repository(repository: Path, cache: Path, request: str, *, timeout: i
         # and no submitted commands. Repository code never gets CAP_CHOWN; all
         # check steps run with cap-drop ALL.
         setup_name = 'codereferee-check-setup-' + uuid4().hex[:16]
+        record_resource('containers', setup_name)
         owner = CHECK_OWNER or '1000:1000'
         directories = ' '.join(CACHE_DIRECTORIES)
         try:
@@ -368,9 +418,11 @@ def _verify_repository(repository: Path, cache_name: str, request: str, *, timeo
     if plan['test']: phases.append(('test', plan['test']))
     deadline = time.monotonic() + timeout
     for index, (phase, arguments) in enumerate(phases):
+        record_phase(phase)
         if plan['stack'] == 'python' and arguments[:4] == ['python', '-m', 'pip', 'install']:
             arguments = arguments[:4] + ['--user', '--disable-pip-version-check'] + arguments[4:]
         name = 'codereferee-check-' + uuid4().hex[:16]
+        record_resource('containers', name)
         source_mount = f'type=bind,source={repository.resolve()},target=/workspace'
         workdir = '/workspace/' + plan['workingDirectory']
         executable = arguments
@@ -396,12 +448,13 @@ def _verify_repository(repository: Path, cache_name: str, request: str, *, timeo
         command.extend([plan['image'], *executable])
         started = time.monotonic()
         timed_out = False
+        retry_attempts = []
         try:
-            completed = subprocess.run(command, text=True, capture_output=True, encoding='utf-8',
-                errors='replace', env=environment, timeout=max(1, deadline-time.monotonic()))
+            completed, retry_attempts = run_check_command(command, environment, phase, deadline)
             code, stdout, stderr = completed.returncode, completed.stdout, completed.stderr
         except subprocess.TimeoutExpired as exc:
             timed_out = True
+            retry_attempts = getattr(exc, 'attempts', [])
             report['execution_limit_seconds'] = exc.timeout
             stdout = exc.stdout or ''
             if isinstance(stdout, bytes): stdout = stdout.decode('utf-8', errors='replace')
@@ -422,6 +475,8 @@ def _verify_repository(repository: Path, cache_name: str, request: str, *, timeo
         report['steps'].append({'name': phase, 'command': arguments, 'exit_code': code,
             'duration_ms': round((time.monotonic()-started)*1000), 'timed_out': timed_out,
             'stdout': stdout[-4000:], 'stderr': stderr[-4000:]})
+        if retry_attempts:
+            report['steps'][-1]['retry_attempts'] = retry_attempts
         if code != 0:
             infrastructure = code is None or code == 125 or registry_unreachable(phase, stdout, stderr)
             report.update(outcome='failed', failed_step=phase, exit_code=code,
