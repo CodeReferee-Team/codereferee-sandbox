@@ -45,6 +45,7 @@ class MultiRepositoryTests(unittest.TestCase):
         self.assertEqual(plan['services']['api']['repositoryName'], 'backend')
         self.assertEqual(plan['serviceOrder'], ['api', 'web'])
         self.assertEqual(self.state['repository_roots']['backend'], self.workspace/'sources/backend')
+        self.assertEqual(self.state['service_repositories'], {'web': 'main', 'api': 'backend'})
         _, target, _ = render_services(plan, 'codereferee-test', {'web': 'web:1', 'api': 'api:1'})
         self.assertEqual(target['targetService'], 'api')
 
@@ -108,3 +109,18 @@ class MultiRepositoryTests(unittest.TestCase):
         (config/'validation.yaml').write_text('version: 3\nverification:\n  env: {MODE: test}\n')
         plan = self.resolve()
         self.assertFalse(plan['sharedVerification'])
+
+    def test_configuration_only_primary_can_group_two_application_sources(self):
+        (self.main/'Dockerfile').unlink()
+        self.declaration['repositories']['frontend'] = {'url': 'https://github.com/example/frontend.git'}
+        self.declaration['services']['web']['repository'] = 'frontend'
+        plan = self.resolve()
+        self.assertEqual(len(plan['repositories']), 3)
+        self.assertEqual(len(plan['services']), 2)
+        self.assertEqual(plan['services']['web']['repositoryName'], 'frontend')
+
+    def test_missing_source_is_configuration_failure(self):
+        with self.assertRaises(ConfigurationRequired):
+            resolve_repository_group(self.main, self.workspace, self.declaration, self.primary,
+                Mock(side_effect=RuntimeError('fatal: repository not found')), Mock(), self.state)
+        self.assertEqual(self.state['repository'], 'backend')

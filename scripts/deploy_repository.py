@@ -189,6 +189,8 @@ def main() -> int:
             configuration_required=isinstance(exc, ConfigurationRequired))
         if group_state.get('service'):
             report['failed_service'] = group_state['service']
+            if group_state.get('service_repositories'):
+                report['failed_repository'] = group_state['service_repositories'][group_state['service']]
         if group_state.get('repository'):
             report['failed_repository'] = group_state['repository']
         if group_state.get('timings'):
@@ -216,6 +218,8 @@ def main() -> int:
             'browserCheckAttempted': False, 'requestId': args.request_id,
             'sandboxReport': report,
             'source': {'artifact_cleanup': cleanup, 'workspace_cleanup': cleanup['workspace_cleanup'],
+                       **({'service_repositories': group_state['service_repositories']}
+                          if group_state.get('service_repositories') else {}),
                        **({'repositories': group_state['repositories']} if group_state.get('repositories') else {})}}}))
         return 1
     finally:
