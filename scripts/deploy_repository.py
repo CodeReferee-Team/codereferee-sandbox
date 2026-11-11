@@ -12,8 +12,6 @@ import json
 import os
 import re
 import secrets
-import shutil
-import stat
 import subprocess
 import time
 from pathlib import Path
@@ -26,6 +24,7 @@ from artifact_cleanup import cleanup_request_image
 from execution_plan import OVERRIDE_FIELDS, ConfigurationRequired, inside, read_yaml, render_plan, resolve_plan
 from repository_checks import CheckFailure, verify_repository
 from pod_diagnostics import collect_pod_diagnostics, manifest_redaction_values
+from execution_control import begin_cleanup, record_phase, record_resource, remaining_timeout
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +64,7 @@ def main() -> int:
             apply_patch(repository, args.patch_file)
             config_only = only_scaling_changed(repository, before)
         commit_sha = run(["git", "rev-parse", "HEAD"], cwd=repository).stdout.strip()
+        record_resource('commits', commit_sha)
         config_path = inside(repository, '.codereferee/validation.yaml')
         if not args.profile and config_path.is_file() and read_yaml(config_path).get('version') == 2:
             stage = 'detect'
@@ -84,6 +84,7 @@ def main() -> int:
         profile_name = plan.get('profile')
         profile = load_profile(profile_name) if profile_name else plan
         image = f"codereferee/{request}:{commit_sha[:12]}"
+        record_resource('images', image)
         dockerfile = inside(repository, profile.get('dockerfile', 'Dockerfile'))
         if profile.get('generatedDockerfile'):
             dockerfile = workspace / 'generated.Dockerfile'
@@ -142,6 +143,7 @@ def main() -> int:
         }))
         return 0
     except Exception as exc:
+        begin_cleanup()
         if group_state:
             stage = group_state.get('stage', stage)
             namespace_may_exist = group_state.get('namespace_may_exist', False)
@@ -170,7 +172,9 @@ def main() -> int:
             checks = exc.report
             stage = checks['failed_step']
         timed_out = isinstance(exc, subprocess.TimeoutExpired) or bool((checks or {}).get('timed_out'))
-        infra = timed_out or bool((checks or {}).get('infrastructure_error')) or isinstance(exc, (FileNotFoundError, OSError)) or stage in ('prepare', 'dependencies') or any(
+        fetch_unavailable = stage == 'clone' and any(term in message for term in (
+            'Could not resolve host', 'Failed to connect to', 'Connection reset', '503 Server Error'))
+        infra = fetch_unavailable or timed_out or bool((checks or {}).get('infrastructure_error')) or isinstance(exc, (FileNotFoundError, OSError)) or stage in ('prepare', 'dependencies') or any(
             term in message.lower() for term in ('cannot connect to the docker daemon', 'dockerdesktoplinuxengine', 'error during connect'))
         code = None if infra else (89 if isinstance(exc, ConfigurationRequired) else
             (checks or {}).get('exit_code', 1))
@@ -266,6 +270,7 @@ def build_and_deploy_service_group(repository: Path, workspace: Path, request: s
     for name in plan['serviceOrder']:
         config = plan['services'][name]
         image = f'codereferee/{request}/svc-{name}:{commit_sha[:12]}'
+        record_resource('images', image)
         state['images'][name] = image
         dockerfile = inside(repository, config['dockerfile'])
         if config.get('generatedDockerfile'):
@@ -311,24 +316,8 @@ def build_and_deploy_service_group(repository: Path, workspace: Path, request: s
 
 def cleanup_workspace(workspace: Path) -> dict:
     """Delete only the exact request scratch directory, including readonly Git files."""
-    runtime = RUNTIME_ROOT.resolve()
-    resolved = workspace.resolve()
-    if resolved.parent != runtime or not re.fullmatch(r'repository-[a-z0-9-]{1,45}', resolved.name):
-        raise ValueError('Refusing cleanup outside an exact request workspace.')
-
-    def retry_readonly(function, path, exc_info):
-        candidate = Path(path)
-        if not candidate.resolve().is_relative_to(resolved):
-            raise ValueError('Refusing permissions change outside request workspace.')
-        os.chmod(candidate, candidate.stat().st_mode | stat.S_IWRITE)
-        function(path)
-
-    try:
-        if workspace.exists():
-            shutil.rmtree(workspace, onerror=retry_readonly)
-        return {'removed': not workspace.exists(), 'error': None}
-    except (OSError, ValueError) as exc:
-        return {'removed': False, 'error': str(exc)[-1000:]}
+    from request_recovery import cleanup_workspace as cleanup
+    return cleanup(workspace, RUNTIME_ROOT)
 
 
 def parse_args() -> argparse.Namespace:
@@ -450,6 +439,9 @@ def skipped_checks(before: dict | None) -> dict:
 
 
 def apply(manifest: str) -> None:
+    for document in yaml.safe_load_all(manifest):
+        if isinstance(document, dict) and document.get('kind') == 'Namespace':
+            record_resource('namespaces', document['metadata']['name'])
     run(kubectl_command("apply", "-f", "-"), input_text=manifest)
 
 
@@ -492,8 +484,16 @@ def run(command: list[str], *, cwd: Path | None = None, input_text: str | None =
     environment['PYTHONIOENCODING'] = 'utf-8'
     # Keep Docker Buildx state out of a developer's shared home directory.
     environment["BUILDX_CONFIG"] = str(buildx_config)
+    phase = 'prepare'
+    if command[0] == 'git':
+        phase = 'clone'
+    elif command[:2] == ['docker', 'build']:
+        phase = 'image_build'
+    elif 'rollout' in command:
+        phase = 'rollout'
+    record_phase(phase)
     completed = subprocess.run(command, cwd=cwd, input=input_text, text=True, encoding='utf-8', errors='replace', capture_output=True,
-                               env=environment, timeout=600)
+                               env=environment, timeout=remaining_timeout(600, phase))
     if completed.returncode:
         message = completed.stderr.strip() or completed.stdout.strip() or "command failed"
         static_configuration = re.search(

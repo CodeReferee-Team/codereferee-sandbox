@@ -19,8 +19,22 @@ import json
 import re
 import subprocess
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from urllib.parse import urlparse
+
+
+command_deadline = ContextVar('observation_command_deadline', default=None)
+
+
+@contextmanager
+def execution_budget(deadline):
+    token = command_deadline.set(deadline)
+    try:
+        yield
+    finally:
+        command_deadline.reset(token)
 
 try:
     from .collect_baseline import kubectl_command, kubectl_environment
@@ -148,8 +162,12 @@ def uninstall(namespace: str) -> None:
 
 
 def run(command: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    deadline = command_deadline.get()
+    timeout = 180 if deadline is None else min(180, deadline-time.monotonic())
+    if timeout <= 0:
+        raise TimeoutError('Observation operation exceeded its execution budget.')
     completed = subprocess.run(command, input=input_text, text=True, capture_output=True,
-                               env=kubectl_environment(), timeout=180, encoding='utf-8', errors='replace')
+                               env=kubectl_environment(), timeout=timeout, encoding='utf-8', errors='replace')
     if completed.returncode:
         message = completed.stderr.strip() or completed.stdout.strip() or "command failed"
         raise RuntimeError(f"{' '.join(command[:3])}: {message}")

@@ -37,6 +37,7 @@ class RequestMetrics:
         self.enabled = bool(self.remote or self.query_base)
         self.attempted = False
         self.ready = False
+        self.command_deadline = None
         self.stop = threading.Event()
         self.thread = None
         self.bindings = {}
@@ -60,7 +61,10 @@ class RequestMetrics:
             route = '/api/v1/query_range'
             params.update(start=start, end=end, step=1)
         # Local infrastructure must not inherit developer debugging proxies.
-        with build_opener(ProxyHandler({})).open(self.query_base + route + '?' + urlencode(params), timeout=5) as response:
+        timeout = 5 if self.command_deadline is None else min(5, self.command_deadline-time.monotonic())
+        if timeout <= 0:
+            raise TimeoutError('Metrics query exceeded its execution budget.')
+        with build_opener(ProxyHandler({})).open(self.query_base + route + '?' + urlencode(params), timeout=timeout) as response:
             payload = json.load(response)
         if payload.get('status') != 'success':
             raise RuntimeError('Receiver query failed.')
@@ -83,8 +87,12 @@ class RequestMetrics:
         values = self.query('max(timestamp(' + self.selector(metric) + '))')
         return float(values[0]['value'][1]) if values else 0
 
+    def command(self, arguments):
+        with wiring.execution_budget(self.command_deadline):
+            return wiring.run(arguments)
+
     def snapshot(self):
-        pods = json.loads(wiring.run(wiring.kubectl_command('get', 'pods', '-n', self.target['namespace'],
+        pods = json.loads(self.command(wiring.kubectl_command('get', 'pods', '-n', self.target['namespace'],
             '-l', self.target['labelSelector'], '-o', 'json')).stdout)
         now = datetime.now(timezone.utc).isoformat()
         for pod in pods.get('items', []):
@@ -101,7 +109,7 @@ class RequestMetrics:
                     binding.update(last_observed_at=now, restart_count_final=status.get('restartCount'),
                         container_id=status.get('containerID'), deletion_timestamp=metadata.get('deletionTimestamp'))
         for name, target in self.target.get('workloads', {}).items():
-            pods = json.loads(wiring.run(wiring.kubectl_command('get', 'pods', '-n', self.target['namespace'],
+            pods = json.loads(self.command(wiring.kubectl_command('get', 'pods', '-n', self.target['namespace'],
                 '-l', target['labelSelector'], '-o', 'json')).stdout)
             with self.bindings_lock:
                 bindings = self.service_bindings.setdefault(name, {})
@@ -223,7 +231,8 @@ class RequestMetrics:
         finally:
             self.stop.set()
             if self.thread:
-                self.thread.join(timeout=6)
+                remaining = 6 if self.command_deadline is None else max(0, self.command_deadline-time.monotonic())
+                self.thread.join(timeout=min(6, remaining))
             with self.bindings_lock:
                 self.report['pod_bindings'] = list(self.bindings.values())
             if self.attempted:

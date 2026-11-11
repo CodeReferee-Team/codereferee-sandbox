@@ -74,11 +74,17 @@ def load_image_into_cluster(image: str) -> None:
         return
     cluster_name = os.getenv("CODEREFEREE_KIND_CLUSTER_NAME", "codereferee")
     kind_command = os.getenv("CODEREFEREE_KIND_COMMAND", "kind")
+    try:
+        from .execution_control import record_resource, remaining_timeout
+    except ImportError:
+        from execution_control import record_resource, remaining_timeout
+    record_resource('loaded_images', image)
     completed = subprocess.run(
         [kind_command, "load", "docker-image", image, "--name", cluster_name],
         capture_output=True,
         text=True,
         env=kubectl_environment(),
+        **({'timeout': remaining_timeout(600, 'image_load')} if os.getenv('CODEREFEREE_EXECUTION_DEADLINE') else {}),
     )
     if completed.returncode:
         message = completed.stderr.strip() or completed.stdout.strip() or "kind image load failed"
