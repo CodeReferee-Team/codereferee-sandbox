@@ -15,7 +15,7 @@ def workload_name(name: str) -> str:
     return 'cr-svc-' + name
 
 
-def resolve_services(repository: Path, data: dict) -> dict:
+def resolve_services(repository: Path, data: dict, *, repository_roots: dict | None = None) -> dict:
     allowed = {'version', 'services', 'dependencies', 'entryService', 'targetService', 'probePath', 'probeSpec', 'verification', 'browserProbe'}
     if set(data) - allowed:
         raise ConfigurationRequired('Unsupported version 2 configuration fields: ' + ', '.join(sorted(set(data) - allowed)))
@@ -31,23 +31,27 @@ def resolve_services(repository: Path, data: dict) -> dict:
         if workload_name(name) in dependencies:
             raise ConfigurationRequired('A dependency name collides with a service workload.')
         service = dict(declaration)
+        source_name = service.pop('repository', 'main') if repository_roots is not None else 'main'
+        source_root = repository_roots[source_name] if repository_roots is not None else repository
         if 'proxyRoutes' in service:
             declared_routes[name] = service.pop('proxyRoutes')
         after = service.pop('dependsOn', [])
         if not isinstance(after, list) or any(not isinstance(n, str) or n not in services or n == name for n in after):
             raise ConfigurationRequired('dependsOn must name other declared services.')
         verification = service.pop('verificationDirectory', service.get('buildContext', '.'))
-        if not inside(repository, verification).is_dir():
+        if not inside(source_root, verification).is_dir():
             raise ConfigurationRequired('verificationDirectory is missing.')
         if 'generatedDockerfile' in service:
             raise ConfigurationRequired('Declare a checked-in Dockerfile or a supported service stack.')
-        context = inside(repository, service.get('buildContext', '.'))
-        if 'dockerfile' not in service and not inside(repository, 'Dockerfile').is_file():
+        context = inside(source_root, service.get('buildContext', '.'))
+        if 'dockerfile' not in service and not inside(source_root, 'Dockerfile').is_file():
             generated = stack_recipe(context, port=service.get('port'))
             if generated:
                 service = dict(generated, **service)
-        normalized[name] = dict(normalize_service(repository, service), dependsOn=after,
+        normalized[name] = dict(normalize_service(source_root, service), dependsOn=after,
                                 verificationDirectory=verification)
+        if repository_roots is not None:
+            normalized[name]['repositoryName'] = source_name
     from http_proxy import validate_proxy_routes
     for name, routes in declared_routes.items():
         service = normalized[name]
