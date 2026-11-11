@@ -474,6 +474,10 @@ def attach_repository_checks(result: dict, deployed: dict) -> None:
     """Preserve actual build/test evidence without changing AI judgement policy."""
     if 'workspaceCleanup' in deployed:
         result.setdefault('source', {})['workspace_cleanup'] = deployed['workspaceCleanup']
+    plan = deployed.get('executionPlan', {})
+    if plan.get('repositories'):
+        result.setdefault('source', {})['repositories'] = plan['repositories']
+        result['source']['service_repositories'] = plan['serviceRepositories']
     checks = deployed.get('sandboxReport')
     if not isinstance(checks, dict):
         return
@@ -743,6 +747,7 @@ def deploy_repository(request: RepositoryValidationRequest, budget: Budget | Non
                 CODEREFEREE_EXECUTION_DEADLINE=str(time.monotonic() + seconds),
                 CODEREFEREE_EXECUTION_JOURNAL=str(context['journal']),
                 CODEREFEREE_RETRY_DOWNLOADS='1' if request.retry_downloads else '0',
+                CODEREFEREE_REPOSITORY_SNAPSHOTS=json.dumps(context.get('repository_snapshots', {})),
                 CODEREFEREE_PHASE_TIMEOUTS=json.dumps(request.phase_timeouts)),
                 'cleanup_grace': min(30, CLEANUP_RESERVE_SECONDS)}
         completed = run_bounded(command, stage='deploy', seconds=seconds, budget_bound=bound, **options)

@@ -120,6 +120,7 @@ def execute_attempts(store, identity, request, handler):
     preparation_limit = request.preparation_timeout_seconds or 1200
     phase_limits = dict(request.phase_timeouts)
     commit = request.commit_sha
+    repository_snapshots = {}
     result = None
     cleanup = {'complete': True}
     stopped_reason = None
@@ -135,6 +136,7 @@ def execute_attempts(store, identity, request, handler):
             'preparation_timeout_seconds': preparation_limit, 'phase_timeouts': dict(phase_limits),
             'deadline_seconds': int(remaining) if remaining is not None else None})
         token = execution_context.set({'journal': journal, 'resource_id': resource_id,
+            'repository_snapshots': repository_snapshots,
             'deadline': started + request.deadline_seconds if request.deadline_seconds is not None else None})
         exception = None
         try:
@@ -171,6 +173,7 @@ def execute_attempts(store, identity, request, handler):
             preparation_limit = min(7200, preparation_limit * 2)
             phase_limits[phase] = min(7200, phase_limits.get(phase, 600) * 2)
         commit = (data.get('commits') or [commit])[0]
+        repository_snapshots = data.get('repository_snapshots', repository_snapshots)
     result.setdefault('source', {})['execution'] = {'executionId': identity, 'replayed': False,
         'state': 'completed' if cleanup['complete'] else 'cleanup_pending', 'attempts': history,
         'totalLimitSeconds': request.deadline_seconds, 'retryStoppedReason': stopped_reason,
