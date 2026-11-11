@@ -13,7 +13,7 @@ from uuid import uuid4
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from scripts.business_probe import validate_probe_spec
 from scripts.browser_probe import BrowserProbeRunner, validate_browser_probe
@@ -122,6 +122,19 @@ class RepositoryValidationRequest(BaseModel):
     deadline_seconds: int | None = Field(default=None, alias="deadlineSeconds", ge=60, le=7200)
     # 요청자가 예상하는 동시 사용자 수. 부하 시나리오가 이 인원을 단계에 꼭 넣어 잰다.
     target_users: int | None = Field(default=None, alias="targetUsers", ge=1, le=500)
+    preparation_timeout_seconds: int | None = Field(default=None, alias='preparationTimeoutSeconds', ge=1, le=7200)
+    preparation_retries: int = Field(default=0, alias='maxPreparationRetries', ge=0, le=1)
+    retry_downloads: bool = Field(default=False, alias='retryDownloads')
+    phase_timeouts: dict[str, int] = Field(default_factory=dict, alias='phaseTimeouts')
+
+    @field_validator('phase_timeouts', mode='before')
+    @classmethod
+    def valid_phase_timeouts(cls, value):
+        phases = {'clone', 'install', 'build', 'test', 'image_build', 'image_load', 'rollout'}
+        if not isinstance(value, dict) or set(value) - phases or any(
+                type(seconds) is not int or not 1 <= seconds <= 7200 for seconds in value.values()):
+            raise ValueError('phaseTimeouts requires supported phase names and integer seconds in 1..7200.')
+        return value
 
 
 class Budget:
@@ -170,7 +183,7 @@ def probe_environment(target: 'ChaosTarget | None') -> dict[str, str] | None:
 
 
 def run_bounded(command: list[str], *, stage: str, seconds: float, budget_bound: bool = False,
-                env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+                env: dict[str, str] | None = None, cleanup_grace: float = 0) -> subprocess.CompletedProcess[str]:
     """subprocess.run whose timeout also kills grandchildren.
 
     subprocess.run(timeout=) kills only the direct child. docker build and
@@ -182,7 +195,7 @@ def run_bounded(command: list[str], *, stage: str, seconds: float, budget_bound:
                                **({'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == 'nt'
                                   else {'start_new_session': True}))
     try:
-        stdout, stderr = process.communicate(timeout=seconds)
+        stdout, stderr = process.communicate(timeout=seconds + cleanup_grace)
     except subprocess.TimeoutExpired:
         try:
             if os.name == 'nt':
@@ -208,7 +221,6 @@ def scenario_catalogue() -> dict[str, Any]:
             'execution': 'serial_per_request', 'customModePrefix': 'suite_custom__'}
 
 
-@app.post("/repositories/validate")
 def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
     """Run fixture Chaos, a pre-deployed target, or a profile-driven repository deployment."""
 
@@ -256,7 +268,20 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
         if metrics_target is not None:
             from scripts.metrics_lifecycle import RequestMetrics
             metrics_session = RequestMetrics(request.request_id or str(uuid4()), metrics_target.model_dump(by_alias=True))
-            metrics_session.start()
+            from app.executions import execution_context
+            context = execution_context.get()
+            if context:
+                from scripts import install_observability as wiring
+                from scripts.execution_control import write_inventory
+                journal = context['journal']
+                inventory = json.loads(journal.read_text(encoding='utf-8'))
+                inventory['observation_namespaces'].append(metrics_session.namespace)
+                write_inventory(journal, inventory)
+                metrics_session.command_deadline = context['deadline'] - CLEANUP_RESERVE_SECONDS if context.get('deadline') else None
+                with wiring.execution_budget(metrics_session.command_deadline):
+                    metrics_session.start()
+            else:
+                metrics_session.start()
         if request.chaos_mode is None and deployed_target is not None:
             stage = 'smoke'
             command = [sys.executable, str(SMOKE_SCRIPT), '--namespace', deployed_target.namespace,
@@ -366,7 +391,15 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
                     diagnostics[name] = {'pods': [], 'collection_errors': ['diagnostics_collection_failed']}
             result.setdefault('source', {})['service_diagnostics'] = diagnostics
         if metrics_session is not None:
-            metrics_report = metrics_session.finish()
+            from app.executions import execution_context
+            context = execution_context.get()
+            if context:
+                from scripts import install_observability as wiring
+                metrics_session.command_deadline = context.get('deadline')
+                with wiring.execution_budget(metrics_session.command_deadline):
+                    metrics_report = metrics_session.finish()
+            else:
+                metrics_report = metrics_session.finish()
             if 'result' in locals():
                 result.setdefault('source', {})['metrics_observation'] = metrics_report
         if 'deployed_target' in locals() and deployed_target is not None:
@@ -376,8 +409,11 @@ def validate_repository(request: RepositoryValidationRequest) -> dict[str, Any]:
                 image_reports = []
                 for image in dict.fromkeys(deployed.get('images') or [deployed['image']]):
                     try:
+                        from app.executions import execution_context
+                        context = execution_context.get()
+                        cleanup_options = {'deadline': context['deadline']} if context and context.get('deadline') else {}
                         image_reports.append(dict(cleanup_request_image(image, deployed_target.namespace,
-                            remove_from_kind=namespace_removed), image=image))
+                            remove_from_kind=namespace_removed, **cleanup_options), image=image))
                     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
                         image_reports.append({'image': image, 'errors': [str(exc)]})
                 report = dict(image_reports[0]) if len(image_reports) == 1 else {
@@ -673,13 +709,16 @@ def experiment_command(request: RepositoryValidationRequest, deployed_target: Ch
 
 
 def deploy_repository(request: RepositoryValidationRequest, budget: Budget | None = None) -> dict[str, Any]:
+    from app.executions import execution_context
+    context = execution_context.get()
+    resource_id = context['resource_id'] if context else request.request_id
     if request.chaos_mode is not None and request.chaos_mode not in SCENARIOS and request.chaos_mode not in SUITES and not (request.chaos_mode or '').startswith('suite_custom__'):
         raise HTTPException(status_code=422, detail="deploymentProfile requires a supported chaosMode.")
     if not request.request_id:
         raise HTTPException(status_code=422, detail="deploymentProfile requires requestId.")
     ensure_free_disk()
     command = [sys.executable, str(DEPLOY_SCRIPT), '--repository-url', request.repository_url,
-               '--request-id=' + request.request_id,
+               '--request-id=' + resource_id,
                *(['--profile', request.deployment_profile] if request.deployment_profile else []),
                *(['--branch', request.branch] if request.branch else []),
                *(['--commit-sha', request.commit_sha] if request.commit_sha else [])]
@@ -696,8 +735,17 @@ def deploy_repository(request: RepositoryValidationRequest, budget: Budget | Non
         patch_path.write_text(request.patch_diff, encoding="utf-8", newline="\n")
         command.extend(["--patch-file", str(patch_path)])
     try:
-        seconds, bound = (budget or Budget(None, time.monotonic())).timeout_for(DEPLOY_TIMEOUT_SECONDS)
-        completed = run_bounded(command, stage='deploy', seconds=seconds, budget_bound=bound)
+        stage_limit = request.preparation_timeout_seconds or DEPLOY_TIMEOUT_SECONDS
+        seconds, bound = (budget or Budget(None, time.monotonic())).timeout_for(stage_limit)
+        options = {}
+        if context:
+            options = {'env': dict(os.environ,
+                CODEREFEREE_EXECUTION_DEADLINE=str(time.monotonic() + seconds),
+                CODEREFEREE_EXECUTION_JOURNAL=str(context['journal']),
+                CODEREFEREE_RETRY_DOWNLOADS='1' if request.retry_downloads else '0',
+                CODEREFEREE_PHASE_TIMEOUTS=json.dumps(request.phase_timeouts)),
+                'cleanup_grace': min(30, CLEANUP_RESERVE_SECONDS)}
+        completed = run_bounded(command, stage='deploy', seconds=seconds, budget_bound=bound, **options)
     finally:
         if patch_path:
             patch_path.unlink(missing_ok=True)
@@ -717,6 +765,11 @@ def deploy_repository(request: RepositoryValidationRequest, budget: Budget | Non
 
 def cleanup_namespace(namespace: str) -> bool:
     from scripts.namespace_cleanup import delete_namespace_confirmed
+    from app.executions import execution_context
+    context = execution_context.get()
+    if context and context.get('deadline') is not None:
+        return delete_namespace_confirmed(namespace,
+            timeout_seconds=max(0, context['deadline'] - time.monotonic()))
     return delete_namespace_confirmed(namespace)
 
 
@@ -761,3 +814,34 @@ def infrastructure_error(
         "branch": request.branch,
         "commitSha": request.commit_sha,
     }
+
+
+@app.post('/repositories/validate')
+def submit_repository_validation(request: RepositoryValidationRequest):
+    from app.validation_lifecycle import submit
+    return submit(request, validate_repository)
+
+
+@app.get('/executions')
+def execution_status(request_id: str = Query(alias='requestId')):
+    from app.executions import ExecutionStore, public_execution
+    row = ExecutionStore().latest(request_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail='Execution not found.')
+    return public_execution(row)
+
+
+@app.on_event('startup')
+def recover_interrupted_executions():
+    from app.executions import ExecutionSlot, ExecutionStore
+    from app.validation_lifecycle import recover_previous
+    store = ExecutionStore()
+    slot = ExecutionSlot(store.directory)
+    if slot.acquire():
+        try:
+            recover_previous(store)
+        except HTTPException:
+            # A pending cleanup stays visible and blocks a new execution.
+            pass
+        finally:
+            slot.release()
