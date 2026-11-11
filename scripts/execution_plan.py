@@ -233,6 +233,8 @@ def resolve_plan(repository: Path, explicit_profile: str | None = None) -> dict[
     config_path = inside(repository, '.codereferee/validation.yaml')
     if config_path.is_file():
         data = read_yaml(config_path)
+        if data.get('version') == 3:
+            raise ConfigurationRequired('version 3 repository groups require source checkouts through the deployment pipeline.')
         if data.get('version') == 2:
             from multi_service import resolve_services
             return resolve_services(repository, data)

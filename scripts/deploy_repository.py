@@ -66,9 +66,16 @@ def main() -> int:
         commit_sha = run(["git", "rev-parse", "HEAD"], cwd=repository).stdout.strip()
         record_resource('commits', commit_sha)
         config_path = inside(repository, '.codereferee/validation.yaml')
-        if not args.profile and config_path.is_file() and read_yaml(config_path).get('version') == 2:
+        if not args.profile and config_path.is_file() and read_yaml(config_path).get('version') in (2, 3):
             stage = 'detect'
-            plan = resolve_plan(repository)
+            declaration = read_yaml(config_path)
+            if declaration['version'] == 3:
+                from multi_repository import resolve_repository_group
+                plan = resolve_repository_group(repository, workspace, declaration,
+                    {'url': args.repository_url, 'branch': args.branch, 'commitSha': commit_sha},
+                    clone, run, group_state)
+            else:
+                plan = resolve_plan(repository)
             payload = deploy_service_group(repository, workspace, request, namespace, commit_sha, plan, args, group_state)
             payload.update(repository={'url': args.repository_url, 'branch': args.branch, 'commitSha': commit_sha},
                            workspaceCleanup=cleanup_workspace(workspace))
@@ -182,6 +189,8 @@ def main() -> int:
             configuration_required=isinstance(exc, ConfigurationRequired))
         if group_state.get('service'):
             report['failed_service'] = group_state['service']
+        if group_state.get('repository'):
+            report['failed_repository'] = group_state['repository']
         if group_state.get('timings'):
             report['service_timings'] = group_state['timings']
         report.setdefault('verification_declared', False)
@@ -206,7 +215,8 @@ def main() -> int:
             'stdout': '', 'stderr': message, 'serverStarted': False, 'serviceCheckAttempted': stage == 'run',
             'browserCheckAttempted': False, 'requestId': args.request_id,
             'sandboxReport': report,
-            'source': {'artifact_cleanup': cleanup, 'workspace_cleanup': cleanup['workspace_cleanup']}}}))
+            'source': {'artifact_cleanup': cleanup, 'workspace_cleanup': cleanup['workspace_cleanup'],
+                       **({'repositories': group_state['repositories']} if group_state.get('repositories') else {})}}}))
         return 1
     finally:
         if workspace.exists():
@@ -235,9 +245,12 @@ def deploy_service_group(repository: Path, workspace: Path, request: str, namesp
             raise
     for name in ([] if plan.get('sharedVerification') else plan['serviceOrder']):
         config = plan['services'][name]
+        source_root = state.get('repository_roots', {}).get(config.get('repositoryName'), repository)
         try:
             reports[name] = measured('verify', name, lambda: verify_repository(
-                inside(repository, config['verificationDirectory']), workspace / ('check-' + name), request))
+                inside(source_root, config['verificationDirectory']), workspace / ('check-' + name), request))
+            if config.get('repositoryName'):
+                reports[name]['repository'] = config['repositoryName']
         except CheckFailure as exc:
             state['checks'] = dict(exc.report, failed_service=name)
             raise
@@ -269,16 +282,19 @@ def build_and_deploy_service_group(repository: Path, workspace: Path, request: s
                                      'durationSeconds':round(time.monotonic()-started,3)})
     for name in plan['serviceOrder']:
         config = plan['services'][name]
-        image = f'codereferee/{request}/svc-{name}:{commit_sha[:12]}'
+        source_name = config.get('repositoryName')
+        source_root = state.get('repository_roots', {}).get(source_name, repository)
+        source_sha = plan.get('repositories', {}).get(source_name, {}).get('commitSha', commit_sha)
+        image = f'codereferee/{request}/svc-{name}:{source_sha[:12]}'
         record_resource('images', image)
         state['images'][name] = image
-        dockerfile = inside(repository, config['dockerfile'])
+        dockerfile = inside(source_root, config['dockerfile'])
         if config.get('generatedDockerfile'):
             dockerfile = workspace / (name + '.Dockerfile')
             dockerfile.write_text(config['generatedDockerfile'], encoding='utf-8')
         measured('build', name, lambda: run(['docker', 'build', '--tag', image,
             '--label', f'codereferee.request-id={request}', '--file', str(dockerfile),
-            str(inside(repository, config['buildContext']))]))
+            str(inside(source_root, config['buildContext']))]))
         state['loaded'].add(name)  # a load can partially succeed before raising
         measured('prepare', name, lambda: load_image_into_cluster(image))
     state.update(stage='prepare', service=None)
@@ -311,6 +327,9 @@ def build_and_deploy_service_group(repository: Path, workspace: Path, request: s
             'sandboxReport': dict(state['checks'], service_timings=state['timings']),
             'executionPlan': {'source': plan['source'], 'entryService': plan['entryService'],
                               'targetService': plan['targetService'], 'serviceOrder': plan['serviceOrder'],
+                              **({'repositories': plan['repositories'], 'serviceRepositories': {
+                                  name: config['repositoryName'] for name, config in plan['services'].items()}}
+                                 if plan.get('repositories') else {}),
                               'servicePort': target['servicePort'], 'warnings': plan['warnings']}}
 
 
@@ -364,8 +383,8 @@ def safe_name(value: str) -> str:
 
 
 def clone(url: str, branch: str | None, destination: Path) -> None:
-    if not re.fullmatch(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?', url) or '..' in url.split('/')[-2:]:
-        raise ConfigurationRequired('Only public GitHub HTTPS repository URLs without credentials are supported.')
+    from multi_repository import validate_repository_url
+    validate_repository_url(url)
     # Container builds need repository line endings, not the Windows user's
     # core.autocrlf=true checkout conversion (which breaks gradlew in Linux).
     command = ["git", "-c", "core.autocrlf=false", "clone", "--depth", "1"]
