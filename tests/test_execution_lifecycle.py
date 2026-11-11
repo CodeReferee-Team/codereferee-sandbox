@@ -114,6 +114,21 @@ class LifecycleTests(unittest.TestCase):
         submit(self.request.model_copy(update={'preparation_retries': 1}), handler)
         self.assertEqual(calls, [5, 5])
 
+    def test_repository_snapshots_survive_preparation_retry(self):
+        calls = []
+        snapshots = {'backend': {'url': 'https://github.com/example/backend', 'commitSha': 'b'*40}}
+        def handler(request):
+            context = execution_context.get()
+            calls.append(dict(context['repository_snapshots']))
+            progress('clone')
+            path = context['journal']
+            data = json.loads(path.read_text())
+            data['repository_snapshots'] = snapshots
+            path.write_text(json.dumps(data))
+            return result(timed_out=True, infra=True) if len(calls)==1 else result()
+        submit(self.request.model_copy(update={'preparation_retries': 1}), handler)
+        self.assertEqual(calls, [{}, snapshots])
+
     def test_observed_failure_is_preserved(self):
         calls = []
         def handler(request):
