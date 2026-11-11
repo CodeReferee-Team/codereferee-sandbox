@@ -74,7 +74,15 @@ def resolve_repository_group(repository: Path, workspace: Path, data: dict, prim
         if previous and previous['url'] != source['url']:
             raise ConfigurationRequired('Repository URL changed within a preparation retry.')
         commit = previous['commitSha'] if previous else source.get('commitSha')
-        clone_repository(source['url'], None if commit else source.get('branch'), destination)
+        try:
+            clone_repository(source['url'], None if commit else source.get('branch'), destination)
+        except RuntimeError as exc:
+            message = str(exc).lower()
+            if any(term in message for term in ('repository not found', 'does not appear to be a git repository',
+                                               'remote branch')):
+                raise ConfigurationRequired('Additional repository ' + name +
+                    ' is unreachable or its declared branch is missing.') from None
+            raise
         if commit:
             run(['git', 'fetch', '--depth', '1', 'origin', commit], cwd=destination)
             run(['git', 'checkout', '--detach', commit], cwd=destination)
@@ -92,5 +100,6 @@ def resolve_repository_group(repository: Path, workspace: Path, data: dict, prim
     service_data = {key: value for key, value in data.items() if key not in {'repositories', 'verification'}}
     service_data['version'] = 2
     plan = resolve_services(repository, service_data, repository_roots=roots)
+    state['service_repositories'] = {name: service['repositoryName'] for name, service in plan['services'].items()}
     plan.update(source='repository_group', repositories=snapshots)
     return plan
