@@ -49,7 +49,7 @@
 }
 ```
 
-3570초는 AI HTTP 대기 3600초와 응답 여유 30초를 맞추는 예시다. 팀 공통 기본값 확정은 별도 합의가 필요하다. 기존 AI 호출은 현재 HTTP 대기에서 30초를 뺀 값을 `deadlineSeconds`에 전달하며, 신규 재시도 옵션은 아직 전달하지 않는다. 서비스에서 자동 사용하려면 AI 설정과 payload에 이 옵션을 연결해야 한다.
+3570초는 AI HTTP 대기 3600초와 응답 여유 30초를 맞추는 예시다. 팀 공통 기본값 확정은 별도 합의가 필요하다. AI 연동 브랜치 `feat/sandbox-timeout-retry-client`에서 `SANDBOX_PREPARATION_TIMEOUT_SECONDS`, `SANDBOX_PREPARATION_MAX_RETRIES`, `SANDBOX_RETRY_DOWNLOADS`, `SANDBOX_PHASE_TIMEOUTS`를 이 요청 옵션에 연결했다. 기본값에서는 신규 옵션을 전달하지 않는다. AI의 HTTP 대기에서 30초를 뺀 값을 `deadlineSeconds`에 전달하는 동작은 유지한다.
 
 ## 두 종류의 재시도
 
@@ -78,7 +78,7 @@
 
 동일한 `requestId`와 동일한 입력이면 완료 결과를 재사용한다. 패치·커밋·검사 설정이 바뀌면 새 실행 ID가 된다. `requestId`가 없으면 서버가 새 값을 부여한다. 새 측정을 의도하면 새 `requestId`를 사용한다.
 
-`GET /executions?requestId=...`로 마지막 실행을 조회할 수 있다. `state`는 `running`, `completed`, `cleanup_pending`이며 실행 중에는 단계와 경과 초도 제공한다. `startedAt`, `updatedAt`은 Unix epoch 초다. `completed`는 결과 저장과 정리가 끝났다는 뜻이며, 성공 여부는 결과의 `observationStatus`와 `exitCode`로 판단한다.
+`GET /executions?requestId=...`로 마지막 실행을 조회할 수 있다. `state`는 `running`, `completed`, `cleanup_pending`이며 실행 중에는 복구 목록에 마지막으로 기록된 준비 단계와 그 기록 이후의 경과 초도 제공한다. `startedAt`, `updatedAt`은 Unix epoch 초다. `completed`는 결과 저장과 정리가 끝났다는 뜻이며, 성공 여부는 결과의 `observationStatus`와 `exitCode`로 판단한다.
 
 최종 응답의 `source.execution`에 실행 ID, 결과 재사용 여부, 시도별 제한시간·오류 근거·정리 완료 여부, 전체 경과 초를 추가한다. 시간 초과는 기존 `timedOut`, `failurePhase`, `budget`, `validationSupport` 정보를 함께 반환한다. 사용자 앱 복구 결과와 인프라 시간 초과의 기존 분류를 유지한다.
 
@@ -95,7 +95,7 @@ SQLite와 복구 목록은 기본 `.runtime/executions`에 저장한다. `CODERE
 ## 팀 합의와 후속 과제
 
 - AI HTTP 대기, Sandbox 전체 상한, Backend stale 시간의 일관된 설정
-- 신규 옵션의 AI payload 연결과 서비스 기본 활성화 여부
+- 신규 옵션의 서비스 기본 활성화 여부
 - 재시도의 담당을 Sandbox 준비 단계와 AI 수정 재검증으로 구분하는 계약
 - 캐시 결과·실행 이력·복구 목록의 보존 기간과 정리
 - 중단된 작업에 대한 사용자 재검증 UX와 상태 표시

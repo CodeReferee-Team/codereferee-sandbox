@@ -29,6 +29,20 @@ API 실측 5건 모두 실행 중 중복 POST의 HTTP 409와 완료 후 같은 P
 
 실제 결과 5건을 현재 AI 응답 파서로 읽어 상태·exit code·시간 초과·인프라 오류·시도 이력이 유지되는 것을 확인했다. AI 모델·Judge 코드는 변경하지 않았다.
 
-이번 실측은 Sandbox API 내부 경로다. Backend·Redis·AI 전체 신규 재시도 실행, 새 AWS 호스트, Mac 실측은 추가 확인 범위다. 신규 옵션을 AI 요청에 연결하는 작업과 공통 시간 상한은 팀 합의가 필요하다. 모든 Chaos를 재실행한 세션은 아니며 기존 시나리오는 회귀 테스트로 확인했다.
+이후 실제 Backend → Redis → AI worker → Sandbox → Redis → Backend → PostgreSQL 경로도 실행했다. AI 연동 브랜치는 `feat/sandbox-timeout-retry-client`, Backend는 로컬 `dev`의 `c6d7bf7`을 별도 테스트 이미지로 빌드했다. 모델·Judge 코드는 변경하지 않았다.
+
+| 전체 E2E | Backend 최종 결과 | taskId |
+| --- | --- | --- |
+| 다운로드 두 번 연결 실패 후 단계 내 재시도 성공 | PASSED | `2df86ecd-a69b-4ab9-8fb6-f6c81d16f33c` |
+| 설치 12초 초과 후 정리·24초 재시도 성공 | PASSED | `fc5df402-a66c-4581-b9f2-0897f0517a9f` |
+| 전체 시간 부족으로 추가 재시도 중단 | ERROR | `f0ca0687-54f8-4192-8e54-58d9b1dc4594` |
+
+세 건 모두 실행 중 중복 HTTP 요청을 차단했고, 동일한 Redis 입력 메시지를 다시 AI worker에 전달했을 때 저장 결과를 재사용했다. 신규 resource ID가 추가되지 않는 것과 시도 이력·최종 상태의 PostgreSQL 저장을 확인했다. 실패 기록을 포함한 자원 ID 총 15개를 독립 조회해 요청 자원이 남지 않은 것을 확인했다.
+
+첫 전체 실행은 로컬 AI 가상환경의 langgraph 누락으로 시작 전에 중단됐다. 고정 의존성을 설치하고 접수된 테스트 요청을 이어 처리했다. 이어 구형 Backend 이미지에서 API는 PASSED이나 DB에는 이전 단계가 남는 기존 SQL 오류가 재현돼 성공으로 세지 않았다. 최신 Backend 코드로 별도 이미지를 빌드해 위 세 건을 새로 제출했다. Backend 소스 수정은 없었다.
+
+AI 계약·heartbeat 관련 Windows 테스트 9개는 통과했다. AI Linux 전체 pytest는 436개 통과·3개 제외·기존 수리 평가 2개 실패였다. 실패한 두 평가를 변경 전 HEAD의 설정과 Sandbox 요청 코드로 다시 실행해 동일한 실패를 확인했다. 이 평가 실패는 AI 팀 후속 확인 사항으로 남긴다. 최초 Windows 전체 실행에서는 pytest 미설치·기본 문자 인코딩·SQLite 파일 핸들 정리 오류도 발생했으므로 전체 통과로 기록하지 않는다.
+
+새 AWS 호스트와 Mac 실측은 추가 확인 범위다. 공통 시간 상한과 기본 활성화 여부는 팀 합의가 필요하다. 모든 Chaos를 재실행한 세션은 아니며 기존 시나리오는 회귀 테스트로 확인했다. 실제 LLM 수정 패치 생성도 이번 세션에 포함하지 않았다.
 
 원본 로그·JSON·로컬 테스트 레포와 드라이버는 `C:/Capstone_Project/tmp/timeout-retry-20261111`에 보존한다. 테스트용 레포·다운로드 서버·임시 로그는 Git에 추가하지 않는다.
