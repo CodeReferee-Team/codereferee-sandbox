@@ -1,0 +1,50 @@
+version: 2
+services:
+  web:
+    buildContext: web
+    proxyRoutes:
+      /api/:
+        service: api
+    resources: {cpu: 500m, memory: 128Mi}
+  api:
+    buildContext: api
+    healthPath: /health
+    resources: {cpu: 1000m, memory: 256Mi}
+    env:
+      DB_HOST: '{{dependency.database.host}}'
+      DB_PORT: '{{dependency.database.port}}'
+      DB_USER: '{{dependency.database.username}}'
+      DB_PASSWORD: '{{dependency.database.password}}'
+      DB_NAME: '{{dependency.database.database}}'
+dependencies:
+  database:
+    type: postgres
+    probePath: /api/items
+    probeSpec: &business
+      setup:
+        - path: /api/items
+          method: POST
+          body: {label: 'http-${runId}'}
+          extract: {itemId: id}
+      steps:
+        - path: '/api/items/${itemId}'
+          expect: {saved: true, label: 'http-${runId}'}
+entryService: web
+targetService: api
+probePath: /api/items
+probeSpec: *business
+browserProbe:
+  timeoutSeconds: 30
+  stepTimeoutSeconds: 5
+  steps:
+    - {action: goto, path: /}
+    - {action: fill, selector: '#item', value: 'ui-${runId}'}
+    - action: click
+      selector: '#save'
+      expectResponse:
+        path: /api/items
+        status: 201
+        expect: {saved: true}
+    - {action: assertText, selector: '#items', text: 'ui-${runId}'}
+    - {action: goto, path: /}
+    - {action: assertText, selector: '#items', text: 'ui-${runId}'}
