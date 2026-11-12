@@ -55,9 +55,29 @@ main 패치를 추가해도 backend 패치는 없어지지 않았고, 실제 마
 - 실측 패치/회차를 기존 결과 이벤트로 직렬화하고 SQLite에 저장·조회해 두 레포 패치와 2회차 기록 보존을 확인했다.
   새 Backend → Redis → AI → Sandbox → Backend → PostgreSQL E2E를 재실행한 것은 아니다.
 
+## 실제 로컬 LLM E2E 후속 결과
+
+Ollama `exaone3.5:2.4b`와 실제 Backend·Redis·Worker·Sandbox·kind를 연결해 두 번 실행했다.
+GitHub 형식 URL은 프로세스 한정 설정으로 커밋된 로컬 Git fixture에 연결했다.
+모델 응답을 대체하지 않았다. 두 번째 요청은
+`e75064d5-999b-4c0f-ab43-d7755fbe3da5`다.
+
+원본 Redis 장애 미복구와 메트릭 수신, 실제 LLM 응답, Backend FAILED 및 PostgreSQL/SQLite
+보고서 저장을 확인했다. 로컬 모델이 유효한 편집 스키마를 만들지 못해 패치 재배포는 실행되지 않았다.
+`patch_verified=false`이며 실제 LLM 자동 수리 성공은 미검증이다.
+저장된 두 레포 누적 패치의 앞선 실측과 이번 모델 생성 실패를 각각 보존한다.
+
+API 모델 입력의 하위 장애 종류 누락과 Backend의 수정 회차 저장 누락을 별도 브랜치에서 보완했다.
+Backend 전체 테스트 64개, AI 라우팅·Refiner 관련 테스트 56개가 통과했다.
+별도 Redis 재생 요청 `22263baf-b3ca-431d-9e83-7fcc87be3f39`에서는 앞서 실측한
+backend→main 두 회차와 패치 보고서가 Backend 조회·PostgreSQL·재기동 후에도 유지됐다.
+이는 저장된 관측의 계약 재생이며 실제 LLM 자동 수리 성공으로 집계하지 않는다.
+후속 두 요청을 포함한 resource ID 10개를 독립 조회해 요청 namespace·컨테이너·볼륨·
+호스트/kind 이미지·작업 폴더가 남지 않음을 확인했다.
+
 ## 남은 범위
 
-외부 LLM 실제 생성, 공개 GitHub 멀티레포 프로젝트, Linux/Mac·AWS의 이 기능 실측은 별도다.
+유효한 실제 LLM 패치 생성·재배포, 공개 GitHub 멀티레포 프로젝트, Linux/Mac·AWS의 이 기능 실측은 별도다.
 레포별 패치 UI와 여러 레포의 협조적 동시 수정, 자동 서비스 탐색·EC2 온디맨드는 이번 완료 범위가 아니다.
 병합 후 최종 버전의 전체 큐·배포 검증과 메트릭 연결 확인은 배포 체크리스트에서 진행한다.
 
