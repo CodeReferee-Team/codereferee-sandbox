@@ -73,6 +73,8 @@ sudo docker exec codereferee-control-plane crictl rmi --prune
 - [Chaos v1 Sandbox 계약](docs/chaos-v1-contract.md)
 - [범용 레포 실행 설정·자동 탐색](docs/repository-execution-plans.md)
 - [설정 파일 기반 멀티레포 검증](docs/multi-repository-validation.md)
+- [커밋 고정 멀티레포 패치 계약](docs/multi-repository-patches.md)
+- [멀티레포 순차 패치 실제 검증](docs/multi-repository-patch-validation.md)
 - [멀티레포 업무·장애·부하 및 정리 검증 기록](docs/multi-repository-validation-results.md)
 - [Vite 정적 프론트 실행·검증 범위](docs/frontend-static-validation.md)
 - [FE·API·DB 브라우저 업무 검증](docs/browser-business-validation.md)

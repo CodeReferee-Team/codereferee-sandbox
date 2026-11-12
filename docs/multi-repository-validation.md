@@ -67,6 +67,6 @@ Vite 정적 FE의 `proxyRoutes`와 `browserProbe`, 업무 `probeSpec`은 version
 ## 현재 범위와 후속
 
 - 여러 레포 URL만으로 서비스 관계를 추측하는 UI는 후속이다. 이번에는 설정 파일로 관계를 선언한다.
-- 기존 `patchDiff`는 기준 레포에 적용한다. 추가 레포별 패치 대상·기준 SHA를 전달하는 계약과 AI의 다중 소스 문맥 수집은 후속이다.
+- 기존 `patchDiff`는 기준 레포에 적용한다. 추가 레포는 `repositoryPatches`와 `repositoryCommits`로 기준 SHA와 누적 패치를 전달한다. [패치 계약](multi-repository-patches.md)을 참고한다. AI 연결 및 실측 범위는 해당 검증 기록을 별도로 확인한다.
 - 여러 레포의 커밋 조합을 기준으로 하는 이력 조회와 결과 비교 화면도 후속이다.
 - 멀티레포 자동 탐색, 여러 Sandbox 배정, EC2 자동 기동·종료는 별도 과제로 유지한다.
