@@ -116,6 +116,8 @@ class RepositoryValidationRequest(BaseModel):
     chaos_target: ChaosTarget | None = Field(default=None, alias="chaosTarget")
     deployment_profile: str | None = Field(default=None, alias="deploymentProfile")
     patch_diff: str | None = Field(default=None, alias="patchDiff")
+    repository_patches: dict[str, dict[str, str]] = Field(default_factory=dict, alias='repositoryPatches')
+    repository_commits: dict[str, str] = Field(default_factory=dict, alias='repositoryCommits')
     pods_affected_count: int | None = Field(default=None, alias="podsAffectedCount", strict=True, ge=1, le=16)
     # Seconds the caller will wait for this response. Without it each stage
     # keeps its own ceiling, as before.
@@ -126,6 +128,25 @@ class RepositoryValidationRequest(BaseModel):
     preparation_retries: int = Field(default=0, alias='maxPreparationRetries', ge=0, le=1)
     retry_downloads: bool = Field(default=False, alias='retryDownloads')
     phase_timeouts: dict[str, int] = Field(default_factory=dict, alias='phaseTimeouts')
+
+    @field_validator('repository_patches', mode='before')
+    @classmethod
+    def valid_repository_patches(cls, value):
+        from scripts.repository_patches import validate_repository_patches
+        from scripts.execution_plan import ConfigurationRequired
+        try:
+            return validate_repository_patches(value)
+        except ConfigurationRequired as exc:
+            raise ValueError(str(exc)) from None
+
+    @field_validator('repository_commits', mode='before')
+    @classmethod
+    def valid_repository_commits(cls, value):
+        from scripts.repository_patches import validate_repository_commits, ConfigurationRequired
+        try:
+            return validate_repository_commits(value)
+        except ConfigurationRequired as exc:
+            raise ValueError(str(exc)) from None
 
     @field_validator('phase_timeouts', mode='before')
     @classmethod
@@ -478,6 +499,8 @@ def attach_repository_checks(result: dict, deployed: dict) -> None:
     if plan.get('repositories'):
         result.setdefault('source', {})['repositories'] = plan['repositories']
         result['source']['service_repositories'] = plan['serviceRepositories']
+    if plan.get('repositoryPatches'):
+        result.setdefault('source', {})['repository_patches'] = plan['repositoryPatches']
     checks = deployed.get('sandboxReport')
     if not isinstance(checks, dict):
         return
@@ -727,6 +750,12 @@ def deploy_repository(request: RepositoryValidationRequest, budget: Budget | Non
                *(['--branch', request.branch] if request.branch else []),
                *(['--commit-sha', request.commit_sha] if request.commit_sha else [])]
     patch_path: Path | None = None
+    repository_patches_path: Path | None = None
+    repository_commits_path: Path | None = None
+    combined_patch_bytes = len((request.patch_diff or '').encode('utf-8')) + sum(
+        len(item['patchDiff'].encode('utf-8')) for item in request.repository_patches.values())
+    if combined_patch_bytes > 1_000_000:
+        raise HTTPException(status_code=422, detail='Combined patches exceed the 1 MiB Sandbox limit.')
     if request.patch_diff is not None:
         if len(request.patch_diff.encode("utf-8")) > 1_000_000:
             raise HTTPException(status_code=422, detail="patchDiff exceeds the 1 MiB Sandbox limit.")
@@ -739,6 +768,18 @@ def deploy_repository(request: RepositoryValidationRequest, budget: Budget | Non
         patch_path.write_text(request.patch_diff, encoding="utf-8", newline="\n")
         command.extend(["--patch-file", str(patch_path)])
     try:
+        if request.repository_patches:
+            runtime = PROJECT_ROOT / '.runtime'
+            runtime.mkdir(exist_ok=True)
+            repository_patches_path = runtime / f'repository-patches-{uuid4().hex}.json'
+            repository_patches_path.write_text(json.dumps(request.repository_patches), encoding='utf-8')
+            command.extend(['--repository-patches-file', str(repository_patches_path)])
+        if request.repository_commits:
+            runtime = PROJECT_ROOT / '.runtime'
+            runtime.mkdir(exist_ok=True)
+            repository_commits_path = runtime / f'repository-commits-{uuid4().hex}.json'
+            repository_commits_path.write_text(json.dumps(request.repository_commits), encoding='utf-8')
+            command.extend(['--repository-commits-file', str(repository_commits_path)])
         stage_limit = request.preparation_timeout_seconds or DEPLOY_TIMEOUT_SECONDS
         seconds, bound = (budget or Budget(None, time.monotonic())).timeout_for(stage_limit)
         options = {}
@@ -754,6 +795,10 @@ def deploy_repository(request: RepositoryValidationRequest, budget: Budget | Non
     finally:
         if patch_path:
             patch_path.unlink(missing_ok=True)
+        if repository_patches_path:
+            repository_patches_path.unlink(missing_ok=True)
+        if repository_commits_path:
+            repository_commits_path.unlink(missing_ok=True)
     try:
         payload = json.loads(completed.stdout)
     except json.JSONDecodeError:

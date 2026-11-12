@@ -124,3 +124,27 @@ class MultiRepositoryTests(unittest.TestCase):
             resolve_repository_group(self.main, self.workspace, self.declaration, self.primary,
                 Mock(side_effect=RuntimeError('fatal: repository not found')), Mock(), self.state)
         self.assertEqual(self.state['repository'], 'backend')
+
+    def test_explicit_group_commit_pins_unmodified_additional_source(self):
+        clone = Mock(side_effect=self.clone)
+        runner = Mock(return_value=subprocess.CompletedProcess(['git'], 0, 'c'*40+'\n', ''))
+        plan = resolve_repository_group(self.main, self.workspace, self.declaration, self.primary,
+            clone, runner, self.state, repository_commits={'backend': 'c'*40})
+        self.assertIsNone(clone.call_args.args[1])
+        self.assertEqual(plan['repositories']['backend']['commitSha'], 'c'*40)
+
+    def test_patch_and_group_commit_conflict_is_rejected_before_clone(self):
+        clone = Mock()
+        with self.assertRaises(ConfigurationRequired):
+            resolve_repository_group(self.main, self.workspace, self.declaration, self.primary,
+                clone, Mock(), self.state, repository_commits={'backend': 'b'*40},
+                repository_patches={'backend': {'commitSha': 'c'*40, 'patchDiff': 'change'}})
+        clone.assert_not_called()
+
+    def test_unknown_repository_patch_alias_is_rejected_before_clone(self):
+        clone = Mock()
+        with self.assertRaises(ConfigurationRequired):
+            resolve_repository_group(self.main, self.workspace, self.declaration, self.primary,
+                clone, Mock(), self.state,
+                repository_patches={'unknown': {'commitSha': 'c'*40, 'patchDiff': 'change'}})
+        clone.assert_not_called()

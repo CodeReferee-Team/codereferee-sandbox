@@ -59,8 +59,14 @@ def record_snapshot(name, snapshot):
 
 
 def resolve_repository_group(repository: Path, workspace: Path, data: dict, primary: dict,
-                             clone_repository, run, state: dict) -> dict:
+                             clone_repository, run, state: dict, *, repository_patches=None,
+                             repository_commits=None, primary_patch=None) -> dict:
+    from repository_patches import apply_repository_patches, validate_repository_patches, validate_repository_commits
+    patches = validate_repository_patches(repository_patches or {})
+    requested_commits = validate_repository_commits(repository_commits or {})
     sources = validate_sources(data)
+    if (set(patches) | set(requested_commits)) - set(sources):
+        raise ConfigurationRequired('Patch references an undeclared additional repository.')
     roots = {'main': repository}
     snapshots = {'main': primary}
     state.update(stage='clone', repository_roots=roots, repositories=snapshots)
@@ -73,7 +79,12 @@ def resolve_repository_group(repository: Path, workspace: Path, data: dict, prim
         previous = pinned.get(name)
         if previous and previous['url'] != source['url']:
             raise ConfigurationRequired('Repository URL changed within a preparation retry.')
-        commit = previous['commitSha'] if previous else source.get('commitSha')
+        patch_commit = patches.get(name, {}).get('commitSha')
+        commits = {commit for commit in (patch_commit, requested_commits.get(name), source.get('commitSha'),
+                   previous['commitSha'] if previous else None) if commit}
+        if len(commits) > 1:
+            raise ConfigurationRequired('Patch base commit conflicts with repository ' + name)
+        commit = next(iter(commits), None)
         try:
             clone_repository(source['url'], None if commit else source.get('branch'), destination)
         except RuntimeError as exc:
@@ -89,10 +100,16 @@ def resolve_repository_group(repository: Path, workspace: Path, data: dict, prim
         resolved = run(['git', 'rev-parse', 'HEAD'], cwd=destination).stdout.strip()
         if not re.fullmatch(r'[a-f0-9]{40}', resolved):
             raise RuntimeError('Git did not return a valid repository commit SHA.')
+        if commit and resolved != commit:
+            raise ConfigurationRequired('Resolved commit does not match repository ' + name)
         roots[name] = destination
         snapshots[name] = dict(source, commitSha=resolved)
         record_snapshot(name, snapshots[name])
     state.pop('repository', None)
+    if patches or primary_patch is not None:
+        apply_repository_patches(roots, snapshots, patches, workspace, run, state, primary_patch)
+        if primary_patch is not None:
+            data = read_group_declaration(repository, sources)
     state.update(stage='detect', service=None)
     if 'verification' in data:
         from repository_checks import check_plan
@@ -102,4 +119,14 @@ def resolve_repository_group(repository: Path, workspace: Path, data: dict, prim
     plan = resolve_services(repository, service_data, repository_roots=roots)
     state['service_repositories'] = {name: service['repositoryName'] for name, service in plan['services'].items()}
     plan.update(source='repository_group', repositories=snapshots)
+    if state.get('repository_patches'):
+        plan['repositoryPatches'] = state['repository_patches']
     return plan
+
+
+def read_group_declaration(repository, original_sources):
+    from execution_plan import read_yaml
+    data = read_yaml(repository / '.codereferee/validation.yaml')
+    if data.get('version') != 3 or validate_sources(data) != original_sources:
+        raise ConfigurationRequired('A combined primary patch must preserve repository declarations.')
+    return data
