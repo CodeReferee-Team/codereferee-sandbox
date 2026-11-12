@@ -59,7 +59,15 @@ def main() -> int:
             run(['git', 'checkout', '--detach', args.commit_sha], cwd=repository)
         stage = 'patch'
         config_only = False
-        if args.patch_file:
+        patches = {}
+        repository_commits = {}
+        if getattr(args, 'repository_patches_file', None):
+            from repository_patches import validate_repository_patches
+            patches = validate_repository_patches(json.loads(args.repository_patches_file.read_text(encoding='utf-8')))
+        if getattr(args, 'repository_commits_file', None):
+            from repository_patches import validate_repository_commits
+            repository_commits = validate_repository_commits(json.loads(args.repository_commits_file.read_text(encoding='utf-8')))
+        if args.patch_file and not (patches or repository_commits):
             before = validation_config(repository)
             apply_patch(repository, args.patch_file)
             config_only = only_scaling_changed(repository, before)
@@ -73,14 +81,19 @@ def main() -> int:
                 from multi_repository import resolve_repository_group
                 plan = resolve_repository_group(repository, workspace, declaration,
                     {'url': args.repository_url, 'branch': args.branch, 'commitSha': commit_sha},
-                    clone, run, group_state)
+                    clone, run, group_state, repository_patches=patches, repository_commits=repository_commits,
+                    primary_patch=args.patch_file if (patches or repository_commits) else None)
             else:
+                if patches or repository_commits:
+                    raise ConfigurationRequired('repositoryPatches requires a version 3 repository group.')
                 plan = resolve_plan(repository)
             payload = deploy_service_group(repository, workspace, request, namespace, commit_sha, plan, args, group_state)
             payload.update(repository={'url': args.repository_url, 'branch': args.branch, 'commitSha': commit_sha},
                            workspaceCleanup=cleanup_workspace(workspace))
             print(json.dumps(payload))
             return 0
+        if patches or repository_commits:
+            raise ConfigurationRequired('repositoryPatches requires a version 3 group without an explicit profile.')
         stage = 'verify'
         if config_only:
             checks = skipped_checks(before)
@@ -220,7 +233,9 @@ def main() -> int:
             'source': {'artifact_cleanup': cleanup, 'workspace_cleanup': cleanup['workspace_cleanup'],
                        **({'service_repositories': group_state['service_repositories']}
                           if group_state.get('service_repositories') else {}),
-                       **({'repositories': group_state['repositories']} if group_state.get('repositories') else {})}}}))
+                       **({'repositories': group_state['repositories']} if group_state.get('repositories') else {}),
+                       **({'repository_patches': group_state['repository_patches']}
+                          if group_state.get('repository_patches') else {})}}}))
         return 1
     finally:
         if workspace.exists():
@@ -334,6 +349,8 @@ def build_and_deploy_service_group(repository: Path, workspace: Path, request: s
                               **({'repositories': plan['repositories'], 'serviceRepositories': {
                                   name: config['repositoryName'] for name, config in plan['services'].items()}}
                                  if plan.get('repositories') else {}),
+                              **({'repositoryPatches': plan['repositoryPatches']}
+                                 if plan.get('repositoryPatches') else {}),
                               'servicePort': target['servicePort'], 'warnings': plan['warnings']}}
 
 
@@ -351,6 +368,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-id", required=True)
     parser.add_argument("--profile", help="Optional checked-in Sandbox deployment profile override.")
     parser.add_argument("--patch-file", type=Path)
+    parser.add_argument('--repository-patches-file', type=Path)
+    parser.add_argument('--repository-commits-file', type=Path)
     parser.add_argument("--rollout-timeout-seconds", type=int, default=240)
     return parser.parse_args()
 
@@ -399,15 +418,11 @@ def clone(url: str, branch: str | None, destination: Path) -> None:
 
 
 def apply_patch(repository: Path, patch_file: Path) -> None:
+    from repository_patches import check_patch_file, check_patch_targets
     patch_file = patch_file.resolve()
-    if not patch_file.is_file():
-        raise RuntimeError("Patch file was not found.")
-    if patch_file.stat().st_size > 1_000_000:
-        raise RuntimeError("Patch exceeds the 1 MiB Sandbox limit.")
-    patch = patch_file.read_text(encoding="utf-8")
-    if any(value in patch for value in (".github/workflows/", ".git/", "../")):
-        raise RuntimeError("Patch changes a protected path.")
+    check_patch_file(patch_file)
     run(["git", "apply", "--check", str(patch_file)], cwd=repository)
+    check_patch_targets(repository, patch_file, run)
     run(["git", "apply", str(patch_file)], cwd=repository)
 
 

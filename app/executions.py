@@ -71,7 +71,12 @@ class ExecutionStore:
 
     @staticmethod
     def identity(request) -> str:
-        canonical = json.dumps(request.model_dump(mode='json'), sort_keys=True, separators=(',', ':'))
+        payload = request.model_dump(mode='json')
+        # Preserve pre-extension replay identities for requests without group patches.
+        for key in ('repository_patches', 'repository_commits'):
+            if not payload.get(key):
+                payload.pop(key, None)
+        canonical = json.dumps(payload, sort_keys=True, separators=(',', ':'))
         return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
 
     def get(self, execution_id: str):
