@@ -16,8 +16,12 @@ from urllib.parse import quote, quote_plus
 
 import yaml
 
-from collect_baseline import kubectl_command, kubectl_environment
-from pod_selection import owned_pods
+try:
+    from .collect_baseline import kubectl_command, kubectl_environment
+    from .pod_selection import owned_pods
+except ImportError:  # Direct CLI execution keeps scripts/ on sys.path.
+    from collect_baseline import kubectl_command, kubectl_environment
+    from pod_selection import owned_pods
 
 MAX_PODS = 4
 MAX_CONTAINERS = 4
