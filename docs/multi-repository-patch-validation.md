@@ -127,3 +127,21 @@ resource ID 27개의 namespace·컨테이너·볼륨·호스트/kind 이미지·
 
 이 실행은 정상 패치를 이용한 Sandbox 계약 검증이다. 앞서 실제 Llama가 생성한 패치를
 재배포한 기록은 별도로 보존하며, 그 패치의 자동 수리 성공은 확보하지 못했다.
+
+### 최종 로컬 Llama 전체 큐 E2E
+
+최종 연동 코드로 `llama3.1:8b`를 다시 실행했다. 요청은
+`b0d32d78-f48e-45a1-a177-23b3e6105fe7`이며 실제 Backend 제출 → Redis → Worker →
+Sandbox 원본 Chaos 관측 → 실제 LLM 호출 → 패치 재배포 → Backend 저장을 수행했다.
+새 코드·모델 응답·패치를 대역으로 교체하지 않았다. Git URL은 커밋된 로컬 fixture 두 개에 연결했다.
+
+모델 호출 9회, backend 레포 패치 재배포 2회가 실행됐다. 두 수정본은 Python 들여쓰기 오류로
+build 단계에서 실패했다. 마지막 생성안은 선택된 backend 레포에 없는 설정 파일을 수정하려 해
+기존 편집 가드와 재요청 후 거절됐다. main으로 전환해 수리하는 성공 사례는 확보하지 못했다.
+Backend는 `FAILED`, `patch_verified=false`로 종료됐고 두 회차와 최종 보고서의
+PostgreSQL·SQLite 일치, 원본 메트릭 `received`를 확인했다.
+
+이 결과는 실제 LLM을 포함한 전체 큐 경로의 실패 처리 검증이다. 순차 멀티레포 자동 수리 성공을
+확인하려면 적절한 패치를 생성하는 모델 설정으로 추가 실행이 필요하다.
+원본은 로컬 검증 경로의 `llm-e2e-llama-final`에 보존했다.
+독립 자원 대조에서 이번 실행을 포함한 resource ID 30개의 Sandbox 자원 잔존이 없었다.
