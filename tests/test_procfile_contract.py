@@ -16,9 +16,39 @@ class ProcfileContractTests(unittest.TestCase):
             (root / 'requirements.txt').write_text('gunicorn\nflask\n', encoding='utf-8')
             return resolve_plan(root)
 
+    def raw_plan(self, procfile_text):
+        """Procfile 본문을 그대로 쓴다. plan()은 'web: ' 접두사를 붙여버린다."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'Procfile').write_text(procfile_text, encoding='utf-8')
+            (root / 'requirements.txt').write_text('gunicorn\nflask\n', encoding='utf-8')
+            return resolve_plan(root)
+
     def test_port_prefix_is_not_the_port_variable(self):
         with self.assertRaises(ConfigurationRequired):
             self.plan('gunicorn autoapp:app -b 0.0.0.0:$PORT_SUFFIX')
+
+    def test_process_type_is_case_sensitive(self):
+        # Procfile 의 프로세스 타입은 대소문자를 구분한다. 'Web' 은 web 다이노가
+        # 아니므로 플랫폼은 그 명령을 웹으로 돌리지 않는다. 우리가 웹으로 배포하면
+        # 사용자가 운영하는 것과 다른 프로세스를 검증하고 신뢰성을 판정하게 된다.
+        for text in ('Web: gunicorn service:app -b 0.0.0.0:$PORT\n',
+                     'WEB: gunicorn service:app -b 0.0.0.0:$PORT\n'):
+            with self.subTest(text=text), self.assertRaises(ConfigurationRequired):
+                self.raw_plan(text)
+
+    def test_indented_line_is_not_a_process_declaration(self):
+        # 프로세스 타입은 줄 맨 앞에 온다. 들여쓴 줄은 선언이 아니다.
+        with self.assertRaises(ConfigurationRequired):
+            self.raw_plan('   web: gunicorn service:app -b 0.0.0.0:$PORT\n')
+
+    def test_lowercase_web_at_line_start_still_works(self):
+        # 위 둘을 조이면서 정상 선언까지 막으면 안 된다.
+        plan = self.raw_plan('release: python manage.py migrate\n'
+                             'web: gunicorn service:app -b 0.0.0.0:$PORT\n'
+                             'worker: celery -A service worker\n')
+        self.assertEqual(plan['port'], 8000)
+        self.assertIn('gunicorn service:app', plan['generatedDockerfile'])
 
     def test_missing_requirements_requires_explicit_installation(self):
         with tempfile.TemporaryDirectory() as directory:

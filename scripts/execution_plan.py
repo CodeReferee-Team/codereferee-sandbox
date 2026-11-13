@@ -506,7 +506,16 @@ def procfile_python_recipe(repository: Path, port: int | None = None) -> dict | 
         raise ConfigurationRequired('Procfile exceeds 64 KB.')
     declarations = []
     for line in procfile.read_text(encoding='utf-8').splitlines():
-        m = re.match(r'\s*web\s*:\s*(\S.*\S|\S)\s*$', line, re.IGNORECASE)
+        # 소문자 web 이 줄 맨 앞에 올 때만 web 프로세스다. Procfile 의 프로세스
+        # 타입은 대소문자를 구분하므로 'Web:' 은 web 다이노가 아니라 'Web' 이라는
+        # 별개 프로세스이고, 들여쓴 줄도 프로세스 선언이 아니다. 느슨하게 받으면
+        # 플랫폼이 web 으로 돌리지 않을 명령을 우리가 web 으로 배포하게 되는데,
+        # 그러면 사용자가 운영하는 것과 다른 프로세스를 검증해놓고 신뢰성을
+        # 판정하는 셈이다. 추측하지 않고 선언을 따른다는 이 경로의 전제와 어긋난다.
+        #
+        # 여기서 못 받으면 ConfigurationRequired 가 아니라 None 으로 떨어져
+        # 기존 감지 경로를 그대로 탄다. 거부가 아니라 "이 신호는 안 쓴다"는 뜻이다.
+        m = re.match(r'web\s*:\s*(\S.*\S|\S)\s*$', line)
         if m:
             declarations.append(m.group(1).strip())
     if not declarations:
