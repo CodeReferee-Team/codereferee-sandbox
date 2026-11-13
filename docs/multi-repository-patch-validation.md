@@ -94,11 +94,11 @@ Backend·PostgreSQL·SQLite 보고서와 세 회차가 일치했고 메트릭 �
 수리 결과는 `patch_verified=false`로 보존했다.
 
 AI 연동에서는 실제 실패 단계 로그 전달, 선택 레포 URL 유지, Windows의 누적 패치
-stdin UTF-8 전송을 보완했다. Critic의 공유 의존성 안내도 세 줄 추가했다.
-관련 AI 회귀 121개가 통과했다. Judge 판정은 기존 규칙으로 계산했다.
+stdin UTF-8 전송을 보완했다. Critic 안내 세 줄은 실험 후 최종 연동 범위에서 제외했다.
+Critic 실험 안내를 제거한 최종 코드에서 관련 AI 회귀 120개가 통과했다. Judge 판정은 기존 규칙으로 계산했다.
 
-현재 원격 AI 코드는 모델을 환경변수로 선택한다. 과거 Llama/Qwen 검증 기록과
-팀의 최종 실행 환경 모델을 구분해야 하므로, 확정한 모델명·태그 확인 후 후속 실측을 진행한다.
+현재 원격 AI 코드는 모델을 환경변수로 선택한다. 제공된 팀 대화에서 운영은 Groq의
+`openai/gpt-oss-120b`로 결정됐음을 확인했다. 과거 로컬 Llama 시험과 실제 운영 API를 구분한다.
 AI의 `docs/multi-repository-patches.md`에 각 요청과 원격 설정 확인 결과를 기록했다.
 
 ### 양성 제어와 자원 복원
@@ -111,3 +111,19 @@ AI의 `docs/multi-repository-patches.md`에 각 요청과 원격 설정 확인 �
 작업 폴더 잔존이 없음을 독립 대조했다. 기존 Docker Desktop Litmus 워크로드 10개도
 저장한 원래 복제본 수로 복원했고 전체 Ready를 확인했다.
 검증용 신규 Ollama 가중치를 정리한 뒤 C 드라이브 여유는 약 6.38GB였다.
+
+## Sandbox 멀티레포 계약 최종 재검증
+
+모델 성능 평가에서 범위를 좁혀, 알려진 정상 패치를 main과 backend에 함께 전달한 실제
+Sandbox API 실행을 추가했다. 두 레포의 고정 commit SHA, 패치 SHA-256, 적용 완료를 응답에서
+대조했다. 실제 Redis 장애와 부하 시나리오가 모두 실행되고 복구됐으며 미실행 항목은 없었다.
+목표 동시 사용자 5명 구간은 100요청 중 실패 0건이고 `target_met=true`였다.
+200명 구간에는 시간 초과 57건이 관측됐으므로 전체 부하 단계 무오류로 해석하지 않는다.
+
+응답은 `observed / exitCode 0 / recovered true`였다. 같은 요청 재전송은 저장된 결과를
+반환했고 새 실행을 만들지 않았다. Sandbox 관련 회귀 25개가 통과했으며, 이번 실행을 포함한
+resource ID 27개의 namespace·컨테이너·볼륨·호스트/kind 이미지·작업 폴더 잔존이 없었다.
+원본은 로컬 검증 경로의 `sandbox-focused-result.json`과 `sandbox-focused-summary.json`이다.
+
+이 실행은 정상 패치를 이용한 Sandbox 계약 검증이다. 앞서 실제 Llama가 생성한 패치를
+재배포한 기록은 별도로 보존하며, 그 패치의 자동 수리 성공은 확보하지 못했다.
