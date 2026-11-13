@@ -515,7 +515,8 @@ def procfile_python_recipe(repository: Path, port: int | None = None) -> dict | 
         #
         # 여기서 못 받으면 ConfigurationRequired 가 아니라 None 으로 떨어져
         # 기존 감지 경로를 그대로 탄다. 거부가 아니라 "이 신호는 안 쓴다"는 뜻이다.
-        m = re.match(r'web\s*:\s*(\S.*\S|\S)\s*$', line)
+        # 프로세스 이름 뒤에도 공백 없이 정확한 web: 선언이어야 한다.
+        m = re.match(r'web:\s*(\S.*\S|\S)\s*$', line)
         if m:
             declarations.append(m.group(1).strip())
     if not declarations:

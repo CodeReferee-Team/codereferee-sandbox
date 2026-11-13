@@ -50,6 +50,23 @@ class ProcfileContractTests(unittest.TestCase):
         self.assertEqual(plan['port'], 8000)
         self.assertIn('gunicorn service:app', plan['generatedDockerfile'])
 
+    def test_whitespace_before_colon_is_not_a_process_declaration(self):
+        for process in ('web :', 'web\t:', 'web  :'):
+            with self.subTest(process=process), self.assertRaises(ConfigurationRequired):
+                self.raw_plan(process + ' gunicorn service:app -b 0.0.0.0:$PORT\n')
+
+    def test_whitespace_after_colon_is_allowed(self):
+        for separator in ('', ' ', '\t'):
+            with self.subTest(separator=separator):
+                plan = self.raw_plan('web:' + separator + 'gunicorn service:app -b 0.0.0.0:$PORT\n')
+                self.assertIn('gunicorn service:app', plan['generatedDockerfile'])
+
+    def test_invalid_spaced_declaration_does_not_conflict_with_valid_web(self):
+        plan = self.raw_plan('web : gunicorn other:app -b 0.0.0.0:$PORT\n'
+                             'web: gunicorn service:app -b 0.0.0.0:$PORT\n')
+        self.assertIn('gunicorn service:app', plan['generatedDockerfile'])
+        self.assertNotIn('gunicorn other:app', plan['generatedDockerfile'])
+
     def test_missing_requirements_requires_explicit_installation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
