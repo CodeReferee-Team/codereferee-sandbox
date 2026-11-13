@@ -82,3 +82,32 @@ backend→main 두 회차와 패치 보고서가 Backend 조회·PostgreSQL·재
 병합 후 최종 버전의 전체 큐·배포 검증과 메트릭 연결 확인은 배포 체크리스트에서 진행한다.
 
 원본 응답·검증 스크립트·실패 로그는 Git 추적 밖 `C:/Capstone_Project/tmp/multirepo-patch-20261113`에 보존한다.
+
+## 기존 검증 모델의 실제 재배포 E2E 후속
+
+Llama 3.1 8B와 Qwen 2.5 Coder 7B로 실제 모델 편집 생성과 재배포를 실행했다.
+최종 Qwen 요청 `2d1da9c8-2b96-4b59-b9f9-a7940a1447ff`는 두 로컬 Git 레포의
+재연결 대기값 제어 사례에서 모델 호출 8회와 패치 재배포 3회를 수행했다.
+1·3회차에는 수정본을 배포한 뒤 실제 Redis 장애를 다시 주입했고 복구되지 않았다.
+2회차는 수정본의 Python 컴파일 오류로 중단됐다.
+Backend·PostgreSQL·SQLite 보고서와 세 회차가 일치했고 메트릭 수신 상태는 `received`였다.
+수리 결과는 `patch_verified=false`로 보존했다.
+
+AI 연동에서는 실제 실패 단계 로그 전달, 선택 레포 URL 유지, Windows의 누적 패치
+stdin UTF-8 전송을 보완했다. Critic의 공유 의존성 안내도 세 줄 추가했다.
+관련 AI 회귀 121개가 통과했다. Judge 판정은 기존 규칙으로 계산했다.
+
+현재 원격 AI 코드는 모델을 환경변수로 선택한다. 과거 Llama/Qwen 검증 기록과
+팀의 최종 실행 환경 모델을 구분해야 하므로, 확정한 모델명·태그 확인 후 후속 실측을 진행한다.
+AI의 `docs/multi-repository-patches.md`에 각 요청과 원격 설정 확인 결과를 기록했다.
+
+### 양성 제어와 자원 복원
+
+같은 제어 사례에 사람이 작성한 재연결 대기값 1초 패치를 적용한 별도 실행은
+실제 Redis 장애 후 14.91초에 복구했다. `observed / exitCode 0 / recovered true`와
+요청 정리 완료를 확인했다. LLM 성공률이나 Backend E2E 결과에는 합산하지 않는다.
+
+실패를 포함한 resource ID 26개의 요청 namespace·컨테이너·볼륨·호스트/kind 이미지·
+작업 폴더 잔존이 없음을 독립 대조했다. 기존 Docker Desktop Litmus 워크로드 10개도
+저장한 원래 복제본 수로 복원했고 전체 Ready를 확인했다.
+검증용 신규 Ollama 가중치를 정리한 뒤 C 드라이브 여유는 약 6.38GB였다.
