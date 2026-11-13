@@ -126,3 +126,37 @@ configuration_required=true, failed_step=detect, exitCode=89 및 설치 설정 �
 이 기록은 최종 Procfile 처리 코드의 로컬 Sandbox 내부 검증입니다.
 AWS, Backend/AI 전체 연동, LLM patch 생성, 모든 runner의 실제 서비스 실행,
 모든 공개 레포의 배포 성공을 보장하는 기록으로 확대하지 않습니다.
+
+## 최신 dev 통합 검증 (2026-11-13)
+
+Sandbox #32~#39가 반영된 dev `9b51d9f` 위로 Procfile 변경을 정렬했다.
+이전 Windows 캐시 보정 커밋 `e62b07c`는 제외했다. 해당 커밋은 Python 캐시를 root 소유로
+준비했으나 최신 dev는 검사 컨테이너와 캐시 소유자를 같은 uid로 맞추는 정책을 사용한다.
+`scripts/repository_checks.py`와 `tests/test_repository_checks.py`의 blob이 최신 dev와
+동일함을 확인했다. 나머지 기존 커밋 6개의 작성자·작성일·메시지는 보존했다.
+Procfile 처리 함수의 AST와 Procfile 계약 테스트 파일도 기존 PR 코드와 일치한다.
+
+전체 Windows 회귀 392개 중 391개 통과·POSIX 조건 1개 제외를 확인했다.
+POSIX Bash 테스트는 이 Windows 실행 목록에서 제외했다.
+
+### 실제 Sandbox API 실행
+
+커밋된 로컬 Git fixture를 프로세스 한정 Git URL 재작성으로 clone했다.
+fixture에는 Procfile, requirements.txt, 비관습적인 entrypoint.py와 HTTP 응답 테스트를 두었고,
+Dockerfile·validation.yaml·deploymentProfile 없이 실행했다.
+
+| 요청 | 결과 |
+| --- | --- |
+| `procfile-smoke-1794571973358112800` | 실제 clone·의존성 설치·테스트·생성 이미지 build·kind 배포·HTTP 관측 성공, observed / exitCode 0 |
+| `procfile-container-kill-1794572127995583800` | observed / exitCode 0 / recovered true, 컨테이너 재시작 0→1·container ID 변경, HTTP 복구 2.63초 |
+| `procfile-missing-requirements-1794572384565549100` | configuration_required=true, exitCode 89로 설치 선언 보완 요구 |
+
+정상 실행의 executionPlan은 source=stack_detection, dockerfile=generated, servicePort=8000이었다.
+Container Kill에서 Pod UID는 유지되고 컨테이너가 교체됐다. 실험 전체 99.7초와
+HTTP 실패부터 복구까지 관측한 2.63초를 각각 기록했다.
+
+세 요청의 namespace·관측 namespace·컨테이너·볼륨·호스트/kind 이미지·workspace 잔존이
+없음을 별도 Docker·Kubernetes 조회로 확인했다. 원본 JSON과 검증 스크립트는 로컬
+`C:/Capstone_Project/tmp/multirepo-patch-20261113/procfile-dev-e2e`에 보존했다.
+이번 통합 실측 범위는 Windows·Docker Desktop·kind의 단일 uvicorn Procfile 앱이다.
+다른 runner, AWS, Backend/AI 전체 큐, 외부 메트릭 수신은 별도 확인 범위다.
