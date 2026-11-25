@@ -12,7 +12,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from collect_baseline import kubectl_environment
-from local_databases import IMAGES as DATABASE_IMAGES, PGVECTOR_IMAGE, container_arguments, container_environment, detect_local_databases, readiness_command
+from local_databases import (IMAGES as DATABASE_IMAGES, PGVECTOR_IMAGE, container_arguments, container_environment,
+                             declared_endpoints, detect_local_databases, readiness_command, unmet_endpoints)
 from execution_plan import MAVEN_IMAGES, ConfigurationRequired, inside, java_release, node_commands, node_major, poetry_requirements, read_yaml
 from execution_control import record_phase, record_resource, remaining_timeout
 
@@ -231,6 +232,32 @@ def junit_test_count(repository: Path, stack: str) -> int | None:
     return count
 
 
+def junit_failure_types(repository: Path, stack: str) -> list[str]:
+    """깨진 테스트의 예외 클래스명. 자유 형식 로그가 아니라 러너가 만든 구조화 산출물이다.
+
+    미충족 의존성이라는 우리 관측을 교차 확인하는 용도다. PSQLException 이나
+    ConnectException 이 보이면 DB 를 못 띄운 것과 실패가 같은 방향을 가리킨다.
+    판단을 이 값만으로 하지는 않는다.
+    """
+    pattern = '**/build/test-results/test/TEST-*.xml' if stack == 'gradle' else '**/target/surefire-reports/TEST-*.xml'
+    types: list[str] = []
+    for path in repository.glob(pattern):
+        checked = inside(repository, path.relative_to(repository).as_posix())
+        if checked.stat().st_size > 2_000_000:
+            continue
+        try:
+            root = ET.fromstring(checked.read_text(encoding='utf-8'))
+        except (ET.ParseError, OSError):
+            continue
+        for node in root.iter():
+            name = node.attrib.get('type')
+            if node.tag in {'error', 'failure'} and name and name not in types:
+                types.append(name)
+                if len(types) >= 12:
+                    return types
+    return types
+
+
 def start_check_databases(databases: dict, request: str, environment: dict, deadline: float) -> tuple[list[str], dict]:
     """레포 설정이 가리키는 로컬 DB를 띄운다. 검사 컨테이너는 첫 DB의 네트워크를 함께 써서
     `localhost:3306` 같은 레포 설정을 고치지 않고 그대로 붙는다. Spring의 contextLoads 테스트가
@@ -358,8 +385,12 @@ def verify_repository(repository: Path, cache: Path, request: str, *, timeout: i
             raise CheckFailure(report)
         network = None
         # 검사 단계에서는 테스트 설정의 DB 를 본다. 돌리는 것이 테스트라서다.
-        databases = detect_local_databases(inside(repository, plan['workingDirectory']), include_tests=True)
+        source_root = inside(repository, plan['workingDirectory'])
+        databases = detect_local_databases(source_root, include_tests=True)
         databases.update(plan['databases'])
+        # 레포가 기대하는 것과 우리가 띄운 것의 차이. 테스트가 깨졌을 때 그 이유를
+        # 레포 로그가 아니라 우리 관측으로 설명하기 위한 재료다.
+        unmet = unmet_endpoints(declared_endpoints(source_root, include_tests=True), databases)
         if databases:
             database_names, database_report = start_check_databases(databases, request, environment,
                 deadline=time.monotonic() + min(180, max(1, timeout - (time.monotonic() - started))))
@@ -371,7 +402,7 @@ def verify_repository(repository: Path, cache: Path, request: str, *, timeout: i
                 raise CheckFailure(report)
             network = 'container:' + database_names[0]
         report = _verify_repository(repository, volume, request, timeout=max(1, timeout - (time.monotonic() - started)),
-                                    network=network)
+                                    network=network, unmet=unmet)
         if databases:
             report['local_databases'] = database_report
         return report
@@ -393,11 +424,13 @@ def verify_repository(repository: Path, cache: Path, request: str, *, timeout: i
 
 
 def _verify_repository(repository: Path, cache_name: str, request: str, *, timeout: int = 600,
-                       network: str | None = None) -> dict:
+                       network: str | None = None, unmet: dict | None = None) -> dict:
     plan = check_plan(repository)
+    unmet = unmet or {'databases': [], 'other': []}
     report = {'schema_version': 'sandbox-result.v1', 'detected_stack': plan['stack'] or 'unknown',
         'verification_declared': plan['declared'], 'test_execution': 'not_declared' if plan['test'] is None else 'pending',
-        'outcome': 'not_attempted', 'failed_step': 'none', 'steps': []}
+        'outcome': 'not_attempted', 'failed_step': 'none', 'steps': [],
+        'verification_coverage': {'level': 'full', 'unmet_dependencies': unmet}}
     if not plan['image']: return report
     environment = kubectl_environment()
     # Installed packages persist across check steps, but stay in the disposable
@@ -480,6 +513,31 @@ def _verify_repository(repository: Path, cache_name: str, request: str, *, timeo
             report['steps'][-1]['retry_attempts'] = retry_attempts
         if code != 0:
             infrastructure = code is None or code == 125 or registry_unreachable(phase, stdout, stderr)
+            # 우리가 못 띄워준 DB 때문에 테스트가 깨진 것이면 여기서 멈추지 않는다.
+            #
+            # 멈추면 baseline 이 안 서고 카오스를 한 번도 못 건다. 그런데 이 제품이
+            # 묻는 질문은 "이 앱이 장애에서 살아남는가"다. 단위 테스트 하나가 우리가
+            # 제공하지 못한 DB 를 못 찾았다고 그 질문을 아예 던지지 못하는 것은 과하다.
+            # 앱이 빌드되고 뜨면 복구 시간과 가용성은 그것과 무관하게 측정된다.
+            #
+            # 판단 근거는 unmet['databases'] 뿐이다. 레포 로그가 아니라 우리가 파싱한
+            # 설정과 우리가 띄운 것의 차이라서 검사 대상이 조작할 수 없다. 로그에
+            # "Connection refused"를 찍어 면제를 받아내는 길을 열지 않는다.
+            #
+            # unmet['other'](로컬 HTTP 주소)는 쓰지 않는다. 그 테스트가 정말 그 주소를
+            # 부르는지 모르기 때문이다. 실측 레포에서 형제 서비스 주소 네 개가 미충족인
+            # 모듈이 그대로 통과했다. 확신이 없는 것으로 실패를 면제하면 안 된다.
+            #
+            # 넘어가되 통과로 치지 않는다. coverage 가 partial 로 남아 최종 판정까지
+            # 따라간다. "검증할 것이 없었다"를 "합격"으로 내보내는 구멍을 다시 뚫지 않는다.
+            if phase == 'test' and not infrastructure and unmet['databases']:
+                report['steps'][-1]['unmet_dependency_suspected'] = True
+                report.update(test_execution='blocked_by_unmet_dependencies',
+                    verification_coverage={'level': 'partial', 'reason': 'unmet_dependencies',
+                                           'unmet_dependencies': unmet,
+                                           'failed_test_types': junit_failure_types(
+                                               inside(repository, plan['workingDirectory']), plan['stack'])})
+                continue
             report.update(outcome='failed', failed_step=phase, exit_code=code,
                 infrastructure_error=infrastructure, timed_out=timed_out)
             if phase == 'test': report['test_execution'] = 'failed'

@@ -234,6 +234,71 @@ def detect_local_databases(root: Path, *, include_tests: bool = False) -> dict[s
     return found
 
 
+# 설정 값 안에 박힌 로컬 HTTP 주소. Ollama(11434)처럼 DB 가 아닌 의존성을 잡는다.
+LOCAL_HTTP = re.compile(r'https?://(localhost|127\.0\.0\.1):(\d{2,5})')
+MAX_DECLARED_ENDPOINTS = 24
+
+
+def declared_endpoints(root: Path, *, include_tests: bool = False) -> list[dict]:
+    """레포 설정이 기대하는 로컬 엔드포인트를 **종류별로 줄이지 않고** 전부 모은다.
+
+    detect_local_databases 는 띄울 DB 를 고르는 함수라 종류마다 하나만 돌려준다.
+    멀티모듈 레포는 모듈마다 다른 데이터베이스를 쓰는데, 그러면 나머지는 조용히 사라지고
+    "왜 테스트가 깨졌는지" 를 설명할 근거도 같이 사라진다. 여기서는 설명이 목적이므로
+    전부 남긴다.
+
+    레포 로그가 아니라 레포 **설정**을 읽는다. 로그는 검사 대상이 마음대로 찍을 수 있어
+    면제를 받아내는 통로가 되지만, 설정은 우리가 파싱한 사실이고 우리가 무엇을 띄웠는지도
+    우리가 안다. 둘을 맞춰보는 것은 레포가 조작할 수 없다.
+    """
+    endpoints: list[dict] = []
+    seen: set[tuple] = set()
+
+    def record(kind, host, port, source, database=None):
+        key = (kind, str(host), int(port), database)
+        if key in seen or len(endpoints) >= MAX_DECLARED_ENDPOINTS:
+            return
+        seen.add(key)
+        endpoints.append({'kind': kind, 'host': str(host), 'port': int(port),
+                          'database': database, 'source': source})
+
+    for path, values in _spring_properties(root, include_tests=include_tests):
+        source = path.relative_to(root).as_posix()
+        match = JDBC.search(_resolved(values.get('spring.datasource.url')) or '')
+        if match and str(match[2]).strip().lower() in LOCAL_HOSTS:
+            kind = 'postgres' if match[1] == 'postgresql' else 'mysql'
+            record(kind, match[2], match[3] or DEFAULT_PORTS[kind], source, database=match[4])
+        for value in values.values():
+            # 자리표시자가 기본값을 갖지 않으면 주소를 모르는 것이므로 세지 않는다.
+            for host, port in LOCAL_HTTP.findall(_resolved(value) or ''):
+                record('http', host, port, source)
+    return endpoints
+
+
+def unmet_endpoints(declared: list[dict], provided: dict) -> dict[str, list[dict]]:
+    """선언됐는데 우리가 제공하지 않은 것을 확신 수준으로 나눈다.
+
+    databases 는 확신이 높다. 우리가 파싱해서 뜻을 알고, 띄울 수도 있었는데 안 띄운
+    것이다. 같은 종류라도 데이터베이스 이름이 다르면 못 붙는다. 한 요청에 postgres 를
+    하나만 띄우므로 모듈마다 이름이 다른 레포는 첫 번째만 연결된다.
+
+    other 는 참고용이다. 설정에 적힌 로컬 HTTP 주소인데, 그 테스트가 실제로 그 주소를
+    부르는지는 모른다. 실측 레포에서 형제 서비스 주소 네 개가 미충족이었지만 해당
+    모듈은 그대로 통과했다. 이걸 실패 원인으로 보고하면 없는 인과를 만든다.
+
+    그래서 판단(테스트 게이트를 넘길지)은 databases 로만 한다. other 는 리포트에
+    맥락으로만 싣는다.
+    """
+    databases, other = [], []
+    for endpoint in declared:
+        supplied = provided.get(endpoint['kind'])
+        if supplied and supplied.get('port') == endpoint['port'] and (
+                endpoint['database'] is None or supplied.get('database') == endpoint['database']):
+            continue
+        (databases if endpoint['kind'] in DEFAULT_PORTS else other).append(endpoint)
+    return {'databases': databases, 'other': other}
+
+
 def container_environment(database: dict) -> dict[str, str]:
     """레포에 적힌 계정 그대로 DB를 초기화하는 환경변수."""
     kind, user, password, name = database['type'], database.get('user'), database.get('password'), database.get('database')
