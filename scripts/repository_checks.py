@@ -12,8 +12,9 @@ from pathlib import Path
 from uuid import uuid4
 
 from collect_baseline import kubectl_environment
-from local_databases import (IMAGES as DATABASE_IMAGES, PGVECTOR_IMAGE, container_arguments, container_environment,
-                             declared_endpoints, detect_local_databases, readiness_command, unmet_endpoints)
+from local_databases import (IMAGES as DATABASE_IMAGES, PGVECTOR_IMAGE, blank_configuration, container_arguments,
+                             container_environment, declared_endpoints, detect_local_databases, readiness_command,
+                             unmet_endpoints)
 from execution_plan import MAVEN_IMAGES, ConfigurationRequired, inside, java_release, node_commands, node_major, poetry_requirements, read_yaml
 from execution_control import record_phase, record_resource, remaining_timeout
 
@@ -232,12 +233,22 @@ def junit_test_count(repository: Path, stack: str) -> int | None:
     return count
 
 
+MAX_FAILURE_MESSAGE = 200
+
+
 def junit_failure_types(repository: Path, stack: str) -> list[str]:
-    """깨진 테스트의 예외 클래스명. 자유 형식 로그가 아니라 러너가 만든 구조화 산출물이다.
+    """깨진 테스트의 예외 클래스명과 메시지. 러너가 만든 구조화 산출물이다.
 
     미충족 의존성이라는 우리 관측을 교차 확인하는 용도다. PSQLException 이나
     ConnectException 이 보이면 DB 를 못 띄운 것과 실패가 같은 방향을 가리킨다.
     판단을 이 값만으로 하지는 않는다.
+
+    메시지도 싣는다. 클래스명만으로는 사용자가 아무것도 알 수 없다. 2026-11-25 실측에서
+    사용자가 받은 것은 `NullPointerException at Validate.java:119` 였고, 정작 원인인
+    'Access key ID cannot be blank.' 는 같은 XML 의 message 속성에 있었는데 버리고 있었다.
+
+    메시지는 검사 대상이 쓴 문자열이다. 길이를 자르고, 설명으로만 쓴다. 판정은 종료 코드로
+    한다. 이 값을 근거로 면제를 주면 레포가 면제 문구를 던지는 길이 열린다.
     """
     pattern = '**/build/test-results/test/TEST-*.xml' if stack == 'gradle' else '**/target/surefire-reports/TEST-*.xml'
     types: list[str] = []
@@ -251,8 +262,12 @@ def junit_failure_types(repository: Path, stack: str) -> list[str]:
             continue
         for node in root.iter():
             name = node.attrib.get('type')
-            if node.tag in {'error', 'failure'} and name and name not in types:
-                types.append(name)
+            if node.tag in {'error', 'failure'} and name:
+                message = ' '.join((node.attrib.get('message') or '').split())[:MAX_FAILURE_MESSAGE]
+                entry = f'{name}: {message}' if message else name
+                if entry in types:
+                    continue
+                types.append(entry)
                 if len(types) >= 12:
                     return types
     return types
@@ -391,6 +406,8 @@ def verify_repository(repository: Path, cache: Path, request: str, *, timeout: i
         # 레포가 기대하는 것과 우리가 띄운 것의 차이. 테스트가 깨졌을 때 그 이유를
         # 레포 로그가 아니라 우리 관측으로 설명하기 위한 재료다.
         unmet = unmet_endpoints(declared_endpoints(source_root, include_tests=True), databases)
+        # 우리가 채워 줄 수 없는 설정 키. 판정은 바꾸지 않고 리포트에 맥락으로만 싣는다.
+        unmet['configuration'] = blank_configuration(source_root, include_tests=True)
         if databases:
             database_names, database_report = start_check_databases(databases, request, environment,
                 deadline=time.monotonic() + min(180, max(1, timeout - (time.monotonic() - started))))

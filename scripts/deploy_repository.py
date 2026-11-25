@@ -22,6 +22,7 @@ import yaml
 from collect_baseline import kubectl_command, kubectl_environment, load_image_into_cluster
 from artifact_cleanup import cleanup_request_image
 from execution_plan import OVERRIDE_FIELDS, ConfigurationRequired, inside, read_yaml, render_plan, resolve_plan
+from local_databases import blank_configuration
 from repository_checks import CheckFailure, verify_repository
 from pod_diagnostics import collect_pod_diagnostics, manifest_redaction_values
 from execution_control import begin_cleanup, record_phase, record_resource, remaining_timeout
@@ -152,6 +153,21 @@ def main() -> int:
                                                           include_text=not unresolved)
             except Exception:
                 pod_diagnostics = {'pods': [], 'collection_errors': ['diagnostics_collection_failed']}
+            blank = blank_configuration(repository)
+            if blank and container_exited(pod_diagnostics):
+                # 앱이 떴다가 죽었고, 레포가 비워 둔 설정 키가 있다. 그 키는 남의 서비스
+                # 자격증명이라 우리가 띄워 줄 수도, 지어낼 수도 없다. 레포의 코드 결함으로
+                # 보고하지 않고 '설정 필요'(89)로 돌린다. 안 뜬 앱은 어차피 판정할 수 없고,
+                # 바뀌는 것은 사용자가 받는 설명뿐이다.
+                #
+                # 인과를 단정하지는 않는다. 옵션인 키도 목록에 들어오기 때문이다. 이미지
+                # 풀 실패나 스케줄 실패는 container_exited 가 걸러낸다.
+                raise ConfigurationRequired(
+                    'The application container started and exited. The repository declares these '
+                    'configuration values with a blank default, and the sandbox cannot supply them: '
+                    + ', '.join(key['name'] for key in blank)
+                    + '. Declare values in .codereferee/validation.yaml (service.env for deployment, '
+                      'verification.env for build and test), or upload that configuration with the request.')
             raise
         # 앱의 healthPath는 보통 의존성을 쓰지 않아 먼저 Ready가 된다. 의존성 Pod를 기다리지 않으면
         # 의존성 시나리오가 'No Ready Pod'로 깨진다. 의존성 이미지와 설정은 Sandbox가 정하므로
@@ -526,6 +542,23 @@ def render_template(template: Path, namespace: str, image: str, profile: dict[st
 def deployments_in(rendered: str) -> list[str]:
     return [item['metadata']['name'] for item in yaml.safe_load_all(rendered)
             if isinstance(item, dict) and item.get('kind') == 'Deployment']
+
+
+def container_exited(diagnostics: dict | None) -> bool:
+    """컨테이너가 떴다가 죽었는지. 이미지 풀 실패나 스케줄 실패와 구분한다.
+
+    기동 중 설정 때문에 죽은 앱은 Started 뒤에 0 이 아닌 코드로 끝나고 CrashLoopBackOff
+    로 들어간다. 반면 이미지를 못 받거나 노드에 자리가 없으면 컨테이너가 시작조차 하지
+    않으므로 설정 이야기를 꺼낼 근거가 없다.
+    """
+    for pod in (diagnostics or {}).get('pods', []):
+        for container in pod.get('containers', []):
+            if container.get('waiting_reason') == 'CrashLoopBackOff':
+                return True
+            for key in ('last_terminated', 'terminated'):
+                if ((container.get(key) or {}).get('exit_code') or 0) != 0:
+                    return True
+    return False
 
 
 def wait_rollout(namespace: str, deployment: str, timeout: int) -> None:
