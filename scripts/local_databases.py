@@ -280,7 +280,7 @@ BLANK_PLACEHOLDER = re.compile(r'^\$\{([A-Za-z_][A-Za-z0-9_]*)\s*:?\s*\}$')
 MAX_BLANK_CONFIGURATION = 24
 
 
-def blank_configuration(root: Path, *, include_tests: bool = False) -> list[dict]:
+def blank_configuration(root: Path, *, include_tests: bool = False, supplied=()) -> list[dict]:
     """레포가 기본값을 비워 둔 설정 키.
 
     여기 걸리는 키는 레포가 환경변수로 받겠다고 적어 두고 기본값은 주지 않은 것이다. 대개
@@ -294,9 +294,14 @@ def blank_configuration(root: Path, *, include_tests: bool = False) -> list[dict
 
     옵션인 키도 여기 걸린다. 그래서 이 목록만으로 판단하지 않는다. 기동 실패와 겹칠 때의
     설명으로만 쓴다(deploy_repository 참조).
+
+    supplied 는 선언으로 이미 채워 준 이름이다(validation.yaml 의 service.env 와
+    verification.env). 채워 준 것을 계속 미충족이라고 들고 있으면, 값을 다 받은 뒤에
+    진짜 코드 결함으로 테스트가 깨져도 게이트가 열려 그냥 통과한다. 면제를 거두는
+    조건이라 빠뜨리면 안 된다.
     """
     keys: list[dict] = []
-    seen: set[str] = set()
+    seen: set[str] = set(supplied)
     for path, values in _spring_properties(root, include_tests=include_tests):
         source = path.relative_to(root).as_posix()
         for prop, value in values.items():

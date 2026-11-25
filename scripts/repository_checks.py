@@ -406,8 +406,8 @@ def verify_repository(repository: Path, cache: Path, request: str, *, timeout: i
         # 레포가 기대하는 것과 우리가 띄운 것의 차이. 테스트가 깨졌을 때 그 이유를
         # 레포 로그가 아니라 우리 관측으로 설명하기 위한 재료다.
         unmet = unmet_endpoints(declared_endpoints(source_root, include_tests=True), databases)
-        # 우리가 채워 줄 수 없는 설정 키. 판정은 바꾸지 않고 리포트에 맥락으로만 싣는다.
-        unmet['configuration'] = blank_configuration(source_root, include_tests=True)
+        # 우리가 채워 줄 수 없는 설정 키. 선언(verification.env)으로 채워 준 것은 뺀다.
+        unmet['configuration'] = blank_configuration(source_root, include_tests=True, supplied=plan['env'])
         if databases:
             database_names, database_report = start_check_databases(databases, request, environment,
                 deadline=time.monotonic() + min(180, max(1, timeout - (time.monotonic() - started))))

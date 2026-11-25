@@ -253,6 +253,21 @@ class NonDefaultDatabasePortTests(unittest.TestCase):
             'kakao:\n  rest-api-key: ${KAKAO_REST_API_KEY}\n')
         self.assertEqual([key['name'] for key in blank_configuration(self.root)], ['KAKAO_REST_API_KEY'])
 
+    def test_declared_values_are_no_longer_reported_as_blank(self):
+        """선언으로 채워 준 키는 빠진다.
+
+        계속 들고 있으면 값을 다 받은 뒤에 진짜 코드 결함으로 테스트가 깨져도 게이트가
+        열려 그냥 통과한다. 실측에서 verification.env 로 세 개를 다 채웠는데도 리포트가
+        셋 다 미충족으로 싣고 있었다.
+        """
+        (self.root / 'src/main/resources/application.yaml').write_text(
+            'kakao:\n  rest-api-key: ${KAKAO_REST_API_KEY:}\n'
+            'r2:\n  access-key: ${R2_ACCESS_KEY:}\n  secret-key: ${R2_SECRET_KEY:}\n')
+        supplied = {'KAKAO_REST_API_KEY': 'dummy', 'R2_ACCESS_KEY': 'dummy'}
+        self.assertEqual([key['name'] for key in blank_configuration(self.root, supplied=supplied)],
+                         ['R2_SECRET_KEY'])
+        self.assertEqual(blank_configuration(self.root, supplied=dict(supplied, R2_SECRET_KEY='dummy')), [])
+
     def test_a_repository_that_fills_everything_in_reports_nothing(self):
         (self.root / 'src/main/resources/application.yaml').write_text(
             'spring:\n  datasource:\n    url: jdbc:postgresql://localhost:5432/schim\n'
@@ -288,6 +303,31 @@ class NonDefaultDatabasePortTests(unittest.TestCase):
         self.assertEqual((coverage['level'], coverage['reason']), ('partial', 'unmet_configuration'))
         self.assertEqual([key['name'] for key in coverage['unmet_dependencies']['configuration']],
                          ['KAKAO_REST_API_KEY', 'R2_ACCESS_KEY', 'R2_SECRET_KEY'])
+
+    def test_declaring_the_values_closes_the_gate_again(self):
+        """값을 다 받으면 테스트 실패는 다시 레포의 실패다. 면제가 남아 있으면 안 된다."""
+        (self.root / 'pom.xml').write_text('<project/>')
+        (self.root / 'src/test/java').mkdir(parents=True)
+        (self.root / 'src/main/resources/application.yaml').write_text(
+            'kakao:\n  rest-api-key: ${KAKAO_REST_API_KEY:}\n'
+            'r2:\n  access-key: ${R2_ACCESS_KEY:}\n  secret-key: ${R2_SECRET_KEY:}\n')
+        (self.root / '.codereferee').mkdir()
+        (self.root / '.codereferee/validation.yaml').write_text(
+            'version: 1\nservice: {port: 8080}\n'
+            'verification:\n  env:\n    KAKAO_REST_API_KEY: dummy\n'
+            '    R2_ACCESS_KEY: dummy\n    R2_SECRET_KEY: dummy\n')
+
+        def fake(command, **kwargs):
+            failed = '--workdir' in command and any('test' in str(part) for part in command)
+            return subprocess.CompletedProcess(command, 1 if failed else 0, '', '')
+
+        with patch('repository_checks.time.sleep'), patch('repository_checks.subprocess.run', side_effect=fake):
+            with self.assertRaises(CheckFailure) as caught:
+                verify_repository(self.root, Path(self.temp.name) / 'cache', 'req')
+        report = caught.exception.report
+        self.assertEqual((report['outcome'], report['failed_step']), ('failed', 'test'))
+        self.assertEqual(report['test_execution'], 'failed')
+        self.assertEqual(report['verification_coverage']['unmet_dependencies']['configuration'], [])
 
     def test_the_declared_endpoint_is_no_longer_reported_unmet(self):
         declared = declared_endpoints(self.root, include_tests=True)
