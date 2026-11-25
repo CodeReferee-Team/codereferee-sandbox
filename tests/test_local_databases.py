@@ -46,6 +46,43 @@ class LocalDatabaseDetectionTests(unittest.TestCase):
         self.assertEqual(container_environment(postgres),
             {'POSTGRES_USER': 'username', 'POSTGRES_DB': 'jwt_security', 'POSTGRES_PASSWORD': 'password'})
 
+    def test_multi_module_test_resources_are_detected_for_the_check_step(self):
+        """prgrms-be-adv-devcourse/beadv7_7_GrafanaOn_BE 실측. 설정이 모듈 아래 test 에 있다.
+
+        이 배치를 못 읽어서 DB 없이 테스트를 돌렸고, @SpringBootTest 가 커넥션 거부로
+        깨진 것을 test_failure 로 보고했다. 레포 결함이 아니라 우리가 환경을 못 만든 것이다.
+        """
+        self.write('commerce-service/src/test/resources/application.yaml',
+            'spring:\n  datasource:\n'
+            '    url: ${DB_URL:jdbc:postgresql://localhost:5432/dear_test}\n'
+            '    username: ${DB_USERNAME:root}\n    password: ${DB_PASSWORD:root}\n')
+
+        postgres = detect_local_databases(self.root, include_tests=True)['postgres']
+        self.assertEqual((postgres['user'], postgres['password'], postgres['database']),
+                         ('root', 'root', 'dear_test'))
+        self.assertEqual(postgres['source'], 'commerce-service/src/test/resources/application.yaml')
+
+    def test_deploy_step_keeps_reading_main_not_test(self):
+        """배포는 실제 앱이 뜨므로 main 설정이어야 한다. 테스트 계정으로 올리면 앱이 못 붙는다."""
+        self.write('commerce-service/src/main/resources/application.yaml',
+            'spring:\n  datasource:\n    url: jdbc:postgresql://localhost:5432/dear\n'
+            '    username: app\n    password: secret\n')
+        self.write('commerce-service/src/test/resources/application.yaml',
+            'spring:\n  datasource:\n    url: jdbc:postgresql://localhost:5432/dear_test\n'
+            '    username: root\n    password: root\n')
+
+        # 기본값(배포 단계)은 main 만 본다.
+        self.assertEqual(detect_local_databases(self.root)['postgres']['database'], 'dear')
+        # 검사 단계는 test 가 이긴다. 둘 다 있을 때 순서가 곧 우선순위다.
+        self.assertEqual(detect_local_databases(self.root, include_tests=True)['postgres']['database'], 'dear_test')
+
+    def test_test_directories_outside_resources_are_still_skipped(self):
+        """'test' 를 건너뛰는 규칙을 통째로 푼 것이 아니다. 지정한 경로만 비켜준다."""
+        self.write('test/fixtures/src/main/resources/application.yaml',
+            'spring:\n  datasource:\n    url: jdbc:postgresql://localhost:5432/fixture\n'
+            '    username: u\n    password: p\n')
+        self.assertEqual(detect_local_databases(self.root, include_tests=True), {})
+
     def test_inactive_profile_databases_are_not_started(self):
         # spring-projects/spring-petclinic: H2 by default, MySQL/Postgres only under their profiles.
         # Starting both took 1000m of the 4-core node and blocked measuring 2 replicas (2026-11-01).
