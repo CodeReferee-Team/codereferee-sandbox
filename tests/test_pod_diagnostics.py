@@ -18,6 +18,31 @@ def owner(kind, uid):
     return [{'kind': kind, 'uid': uid, 'controller': True}]
 
 
+def pods(container):
+    return {'pods': [{'name': 'repository-api-1', 'containers': [dict({'name': 'api'}, **container)]}]}
+
+
+class ContainerExitedTests(unittest.TestCase):
+    """떴다가 죽은 것과 시작조차 못한 것을 가른다. 설정 때문이라고 말할 근거가 달라진다."""
+
+    def test_crash_loop_and_a_nonzero_exit_both_count(self):
+        self.assertTrue(deploy.container_exited(pods({'waiting_reason': 'CrashLoopBackOff'})))
+        self.assertTrue(deploy.container_exited(pods({'last_terminated': {'reason': 'Error', 'exit_code': 1}})))
+        self.assertTrue(deploy.container_exited(pods({'terminated': {'reason': 'Error', 'exit_code': 137}})))
+
+    def test_a_container_that_never_started_does_not_count(self):
+        # 이미지를 못 받았거나 노드에 자리가 없으면 설정 이야기를 꺼낼 근거가 없다.
+        self.assertFalse(deploy.container_exited(pods({'waiting_reason': 'ImagePullBackOff'})))
+        self.assertFalse(deploy.container_exited(pods({'waiting_reason': 'ContainerCreating',
+                                                      'last_terminated': {'reason': None, 'exit_code': None}})))
+        self.assertFalse(deploy.container_exited({'pods': []}))
+        self.assertFalse(deploy.container_exited(None))
+
+    def test_a_readiness_failure_without_an_exit_does_not_count(self):
+        # 기동은 했지만 프로브만 떨어진 경우다. 레포 쪽 동작 문제이지 설정 누락이 아니다.
+        self.assertFalse(deploy.container_exited(pods({'ready': False, 'restart_count': 0})))
+
+
 class PodDiagnosticsTests(unittest.TestCase):
     def collect(self, waiting='CrashLoopBackOff', previous=True, include_text=True):
         deployment = {'metadata': {'namespace': 'codereferee-test', 'uid': 'deployment-uid'}}

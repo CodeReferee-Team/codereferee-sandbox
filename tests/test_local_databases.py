@@ -10,8 +10,8 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from execution_plan import render_plan, resolve_plan
-from local_databases import (container_arguments, container_environment, declared_endpoints,
-                             detect_local_databases, readiness_command, unmet_endpoints)
+from local_databases import (blank_configuration, container_arguments, container_environment,
+                             declared_endpoints, detect_local_databases, readiness_command, unmet_endpoints)
 import repository_checks
 from repository_checks import CheckFailure, verify_repository
 
@@ -230,6 +230,34 @@ class NonDefaultDatabasePortTests(unittest.TestCase):
         self.assertEqual(container['readinessProbe']['tcpSocket'], {'port': 5433})
         service = next(o for o in objects if o['kind'] == 'Service' and o['metadata']['name'] == 'local-postgres')
         self.assertEqual(service['spec']['ports'], [{'port': 5433, 'targetPort': 5433}])
+
+    def test_blank_configuration_lists_only_the_keys_the_repository_left_empty(self):
+        """R2 와 Kakao 키는 빈 기본값이고, 데이터소스 URL 은 실제 기본값이 있다."""
+        (self.root / 'src/main/resources/application.yaml').write_text(
+            'spring:\n  datasource:\n'
+            '    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5433/schim}\n'
+            '    username: ${SPRING_DATASOURCE_USERNAME:schim}\n'
+            '    password: ${SPRING_DATASOURCE_PASSWORD:schim}\n'
+            'kakao:\n  rest-api-key: ${KAKAO_REST_API_KEY:}\n'
+            'r2:\n  access-key: ${R2_ACCESS_KEY:}\n  secret-key: ${R2_SECRET_KEY:}\n'
+            '  endpoint: ${R2_ENDPOINT:https://example.r2.cloudflarestorage.com}\n'
+            '  bucket: ${R2_BUCKET:schim}\n')
+        blank = blank_configuration(self.root)
+        self.assertEqual([key['name'] for key in blank],
+                         ['KAKAO_REST_API_KEY', 'R2_ACCESS_KEY', 'R2_SECRET_KEY'])
+        self.assertEqual(blank[1]['property'], 'r2.access-key')
+        self.assertEqual(blank[1]['source'], 'src/main/resources/application.yaml')
+
+    def test_a_placeholder_without_any_default_also_counts(self):
+        (self.root / 'src/main/resources/application.yaml').write_text(
+            'kakao:\n  rest-api-key: ${KAKAO_REST_API_KEY}\n')
+        self.assertEqual([key['name'] for key in blank_configuration(self.root)], ['KAKAO_REST_API_KEY'])
+
+    def test_a_repository_that_fills_everything_in_reports_nothing(self):
+        (self.root / 'src/main/resources/application.yaml').write_text(
+            'spring:\n  datasource:\n    url: jdbc:postgresql://localhost:5432/schim\n'
+            '    username: schim\n    password: schim\n')
+        self.assertEqual(blank_configuration(self.root), [])
 
     def test_the_declared_endpoint_is_no_longer_reported_unmet(self):
         declared = declared_endpoints(self.root, include_tests=True)

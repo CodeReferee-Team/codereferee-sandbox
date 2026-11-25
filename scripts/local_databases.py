@@ -275,6 +275,39 @@ def declared_endpoints(root: Path, *, include_tests: bool = False) -> list[dict]
     return endpoints
 
 
+# 레포가 '값이 없다' 고 스스로 적어 둔 설정 자리표시자. `${NAME:}` 과 `${NAME}` 둘 다다.
+BLANK_PLACEHOLDER = re.compile(r'^\$\{([A-Za-z_][A-Za-z0-9_]*)\s*:?\s*\}$')
+MAX_BLANK_CONFIGURATION = 24
+
+
+def blank_configuration(root: Path, *, include_tests: bool = False) -> list[dict]:
+    """레포가 기본값을 비워 둔 설정 키.
+
+    여기 걸리는 키는 레포가 환경변수로 받겠다고 적어 두고 기본값은 주지 않은 것이다. 대개
+    외부 API 키라서 우리가 재현할 수 없다. DB 와 다르다. DB 는 레포에 적힌 주소와 계정으로
+    같은 것을 띄워 줄 수 있지만, 남의 서비스 키는 띄울 수도 지어낼 수도 없다.
+
+    그래서 이 값을 쓰는 앱이 기동하지 못하는 것은 레포의 코드 결함이 아니라 선언이 빠진
+    것이다. 2026-11-25 실측(2026-team02-SCHIM-server)에서 r2.access-key 가 빈 문자열이라
+    AWS SDK 가 생성자에서 거부했고, 리포트는 그것을 test_failure 로 보고했다. 사용자가
+    받은 근거는 `NullPointerException at Validate.java:119` 뿐이었다.
+
+    옵션인 키도 여기 걸린다. 그래서 이 목록만으로 판단하지 않는다. 기동 실패와 겹칠 때의
+    설명으로만 쓴다(deploy_repository 참조).
+    """
+    keys: list[dict] = []
+    seen: set[str] = set()
+    for path, values in _spring_properties(root, include_tests=include_tests):
+        source = path.relative_to(root).as_posix()
+        for prop, value in values.items():
+            match = BLANK_PLACEHOLDER.match(str(value).strip())
+            if not match or match[1] in seen or len(keys) >= MAX_BLANK_CONFIGURATION:
+                continue
+            seen.add(match[1])
+            keys.append({'name': match[1], 'property': prop, 'source': source})
+    return keys
+
+
 def unmet_endpoints(declared: list[dict], provided: dict) -> dict[str, list[dict]]:
     """선언됐는데 우리가 제공하지 않은 것을 확신 수준으로 나눈다.
 

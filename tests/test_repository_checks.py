@@ -12,6 +12,48 @@ import repository_checks
 from repository_checks import CheckFailure, check_plan, verify_repository
 
 
+class JunitFailureEvidenceTests(unittest.TestCase):
+    """클래스명만으로는 사용자가 아무것도 알 수 없다. 메시지가 같은 XML 에 있었다."""
+
+    def test_the_failure_message_is_carried_next_to_the_exception_class(self):
+        from repository_checks import junit_failure_types
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            results = root / 'build/test-results/test'
+            results.mkdir(parents=True)
+            (results / 'TEST-SchimApplicationTests.xml').write_text(
+                '<testsuite name="SchimApplicationTests" tests="2">'
+                '<testcase name="contextLoads">'
+                '<failure type="java.lang.IllegalStateException"'
+                ' message="Failed to load ApplicationContext&#10;Access key ID cannot be blank."/>'
+                '</testcase></testsuite>', encoding='utf-8')
+            self.assertEqual(junit_failure_types(root, 'gradle'),
+                ['java.lang.IllegalStateException: Failed to load ApplicationContext '
+                 'Access key ID cannot be blank.'])
+
+    def test_a_failure_without_a_message_keeps_the_class_name_alone(self):
+        from repository_checks import junit_failure_types
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            results = root / 'build/test-results/test'
+            results.mkdir(parents=True)
+            (results / 'TEST-A.xml').write_text(
+                '<testsuite><testcase name="a"><failure type="java.lang.AssertionError"/>'
+                '</testcase></testsuite>', encoding='utf-8')
+            self.assertEqual(junit_failure_types(root, 'gradle'), ['java.lang.AssertionError'])
+
+    def test_a_long_repository_written_message_is_truncated(self):
+        from repository_checks import MAX_FAILURE_MESSAGE, junit_failure_types
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            results = root / 'build/test-results/test'
+            results.mkdir(parents=True)
+            (results / 'TEST-A.xml').write_text(
+                '<testsuite><testcase name="a"><failure type="E" message="' + 'x' * 5000 + '"/>'
+                '</testcase></testsuite>', encoding='utf-8')
+            self.assertEqual(junit_failure_types(root, 'gradle'), ['E: ' + 'x' * MAX_FAILURE_MESSAGE])
+
+
 class RepositoryChecksTests(unittest.TestCase):
     def test_declared_database_has_no_host_or_arbitrary_image_override(self):
         from repository_checks import declared_check_databases
