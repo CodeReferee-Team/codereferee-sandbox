@@ -12,6 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import pod_diagnostics as diagnostics
 import deploy_repository as deploy
+from execution_plan import ConfigurationRequired
 
 
 def owner(kind, uid):
@@ -135,6 +136,33 @@ class PodDiagnosticsTests(unittest.TestCase):
             self.assertEqual(report['exitCode'], 1)
             self.assertIn('timed out waiting', report['stderr'])
             self.assertEqual(report['sandboxReport']['pod_diagnostics']['pods'][0]['name'], 'failed-pod')
+
+    def test_deployment_plan_is_resolved_before_repository_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = argparse.Namespace(request_id='plan-first', repository_url='https://github.com/example/app',
+                branch=None, commit_sha=None, profile=None, patch_file=None, rollout_timeout_seconds=1)
+
+            def clone(url, branch, destination):
+                destination.mkdir()
+                (destination / 'compose.yaml').write_text(
+                    'services:\n  web: {build: .}\n  worker: {build: .}\n', encoding='utf-8')
+
+            with patch.object(deploy, 'RUNTIME_ROOT', root / '.runtime'), \
+                 patch.object(deploy, 'parse_args', return_value=args), \
+                 patch.object(deploy, 'clone', side_effect=clone), \
+                 patch.object(deploy, 'run', return_value=subprocess.CompletedProcess([], 0, 'a' * 40, '')), \
+                 patch.object(deploy, 'resolve_plan', side_effect=ConfigurationRequired('select service')) as resolve, \
+                 patch.object(deploy, 'verify_repository') as verify:
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(deploy.main(), 1)
+
+            resolve.assert_called_once()
+            verify.assert_not_called()
+            result = json.loads(output.getvalue())['result']
+            self.assertEqual(result['exitCode'], 89)
+            self.assertTrue(result['sandboxReport']['configuration_required'])
 
 
 if __name__ == '__main__':

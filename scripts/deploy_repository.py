@@ -61,12 +61,12 @@ def main() -> int:
         if args.patch_file:
             apply_patch(repository, args.patch_file)
         commit_sha = run(["git", "rev-parse", "HEAD"], cwd=repository).stdout.strip()
-        stage = 'verify'
-        checks = verify_repository(repository, workspace / 'check-cache', request)
         stage = 'detect'
         plan = resolve_plan(repository, args.profile)
         profile_name = plan.get('profile')
         profile = load_profile(profile_name) if profile_name else plan
+        stage = 'verify'
+        checks = verify_repository(repository, workspace / 'check-cache', request)
         image = f"codereferee/{request}:{commit_sha[:12]}"
         dockerfile = inside(repository, profile.get('dockerfile', 'Dockerfile'))
         if profile.get('generatedDockerfile'):
