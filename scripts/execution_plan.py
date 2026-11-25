@@ -53,6 +53,21 @@ MAVEN_IMAGES = {'17': 'maven:3.9.9-eclipse-temurin-17', '21': 'maven:3.9.9-eclip
                 '25': 'maven:3.9.11-eclipse-temurin-25'}
 
 
+def gradle_includes_modules(root: Path) -> bool:
+    """settings.gradle 이 하위 프로젝트를 include 하는가.
+
+    Maven 의 '<modules>' 검사와 같은 자리다. 주석 처리된 include 는 세지 않는다.
+    """
+    for name in ('settings.gradle', 'settings.gradle.kts'):
+        path = inside(root, name)
+        if not path.is_file() or path.stat().st_size > 256_000:
+            continue
+        for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
+            if re.match(r'\s*include\s*[(\s\'"]', line.split('//', 1)[0]):
+                return True
+    return False
+
+
 def java_release(root: Path) -> str:
     texts = [inside(root, name).read_text(encoding='utf-8', errors='replace') for name in
              ('build.gradle', 'build.gradle.kts', 'pom.xml', 'gradle/libs.versions.toml', 'gradle.properties')
@@ -714,6 +729,17 @@ def stack_recipe(repository: Path, port: int | None = None) -> dict | None:
             raise ConfigurationRequired('service.port must be an integer in 1..65535.')
         java = java_release(repository)
         if inside(repository, 'gradlew').is_file():
+            # Maven 쪽과 같은 판단이다. 모듈마다 앱이 따로 있으면 어느 것을 띄울지 고르지 않는다.
+            #
+            # 이 가드가 없어서 루트에 앱이 없는 멀티모듈 레포에 레시피를 만들어 줬고,
+            # 'gradlew bootJar' 가 루트에서 메인 클래스를 못 찾거나 산출물이 모듈 아래
+            # build/libs 에 생겨서 find 가 빈손으로 돌아왔다. 실패를 아는 데 3분 반이
+            # 걸렸고, 사유는 docker_build_failed 로 나가 레포 탓처럼 보였다.
+            #
+            # 거부가 추측보다 낫다. 어느 모듈을 띄울지는 레포만 안다.
+            if gradle_includes_modules(repository) and not inside(repository, 'src/main').is_dir():
+                raise ConfigurationRequired('Gradle multi-module project without a root application: '
+                                            'add a Dockerfile or .codereferee/validation.yaml for the module to run.')
             builder = f'eclipse-temurin:{java}-jdk'
             build = "RUN sh ./gradlew bootJar --no-daemon && mkdir /output && find build/libs -maxdepth 1 -name '*.jar' ! -name '*-plain.jar' -exec cp {} /output/app.jar \\;\n"
         elif inside(repository, 'pom.xml').is_file():
