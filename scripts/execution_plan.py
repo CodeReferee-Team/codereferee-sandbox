@@ -759,6 +759,16 @@ def stack_recipe(repository: Path, port: int | None = None) -> dict | None:
 DEPENDENCY_PORTS = {'redis': 6379, 'postgres': 5432, 'mysql': 3306, 'mongo': 27017}
 
 
+def dependency_port(dependency: dict) -> int:
+    """이 의존성이 들을 포트. 레포 설정에서 찾은 DB 는 레포에 적힌 포트를 그대로 쓴다.
+
+    앱 Pod 안의 포워더가 듣는 포트, DB Service 의 포트, 준비 프로브가 모두 이 값이어야
+    한다. 하나라도 기본값으로 남으면 앱은 열리지 않은 포트에 붙으려 한다.
+    """
+    local = dependency.get('local') or {}
+    return local.get('port') or DEPENDENCY_PORTS[dependency['type']]
+
+
 def render_plan(plan: dict, namespace: str, image: str, *, workload: str = 'repository-api',
                 dependency_values: dict | None = None) -> tuple[str, dict]:
     if dependency_values is None:
@@ -792,7 +802,7 @@ def render_plan(plan: dict, namespace: str, image: str, *, workload: str = 'repo
         if key in plan:
             container[key] = plan[key]
     containers = [container]
-    forwards = [f'{DEPENDENCY_PORTS[d["type"]]}:{name}:{DEPENDENCY_PORTS[d["type"]]}'
+    forwards = [f'{dependency_port(d)}:{name}:{dependency_port(d)}'
                 for name, d in plan['dependencies'].items() if d.get('local')]
     if forwards:
         # 레포 설정은 localhost의 DB를 본다. 앱 Pod 안에서 그 포트를 DB Service로 넘긴다.
@@ -809,7 +819,7 @@ def render_plan(plan: dict, namespace: str, image: str, *, workload: str = 'repo
     target_dependencies = {}
     for name, dependency in plan['dependencies'].items():
         kind = dependency['type']
-        dep_port = DEPENDENCY_PORTS[kind]
+        dep_port = dependency_port(dependency)
         dep_image = {'redis': 'redis:7-alpine', 'postgres': 'postgres:17-alpine', 'mysql': 'mysql:8.4'}.get(kind)
         if 'vector' in dependency.get('extensions', []):
             from local_databases import PGVECTOR_IMAGE
