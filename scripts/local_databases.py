@@ -10,6 +10,7 @@ conf/app.ini의 `Host = 127.0.0.1:3306`). 그래서 앱 설정을 바꾸지 않�
 - 호스트가 localhost/127.0.0.1일 때만 붙인다. 원격 주소는 레포가 우리에게 기대하는 DB가 아니다.
 - 자리표시자(`${DB_PASSWORD}`)는 기본값이 있을 때만 쓴다. 값을 지어내지 않는다.
 - 같은 종류는 하나만. 둘이면 앞의 것을 쓴다(포트가 겹친다).
+- 포트도 적힌 그대로다. 기본 포트가 아니어도 그 포트에서 듣게 띄운다.
 """
 from __future__ import annotations
 
@@ -121,8 +122,7 @@ def _add(found: dict, kind: str, source: str, *, host, port=None, user=None, pas
         port = int(port) if port not in (None, '') else DEFAULT_PORTS[kind]
     except ValueError:
         return
-    if port != DEFAULT_PORTS[kind]:
-        # 기본 포트가 아니면 앱 쪽 포워더와 DB 포트를 따로 맞춰야 한다. 지금은 재현하지 않는다.
+    if not 1 <= port <= 65535:
         return
     if kind in {'mysql', 'postgres'} and (user is None or password is None or not database):
         return
@@ -316,23 +316,54 @@ def container_environment(database: dict) -> dict[str, str]:
     return {}
 
 
+def database_port(database: dict) -> int:
+    return database.get('port') or DEFAULT_PORTS[database['type']]
+
+
 def container_arguments(database: dict) -> list[str]:
-    if database['type'] == 'mysql':
+    """레포에 적힌 포트에서 듣게 하는 서버 인자.
+
+    기본이 아닌 포트는 로컬에 이미 DB 가 돌고 있는 개발 환경에서 흔하다(5433, 3307).
+    그 주소를 그대로 재현하지 않으면 앱도 테스트도 붙지 못하는데, 우리가 띄우지 않은 것이
+    원인인데도 레포의 테스트 결함처럼 보인다. 2026-11-25 실측(2026-team02-SCHIM-server)에서
+    postgres 5433 하나 때문에 테스트와 배포가 모두 깨졌다.
+
+    공식 이미지는 모두 서버 인자로 포트를 받는다(postgres -p, mysqld --port, mongod --port,
+    redis-server --port). 기본 포트일 때는 인자를 더하지 않아 기존 동작이 그대로다.
+    """
+    kind = database['type']
+    port = database_port(database)
+    moved = port != DEFAULT_PORTS[kind]
+    if kind == 'mysql':
         # 예제 레포는 `useSSL=false`로 붙는다. MySQL 8의 caching_sha2_password는 TLS 없이
         # 공개키를 받지 못해 `Public Key Retrieval is not allowed`로 끊기고, Node의 `mysql`
         # 패키지는 이 방식을 아예 모른다. 개발 환경에서 흔한 설정에 맞춘다.
-        return ['--default-authentication-plugin=mysql_native_password']
-    if database['type'] == 'redis' and database.get('password'):
-        return ['redis-server', '--requirepass', database['password']]
+        return ['--default-authentication-plugin=mysql_native_password'] + (['--port=' + str(port)] if moved else [])
+    if kind == 'postgres':
+        return ['-p', str(port)] if moved else []
+    if kind == 'mongo':
+        return ['--port', str(port)] if moved else []
+    if kind == 'redis':
+        password = database.get('password')
+        if not moved and not password:
+            return []
+        return (['redis-server'] + (['--port', str(port)] if moved else [])
+                + (['--requirepass', password] if password else []))
     return []
 
 
 def readiness_command(database: dict) -> list[str]:
-    """초기화용 임시 서버는 TCP를 열지 않으므로 127.0.0.1로 물으면 진짜 서버만 응답한다."""
-    return {'mysql': ['mysqladmin', 'ping', '-h', '127.0.0.1', '--silent'],
-            'postgres': ['pg_isready', '-h', '127.0.0.1', '-q'],
-            'mongo': ['mongosh', '--quiet', '--host', '127.0.0.1', '--eval', 'db.runCommand({ping: 1}).ok'],
-            'redis': ['redis-cli', '-h', '127.0.0.1', 'ping']}[database['type']]
+    """초기화용 임시 서버는 TCP를 열지 않으므로 127.0.0.1로 물으면 진짜 서버만 응답한다.
+
+    포트를 명시한다. 레포가 기본이 아닌 포트를 적어 두면 서버는 그 포트에서 듣는데,
+    클라이언트 기본값으로 물으면 끝까지 준비되지 않은 것으로 보여 우리 쪽 오류가 된다.
+    """
+    port = str(database_port(database))
+    return {'mysql': ['mysqladmin', 'ping', '-h', '127.0.0.1', '-P', port, '--silent'],
+            'postgres': ['pg_isready', '-h', '127.0.0.1', '-p', port, '-q'],
+            'mongo': ['mongosh', '--quiet', '--host', '127.0.0.1', '--port', port,
+                      '--eval', 'db.runCommand({ping: 1}).ok'],
+            'redis': ['redis-cli', '-h', '127.0.0.1', '-p', port, 'ping']}[database['type']]
 
 
 # 앱 Pod 안에서 localhost:<포트>로 오는 연결을 DB Service로 넘긴다. DB를 사이드카로 넣으면

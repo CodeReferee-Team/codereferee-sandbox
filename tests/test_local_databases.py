@@ -10,7 +10,8 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from execution_plan import render_plan, resolve_plan
-from local_databases import container_arguments, container_environment, detect_local_databases
+from local_databases import (container_arguments, container_environment, declared_endpoints,
+                             detect_local_databases, readiness_command, unmet_endpoints)
 import repository_checks
 from repository_checks import CheckFailure, verify_repository
 
@@ -171,6 +172,70 @@ class LocalDatabaseDeploymentTests(unittest.TestCase):
         (self.root / '.codereferee').mkdir()
         (self.root / '.codereferee/validation.yaml').write_text('version: 1\nservice: {port: 8080}\n')
         self.assertEqual(resolve_plan(self.root)['dependencies'], {})
+
+
+class NonDefaultDatabasePortTests(unittest.TestCase):
+    """phdcoco/2026-team02-SCHIM-server 실측(2026-11-25). postgres 를 5433 에 적어 둔 레포다.
+
+    로컬에 이미 postgres 가 있는 개발 환경에서 흔한 모양인데, 기본 포트가 아니라고 DB 를
+    아예 띄우지 않아서 테스트는 Hibernate 가 dialect 를 못 정해 깨지고, 배포는 앱 Pod 가
+    CrashLoopBackOff 로 올라오지 못했다. 우리가 환경을 안 만든 것이 원인이다.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        (self.root / 'src/main/resources').mkdir(parents=True)
+        (self.root / 'src/main/resources/application.yaml').write_text(
+            'spring:\n  datasource:\n'
+            '    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5433/schim}\n'
+            '    username: ${SPRING_DATASOURCE_USERNAME:schim}\n'
+            '    password: ${SPRING_DATASOURCE_PASSWORD:schim}\n')
+        (self.root / 'Dockerfile').write_text(
+            'FROM eclipse-temurin:21-jre\nWORKDIR /app\nCOPY app.jar app.jar\n'
+            'EXPOSE 8080\nENTRYPOINT ["java", "-jar", "app.jar"]\n')
+
+    def test_the_declared_port_reaches_the_server_and_the_readiness_check(self):
+        postgres = detect_local_databases(self.root)['postgres']
+        self.assertEqual(postgres['port'], 5433)
+        self.assertEqual((postgres['user'], postgres['password'], postgres['database']),
+                         ('schim', 'schim', 'schim'))
+        self.assertEqual(container_arguments(postgres), ['-p', '5433'])
+        self.assertEqual(readiness_command(postgres), ['pg_isready', '-h', '127.0.0.1', '-p', '5433', '-q'])
+        # 계정은 포트와 무관하게 레포에 적힌 그대로다.
+        self.assertEqual(container_environment(postgres),
+            {'POSTGRES_USER': 'schim', 'POSTGRES_DB': 'schim', 'POSTGRES_PASSWORD': 'schim'})
+
+    def test_the_default_port_keeps_the_previous_arguments(self):
+        (self.root / 'src/main/resources/application.yaml').write_text(
+            'spring:\n  datasource:\n    url: jdbc:postgresql://localhost:5432/schim\n'
+            '    username: schim\n    password: schim\n')
+        postgres = detect_local_databases(self.root)['postgres']
+        self.assertEqual(container_arguments(postgres), [])
+        self.assertEqual(readiness_command(postgres), ['pg_isready', '-h', '127.0.0.1', '-p', '5432', '-q'])
+
+    def test_forwarder_service_and_probe_all_use_the_declared_port(self):
+        plan = resolve_plan(self.root)
+        manifest, _ = render_plan(plan, 'codereferee-test', 'codereferee/test:abc')
+        objects = list(yaml.safe_load_all(manifest))
+        app = next(o for o in objects if o['kind'] == 'Deployment' and o['metadata']['name'] == 'repository-api')
+        forwarder = next(c for c in app['spec']['template']['spec']['containers'] if c['name'] == 'local-db-forward')
+        # 앱은 localhost:5433 을 본다. 그 포트에서 듣지 않으면 포워더가 있어도 닿지 않는다.
+        self.assertEqual(forwarder['command'][-1], '5433:local-postgres:5433')
+        database = next(o for o in objects if o['kind'] == 'Deployment' and o['metadata']['name'] == 'local-postgres')
+        container = database['spec']['template']['spec']['containers'][0]
+        self.assertEqual(container['args'], ['-p', '5433'])
+        self.assertEqual(container['ports'], [{'containerPort': 5433}])
+        self.assertEqual(container['readinessProbe']['tcpSocket'], {'port': 5433})
+        service = next(o for o in objects if o['kind'] == 'Service' and o['metadata']['name'] == 'local-postgres')
+        self.assertEqual(service['spec']['ports'], [{'port': 5433, 'targetPort': 5433}])
+
+    def test_the_declared_endpoint_is_no_longer_reported_unmet(self):
+        declared = declared_endpoints(self.root, include_tests=True)
+        self.assertEqual([(e['kind'], e['port'], e['database']) for e in declared], [('postgres', 5433, 'schim')])
+        provided = detect_local_databases(self.root, include_tests=True)
+        self.assertEqual(unmet_endpoints(declared, provided), {'databases': [], 'other': []})
 
 
 class LocalDatabaseCheckTests(unittest.TestCase):
