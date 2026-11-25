@@ -42,13 +42,25 @@ def _resolved(value) -> str | None:
     return None if '${' in text else text
 
 
-def _walk(root: Path, patterns: tuple[str, ...], depth: int = 3):
+def _walk(root: Path, patterns: tuple[str, ...], depth: int = 3, skip: set[str] = SKIPPED_DIRECTORIES):
     for pattern in patterns:
         for path in sorted(root.glob(pattern)):
             relative = path.relative_to(root)
             if (path.is_file() and len(relative.parts) <= depth + 1 and path.stat().st_size < 256_000
-                    and not SKIPPED_DIRECTORIES & set(relative.parts[:-1])):
+                    and not skip & set(relative.parts[:-1])):
                 yield path
+
+
+def _resource_patterns(scope: str) -> tuple[str, ...]:
+    """src/<scope>/resources 를 레포 루트와 모듈 한 겹 아래에서 찾는 glob.
+
+    모듈 한 겹을 더 보는 이유는 멀티모듈 Gradle/Maven 레포가 설정을 전부
+    '<모듈>/src/main/resources' 에 두기 때문이다. 루트만 보면 그런 레포에서는
+    DB 설정을 하나도 못 찾고, 의존성 없이 테스트를 돌려 커넥션 거부로 깨진다.
+    """
+    return tuple(f'{prefix}src/{scope}/resources/application*.{suffix}'
+                 for prefix in ('', '*/')
+                 for suffix in ('properties', 'yml', 'yaml'))
 
 
 def _flatten(data, prefix=''):
@@ -59,10 +71,22 @@ def _flatten(data, prefix=''):
         yield prefix.rstrip('.'), data
 
 
-def _spring_properties(root: Path) -> list[tuple[Path, dict]]:
+def _spring_properties(root: Path, *, include_tests: bool = False) -> list[tuple[Path, dict]]:
     found = []
-    for path in _walk(root, ('src/main/resources/application*.properties', 'src/main/resources/application*.yml',
-                             'src/main/resources/application*.yaml'), depth=4):
+    # 검사 단계에서는 테스트 설정을 먼저 본다. 우리가 실제로 돌리는 것이 테스트라
+    # 그쪽에 적힌 주소와 계정이 맞고, main 은 운영 설정이라 다를 수 있다.
+    # _add 가 먼저 찾은 것을 쓰므로 순서가 곧 우선순위다.
+    #
+    # 'test' 는 SKIPPED_DIRECTORIES 에 들어 있다. 픽스처나 샘플을 긁지 않으려고 둔
+    # 것인데, 여기서는 우리가 경로를 명시해서 찾는 것이라 그 한 칸만 비켜준다.
+    # node_modules 나 build 는 그대로 걸러진다.
+    scopes = []
+    if include_tests:
+        scopes.append((_resource_patterns('test'), SKIPPED_DIRECTORIES - {'test', 'tests'}))
+    scopes.append((_resource_patterns('main'), SKIPPED_DIRECTORIES))
+    paths = [path for patterns, skip in scopes for path in _walk(root, patterns, depth=4, skip=skip)]
+
+    for path in paths:
         text = path.read_text(encoding='utf-8', errors='replace')
         if path.suffix == '.properties':
             values = {}
@@ -106,8 +130,8 @@ def _add(found: dict, kind: str, source: str, *, host, port=None, user=None, pas
                    'source': source}
 
 
-def _from_spring(root: Path, found: dict):
-    for path, values in _spring_properties(root):
+def _from_spring(root: Path, found: dict, *, include_tests: bool = False):
+    for path, values in _spring_properties(root, include_tests=include_tests):
         source = path.relative_to(root).as_posix()
         url = _resolved(values.get('spring.datasource.url'))
         match = JDBC.search(url or '')
@@ -193,10 +217,19 @@ def _from_ini(root: Path, found: dict):
                 _add(found, 'redis', source, host=host, port=port, password=section.get('password') or None)
 
 
-def detect_local_databases(root: Path) -> dict[str, dict]:
-    """레포 설정에서 로컬 DB를 찾는다. 키는 종류(mysql, postgres, mongo, redis)다."""
+def detect_local_databases(root: Path, *, include_tests: bool = False) -> dict[str, dict]:
+    """레포 설정에서 로컬 DB를 찾는다. 키는 종류(mysql, postgres, mongo, redis)다.
+
+    include_tests 는 검사(build/test) 단계에서만 켠다. 테스트가 쓰는 DB 주소는
+    src/test/resources 에 적혀 있고 main 의 운영 설정과 다를 수 있는데, 우리가
+    그 단계에서 실제로 돌리는 것은 테스트이기 때문이다.
+
+    배포 단계는 끄고 쓴다. 거기서는 실제 앱이 뜨므로 main 설정이 맞고, 테스트
+    계정으로 DB를 올리면 앱이 붙지 못한다.
+    """
     found: dict[str, dict] = {}
-    for detector in (_from_spring, _from_json_and_scripts, _from_ini):
+    _from_spring(root, found, include_tests=include_tests)
+    for detector in (_from_json_and_scripts, _from_ini):
         detector(root, found)
     return found
 

@@ -357,7 +357,8 @@ def verify_repository(repository: Path, cache: Path, request: str, *, timeout: i
                 outcome='failed', test_execution='not_attempted', verification_declared=plan['declared'])
             raise CheckFailure(report)
         network = None
-        databases = detect_local_databases(inside(repository, plan['workingDirectory']))
+        # 검사 단계에서는 테스트 설정의 DB 를 본다. 돌리는 것이 테스트라서다.
+        databases = detect_local_databases(inside(repository, plan['workingDirectory']), include_tests=True)
         databases.update(plan['databases'])
         if databases:
             database_names, database_report = start_check_databases(databases, request, environment,
