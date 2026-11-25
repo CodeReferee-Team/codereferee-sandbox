@@ -270,6 +270,37 @@ class ExecutionPlanTests(unittest.TestCase):
         self.write('rest/src/main/java/App.java', 'class App {}')
         with self.assertRaisesRegex(ConfigurationRequired, 'multi-module'): resolve_plan(self.root)
 
+    def test_gradle_multimodule_without_a_root_application_needs_configuration(self):
+        """prgrms-be-adv-devcourse/beadv7_7_GrafanaOn_BE 실측. Maven 과 같은 판단이어야 한다.
+
+        가드가 없을 때 루트에서 'gradlew bootJar' 를 돌리는 레시피를 만들어 줬고, 메인
+        클래스를 못 찾거나 산출물이 모듈 아래 생겨 find 가 빈손으로 돌아왔다. 실패를
+        아는 데 3분 반이 걸렸고 사유는 docker_build_failed 로 나가 레포 탓처럼 보였다.
+        """
+        self.write('build.gradle', "plugins { id 'org.springframework.boot' version '3.3.0' }")
+        self.write('gradlew', '#!/bin/sh\n')
+        self.write('settings.gradle', "rootProject.name = 'dear'\n"
+                   "include 'commerce-service'\ninclude ':common:common-web'\n")
+        self.write('commerce-service/src/main/java/App.java', 'class App {}')
+        with self.assertRaisesRegex(ConfigurationRequired, 'multi-module'): resolve_plan(self.root)
+
+    def test_single_module_gradle_still_gets_a_recipe(self):
+        """조이면서 단일 모듈까지 막으면 안 된다. 루트에 앱이 있으면 그대로 만든다."""
+        self.write('build.gradle', "plugins { id 'org.springframework.boot' version '3.3.0' }")
+        self.write('gradlew', '#!/bin/sh\n')
+        self.write('src/main/java/App.java', 'class App {}')
+        plan = resolve_plan(self.root)
+        self.assertEqual(plan['port'], 8080)
+        self.assertIn('gradlew bootJar', plan['generatedDockerfile'])
+
+    def test_commented_out_include_is_not_a_module_declaration(self):
+        """주석 처리된 include 로 단일 모듈 레포를 막으면 안 된다."""
+        self.write('build.gradle', "plugins { id 'org.springframework.boot' version '3.3.0' }")
+        self.write('gradlew', '#!/bin/sh\n')
+        self.write('settings.gradle', "rootProject.name = 'app'\n// include 'legacy-module'\n")
+        self.write('src/main/java/App.java', 'class App {}')
+        self.assertIn('gradlew bootJar', resolve_plan(self.root)['generatedDockerfile'])
+
     def test_replica_override_keeps_detection_and_local_databases(self):
         # 수정안 루프가 배포 파일 없는 레포의 복제본 수를 올릴 때 쓰는 최소 선언이다.
         self.write('pom.xml', '<project><artifactId>spring-boot-starter-parent</artifactId></project>')
