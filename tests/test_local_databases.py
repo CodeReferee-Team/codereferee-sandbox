@@ -216,3 +216,86 @@ class LocalDatabaseCheckTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class UnmetDependencyCoverageTests(unittest.TestCase):
+    """못 띄워준 의존성 때문에 깨진 테스트를 어떻게 다루는지 고정한다."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / 'repository'
+        # 실측 레포(D:EAR)와 같은 모양. 모듈마다 데이터베이스 이름이 다르고,
+        # 한 모듈은 로컬 HTTP 의존성(Ollama)까지 쓴다.
+        for module, database, extra in (('commerce-service', 'dear_test', ''),
+                                        ('recommendation-service', 'dear',
+                                         '    ollama:\n      base-url: http://localhost:11434\n')):
+            path = self.root / module / 'src/test/resources'
+            path.mkdir(parents=True)
+            (path / 'application.yaml').write_text(
+                'spring:\n  datasource:\n'
+                f'    url: jdbc:postgresql://localhost:5432/{database}\n'
+                '    username: root\n    password: root\n' + extra, encoding='utf-8')
+        (self.root / 'pom.xml').write_text('<project/>')
+
+    def run_checks(self, test_exit_code):
+        """테스트 단계만 실패시키고 나머지는 성공시킨다."""
+        def fake(command, **kwargs):
+            is_test = '--workdir' in command and any('test' in str(part) for part in command)
+            return subprocess.CompletedProcess(command, test_exit_code if is_test else 0, '', '')
+        with patch('repository_checks.time.sleep'), patch('repository_checks.subprocess.run', side_effect=fake):
+            return verify_repository(self.root, Path(self.temp.name) / 'cache', 'req')
+
+    def test_unmet_database_is_reported_with_its_source(self):
+        report = self.run_checks(0)
+        unmet = report['verification_coverage']['unmet_dependencies']
+        # postgres 는 종류당 하나만 뜨므로 두 번째 데이터베이스는 못 붙는다.
+        self.assertEqual([(e['kind'], e['database']) for e in unmet['databases']], [('postgres', 'dear')])
+        self.assertEqual(unmet['databases'][0]['source'],
+                         'recommendation-service/src/test/resources/application.yaml')
+        # Ollama 는 확신이 낮은 축에 들어간다. 판단에는 쓰지 않는다.
+        self.assertIn(11434, [e['port'] for e in unmet['other']])
+
+    def test_test_failure_from_an_unmet_database_does_not_block_the_chaos_stage(self):
+        # 멈추면 baseline 이 안 서고 카오스를 못 건다. 이 제품이 묻는 질문이 거기 있다.
+        report = self.run_checks(1)
+        self.assertEqual(report['outcome'], 'passed')
+        self.assertEqual(report['test_execution'], 'blocked_by_unmet_dependencies')
+
+    def test_continuing_never_claims_full_coverage(self):
+        # 넘어가되 통과로 치지 않는다. 범위 제한이 최종 판정까지 따라가야 한다.
+        coverage = self.run_checks(1)['verification_coverage']
+        self.assertEqual(coverage['level'], 'partial')
+        self.assertEqual(coverage['reason'], 'unmet_dependencies')
+
+    def test_coverage_is_full_when_everything_was_provided(self):
+        for path in self.root.glob('recommendation-service/src/test/resources/application.yaml'):
+            path.write_text('spring:\n  datasource:\n'
+                '    url: jdbc:postgresql://localhost:5432/dear_test\n'
+                '    username: root\n    password: root\n', encoding='utf-8')
+        report = self.run_checks(0)
+        self.assertEqual(report['verification_coverage']['level'], 'full')
+        self.assertEqual(report['verification_coverage']['unmet_dependencies']['databases'], [])
+
+    def test_a_real_test_failure_still_blocks(self):
+        """면제는 우리가 못 띄워준 것이 있을 때만이다. 그 구멍을 다시 뚫지 않는다.
+
+        미충족 의존성이 없는데도 넘어가면 검증되지 않은 코드에 합격 도장을 주게 된다.
+        이 레포가 exit 89 와 '테스트가 없으면 합격 아님' 으로 반복해서 막아온 모양이다.
+        """
+        for path in self.root.glob('*/src/test/resources/application.yaml'):
+            path.write_text('spring:\n  datasource:\n'
+                '    url: jdbc:postgresql://localhost:5432/dear_test\n'
+                '    username: root\n    password: root\n', encoding='utf-8')
+        with self.assertRaises(CheckFailure) as failure:
+            self.run_checks(1)
+        report = failure.exception.report
+        self.assertEqual(report['outcome'], 'failed')
+        self.assertEqual(report['failed_step'], 'test')
+        self.assertEqual(report['test_execution'], 'failed')
+
+    def test_infrastructure_failures_are_not_excused_as_unmet_dependencies(self):
+        """exit 125 는 우리 쪽 도커 문제다. 의존성 핑계로 넘기면 원인이 묻힌다."""
+        with self.assertRaises(CheckFailure) as failure:
+            self.run_checks(125)
+        self.assertTrue(failure.exception.report['infrastructure_error'])
