@@ -1,0 +1,39 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PostgreSQL 확장과 초기화 SQL 재현</title>
+<style>body{font:16px/1.8 system-ui,sans-serif;max-width:920px;margin:40px auto;padding:0 24px;color:#18323c}pre{background:#edf3f5;padding:20px;overflow:auto}h1,h2{line-height:1.4}code{background:#edf3f5}</style>
+<h1>PostgreSQL 확장과 초기화 SQL 재현</h1>
+<p>Compose가 외부 .env 또는 PostGIS·초기화 SQL에 의존하면 URL만으로는 같은 환경을 재현할 수 없습니다. Sandbox는 호스트 .env나 운영 DB에 접속하지 않습니다. 레포 루트의 <code>.codereferee/validation.yaml</code>에 재현용 설정을 선언하세요.</p>
+<h2>단일 서비스 예시</h2>
+<pre>version: 1
+service:
+  buildContext: .
+  dockerfile: Dockerfile
+  port: 8000
+  healthPath: /health
+  env:
+    DB_HOST: '{{dependency.db.host}}'
+    DB_PORT: '{{dependency.db.port}}'
+    DB_USER: '{{dependency.db.username}}'
+    DB_PASSWORD: '{{dependency.db.password}}'
+    DB_NAME: '{{dependency.db.database}}'
+dependencies:
+  db:
+    type: postgres
+    extensions: [postgis, uuid-ossp]
+    initSql: [db/init.sql]
+</pre>
+<p>환경변수 이름과 헬스 경로는 앱이 실제로 사용하는 값으로 바꾸세요. DB 비밀번호는 요청마다 생성합니다. 이 파일을 검사할 원격 브랜치에 push하고 해당 브랜치로 요청하면 됩니다. Compose 자체를 실행하는 경로가 아니라, 이 설정을 우선 읽어 격리된 Kubernetes 환경을 구성합니다.</p>
+<h2>지원 범위</h2>
+<ul>
+<li><code>extensions: [postgis]</code>는 고정된 <code>postgis/postgis:15-3.3</code> 이미지를 사용합니다. 기존 vector는 기존 pgvector 이미지를 유지합니다. 일반 PostgreSQL은 기존 postgres:17-alpine을 유지합니다.</li>
+<li><code>uuid-ossp</code>를 단독 또는 vector/PostGIS와 함께 선언할 수 있습니다. vector와 PostGIS의 동시 조합이나 임의 확장·임의 DB 이미지는 지원하지 않습니다.</li>
+<li><code>initSql</code>은 PostgreSQL 의존성 배포 단계의 선택 설정입니다. version 2/3에도 같은 dependencies 선언을 사용할 수 있습니다. version 3의 경로는 설정 파일이 있는 제출 레포(main) 기준입니다.</li>
+<li>SQL 파일은 레포 내부의 UTF-8 .sql 파일 1~4개, 합계 최대 64KiB입니다. 절대 경로, 레포 밖 경로, .git 내부, 외부로 향하는 심볼릭 링크를 거절합니다.</li>
+<li>먼저 허용된 확장을 활성화하고, initSql 배열 순서대로 SQL을 실행합니다. 이름이 같은 파일도 서로 덮어쓰지 않습니다. 스키마 파일과 재현용 데이터만 선언하세요.</li>
+<li>SQL은 격리된 임시 DB의 초기화 권한으로 실행됩니다. 호스트 경로 bind mount를 추가하지 않으며 ConfigMap을 읽기 전용으로 전달합니다. 운영 데이터·키·비밀번호를 SQL에 포함하지 마세요.</li>
+<li>ConfigMap과 임시 DB는 요청 namespace 정리에 포함됩니다. DB 데이터는 다음 요청에 재사용하지 않습니다.</li>
+</ul>
+<h2>주의할 점</h2>
+<p>이 기능은 배포할 DB의 확장과 스키마를 재현합니다. 일반 검증의 의존성 설치·컴파일과 DB를 사용하는 테스트는 별개입니다. verification.databases의 테스트 DB 초기화 기능까지 자동으로 확장하는 변경은 아닙니다. 테스트가 DB를 요구한다면 그 단계도 별도 환경 구성이 필요합니다.</p>
+<p><code>/health</code>의 200 응답만으로 DB 업무가 정상이라는 보장은 없습니다. 업무 검증이 목적이면 실제 DB 조회 경로를 검사하거나 version 2/3의 probeSpec으로 업무 요청·기대 응답을 선언하세요. 초기화 SQL 오류나 앱 기동 실패는 실제 결과를 확인해야 합니다.</p>
+</html>

@@ -262,7 +262,7 @@ def resolve_plan(repository: Path, explicit_profile: str | None = None) -> dict[
             if generated:
                 service = dict(generated, **service)
         plan = normalize_service(repository, service)
-        plan.update(source='repository_configuration', dependencies=normalize_dependencies(data.get('dependencies', {})))
+        plan.update(source='repository_configuration', dependencies=normalize_dependencies(data.get('dependencies', {}), repository))
         return plan
 
     return detect_plan(repository)
@@ -385,26 +385,61 @@ def normalize_resources(resources: dict) -> dict:
             'requests': {'cpu': str(min(100, cpu_m)) + 'm', 'memory': str(min(128, memory_mi)) + 'Mi'}}
 
 
-def normalize_dependencies(dependencies: dict) -> dict:
+POSTGIS_IMAGE = 'postgis/postgis:15-3.3'
+MAX_INIT_SQL_BYTES = 64 * 1024
+
+
+def normalize_dependencies(dependencies: dict, repository: Path | None = None) -> dict:
     if not isinstance(dependencies, dict):
         raise ConfigurationRequired('dependencies must be a mapping.')
     if len(dependencies) > 8:
         raise ConfigurationRequired('At most 8 ephemeral dependencies are supported.')
+    result = {}
     for name, dependency in dependencies.items():
         if name == 'repository-api' or not re.fullmatch(r'[a-z][a-z0-9-]{0,40}', name) or not isinstance(dependency, dict):
             raise ConfigurationRequired('Invalid dependency declaration.')
-        if dependency.get('type') not in {'redis', 'postgres', 'mysql'} or set(dependency) - {'type', 'probePath', 'probeSpec', 'extensions'}:
+        if dependency.get('type') not in {'redis', 'postgres', 'mysql'} or set(dependency) - {'type', 'probePath', 'probeSpec', 'extensions', 'initSql'}:
             raise ConfigurationRequired('Only ephemeral redis/postgres/mysql dependencies and explicit business probes are supported.')
-        if 'extensions' in dependency and (dependency['type'] != 'postgres' or dependency['extensions'] != ['vector']):
-            raise ConfigurationRequired('Only explicit postgres extensions: [vector] is supported.')
+        extensions = dependency.get('extensions', [])
+        if 'extensions' in dependency and (dependency['type'] != 'postgres'
+                or not isinstance(extensions, list) or not extensions
+                or any(not isinstance(e, str) or e not in {'vector', 'postgis', 'uuid-ossp'} for e in extensions)
+                or len(extensions) != len(set(extensions)) or {'vector', 'postgis'} <= set(extensions)):
+            raise ConfigurationRequired('Postgres extensions supports vector or postgis, optionally uuid-ossp; vector and postgis cannot be combined.')
+        normalized = dict(dependency)
+        if 'initSql' in dependency:
+            paths = dependency['initSql']
+            if dependency['type'] != 'postgres' or repository is None or not isinstance(paths, list) or not 1 <= len(paths) <= 4:
+                raise ConfigurationRequired('Postgres initSql requires 1..4 repository-relative .sql paths.')
+            contents, size = {}, 0
+            for index, relative in enumerate(paths):
+                path = inside(repository, relative)
+                if path.suffix.lower() != '.sql' or not path.is_file():
+                    raise ConfigurationRequired('Postgres initSql must name existing .sql files inside the repository.')
+                if size + path.stat().st_size > MAX_INIT_SQL_BYTES:
+                    raise ConfigurationRequired('Postgres initSql files must total at most 64 KiB.')
+                with path.open('rb') as stream:
+                    raw = stream.read(MAX_INIT_SQL_BYTES - size + 1)
+                size += len(raw)
+                if size > MAX_INIT_SQL_BYTES:
+                    raise ConfigurationRequired('Postgres initSql files must total at most 64 KiB.')
+                try:
+                    sql = raw.decode('utf-8-sig')
+                except UnicodeDecodeError as exc:
+                    raise ConfigurationRequired('Postgres initSql files must be UTF-8 text.') from exc
+                if '\x00' in sql:
+                    raise ConfigurationRequired('Postgres initSql files must be UTF-8 text without NUL bytes.')
+                contents[f'{index + 1:02d}-repository.sql'] = sql
+            normalized['initSqlContents'] = contents
         if dependency.get('probeSpec') is not None:
             from business_probe import validate_probe_spec
             validate_probe_spec(dependency['probeSpec'])
+        result[name] = normalized
     probe_kinds = [dependency['type'] == 'redis' for dependency in dependencies.values()
                    if dependency.get('probePath') or dependency.get('probeSpec')]
     if len(probe_kinds) != len(set(probe_kinds)):
         raise ConfigurationRequired('Declare at most one business-probed Redis and one database dependency for the current scenario contract.')
-    return dependencies
+    return result
 
 
 def compose_plan(repository: Path, data: dict, filename: str) -> dict:
@@ -750,9 +785,11 @@ def render_plan(plan: dict, namespace: str, image: str, *, workload: str = 'repo
         kind = dependency['type']
         dep_port = DEPENDENCY_PORTS[kind]
         dep_image = {'redis': 'redis:7-alpine', 'postgres': 'postgres:17-alpine', 'mysql': 'mysql:8.4'}.get(kind)
-        if dependency.get('extensions') == ['vector']:
+        if 'vector' in dependency.get('extensions', []):
             from local_databases import PGVECTOR_IMAGE
             dep_image = PGVECTOR_IMAGE
+        elif 'postgis' in dependency.get('extensions', []):
+            dep_image = POSTGIS_IMAGE
         dep_labels = {'app.kubernetes.io/name': name}
         dep_container = {'name': kind, 'image': dep_image, 'ports': [{'containerPort': dep_port}],
                          'resources': {'requests': {'cpu': '50m', 'memory': '64Mi'}, 'limits': {'cpu': '500m', 'memory': '256Mi'}}}
@@ -782,10 +819,25 @@ def render_plan(plan: dict, namespace: str, image: str, *, workload: str = 'repo
                 {'name': 'MYSQL_DATABASE', 'value': 'codereferee'},
                 {'name': 'MYSQL_ROOT_PASSWORD', 'value': secrets.token_hex(24)}]
         dep_container['readinessProbe'] = {'tcpSocket': {'port': dep_port}, 'periodSeconds': 2}
+        pod_volumes = []
+        if kind == 'postgres':
+            sql_files = dict(dependency.get('initSqlContents', {}))
+            if dependency.get('extensions'):
+                sql_files['00-extensions.sql'] = '\n'.join(
+                    f'CREATE EXTENSION IF NOT EXISTS "{extension}";'
+                    for extension in dependency['extensions']) + '\n'
+            if sql_files:
+                config_name = name + '-init-sql'
+                objects.append({'apiVersion': 'v1', 'kind': 'ConfigMap',
+                    'metadata': {'name': config_name, 'namespace': namespace}, 'data': sql_files})
+                dep_container['volumeMounts'] = [{'name': 'init-sql',
+                    'mountPath': '/docker-entrypoint-initdb.d', 'readOnly': True}]
+                pod_volumes = [{'name': 'init-sql', 'configMap': {'name': config_name}}]
         objects += [
             {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': {'name': name, 'namespace': namespace},
              'spec': {'replicas': 1, 'selector': {'matchLabels': dep_labels}, 'template': {'metadata': {'labels': dep_labels},
-                      'spec': {'automountServiceAccountToken': False, 'containers': [dep_container]}}}},
+                      'spec': {'automountServiceAccountToken': False, 'containers': [dep_container],
+                               **({'volumes': pod_volumes} if pod_volumes else {})}}}},
             {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': name, 'namespace': namespace},
              'spec': {'selector': dep_labels, 'ports': [{'port': dep_port, 'targetPort': dep_port}]}}]
         if dependency.get('probePath') or dependency.get('probeSpec'):
