@@ -110,6 +110,7 @@ class RepositoryPatchContractTests(unittest.TestCase):
         payload = request.model_dump(mode='json')
         payload.pop('repository_patches')
         payload.pop('repository_commits')
+        payload.pop('validation_yaml')  # Not present in the pre-upload request schema.
         previous = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         self.assertEqual(ExecutionStore.identity(request), previous)
 

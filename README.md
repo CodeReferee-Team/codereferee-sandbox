@@ -16,6 +16,12 @@ CodeReferee에서 레포를 실제로 실행하고, 부하와 장애를 주입�
 - **정리**: 요청마다 만든 namespace, 이미지, 검사 볼륨을 지웁니다.
 - **멀티서비스**: 한 레포의 업무 앱 2~5개를 `validation.yaml` version 2로 선언할 수 있습니다. 진입점과 장애 대상을 따로 정하고 공유 DB와 함께 요청 namespace에 배포합니다. [기본 설정](docs/multi-service-validation.md) · [루트 검증·인증 업무 probe](docs/authenticated-multi-service.md)를 참고하세요.
 
+## 사용자 레포 변경 없는 설정 업로드
+
+`POST /repositories/validate`에 선택 문자열 `validationYaml`을 보내면 임시 clone의 `.codereferee/validation.yaml`에 적용합니다. 최대 64KiB UTF-8이며 version 1·2·3 설정을 지원합니다. 설정 적용 후 `patchDiff`를 적용하므로 재검증 패치가 유지됩니다. 설정을 생략한 기존 요청은 기존 탐색을 유지합니다. 사용자 GitHub에 커밋하거나 push하지 않습니다.
+
+입력 검증·결과 해시·다른 레포와의 전달 계약·배포 순서는 [요청별 설정 업로드](docs/validation-config-upload.html)를 참고하세요. 운영 비밀값 대신 재현용 값을 사용해야 합니다.
+
 ## 시나리오와 검사 묶음
 
 | `chaosMode` | 내용 |
