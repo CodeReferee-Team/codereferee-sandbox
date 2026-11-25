@@ -259,6 +259,36 @@ class NonDefaultDatabasePortTests(unittest.TestCase):
             '    username: schim\n    password: schim\n')
         self.assertEqual(blank_configuration(self.root), [])
 
+    def test_a_test_failure_with_blank_configuration_does_not_stop_at_the_test_step(self):
+        """실측에서 test 에서 멈춰 배포 단계의 분류까지 가지 못했다.
+
+        비워 둔 키가 테스트만 쓰고 앱 기동에는 필요 없을 수도 있으므로 멈추지 않는다.
+        앱이 못 뜨면 deploy_repository 가 그 키 이름을 들고 설정 필요로 끝낸다.
+        """
+        (self.root / 'pom.xml').write_text('<project/>')
+        (self.root / 'src/test/java').mkdir(parents=True)
+        (self.root / 'src/main/resources/application.yaml').write_text(
+            'spring:\n  datasource:\n'
+            '    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5433/schim}\n'
+            '    username: ${SPRING_DATASOURCE_USERNAME:schim}\n'
+            '    password: ${SPRING_DATASOURCE_PASSWORD:schim}\n'
+            'kakao:\n  rest-api-key: ${KAKAO_REST_API_KEY:}\n'
+            'r2:\n  access-key: ${R2_ACCESS_KEY:}\n  secret-key: ${R2_SECRET_KEY:}\n')
+
+        def fake(command, **kwargs):
+            failed = '--workdir' in command and any('test' in str(part) for part in command)
+            return subprocess.CompletedProcess(command, 1 if failed else 0, '', '')
+
+        with patch('repository_checks.time.sleep'), patch('repository_checks.subprocess.run', side_effect=fake):
+            report = verify_repository(self.root, Path(self.temp.name) / 'cache', 'req')
+        self.assertEqual(report['outcome'], 'passed')
+        self.assertEqual(report['test_execution'], 'blocked_by_unmet_dependencies')
+        coverage = report['verification_coverage']
+        # 넘어가되 통과로 치지 않는다. 범위 제한이 최종 판정까지 따라간다.
+        self.assertEqual((coverage['level'], coverage['reason']), ('partial', 'unmet_configuration'))
+        self.assertEqual([key['name'] for key in coverage['unmet_dependencies']['configuration']],
+                         ['KAKAO_REST_API_KEY', 'R2_ACCESS_KEY', 'R2_SECRET_KEY'])
+
     def test_the_declared_endpoint_is_no_longer_reported_unmet(self):
         declared = declared_endpoints(self.root, include_tests=True)
         self.assertEqual([(e['kind'], e['port'], e['database']) for e in declared], [('postgres', 5433, 'schim')])

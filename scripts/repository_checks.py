@@ -547,10 +547,22 @@ def _verify_repository(repository: Path, cache_name: str, request: str, *, timeo
             #
             # 넘어가되 통과로 치지 않는다. coverage 가 partial 로 남아 최종 판정까지
             # 따라간다. "검증할 것이 없었다"를 "합격"으로 내보내는 구멍을 다시 뚫지 않는다.
-            if phase == 'test' and not infrastructure and unmet['databases']:
+            #
+            # unmet['configuration'] 도 같이 본다. 레포가 기본값을 비워 둔 키는 남의 서비스
+            # 자격증명이라 우리가 띄워 줄 수도, 지어낼 수도 없다. DB 와 같은 처지다.
+            #
+            # 여기서 멈추지 않는 이유가 있다. 그 키가 테스트만 쓰고 앱 기동에는 필요 없는
+            # 경우가 있어서, 멈추면 띄울 수 있었던 앱의 카오스 관측을 잃는다. 넘어가면 둘 중
+            # 하나로 끝난다. 앱이 뜨면 부분 범위를 달고 실제 관측을 하고, 앱이 못 뜨면
+            # deploy_repository 가 그 키 이름을 들고 '설정 필요'로 끝낸다.
+            #
+            # 판단은 우리가 파싱한 설정만으로 한다. 실패한 테스트의 예외 이름이나 메시지는
+            # 쓰지 않는다. 그쪽을 근거로 면제를 주면 레포가 면제 문구를 던지는 길이 열린다.
+            if phase == 'test' and not infrastructure and (unmet['databases'] or unmet['configuration']):
                 report['steps'][-1]['unmet_dependency_suspected'] = True
                 report.update(test_execution='blocked_by_unmet_dependencies',
-                    verification_coverage={'level': 'partial', 'reason': 'unmet_dependencies',
+                    verification_coverage={'level': 'partial',
+                                           'reason': 'unmet_dependencies' if unmet['databases'] else 'unmet_configuration',
                                            'unmet_dependencies': unmet,
                                            'failed_test_types': junit_failure_types(
                                                inside(repository, plan['workingDirectory']), plan['stack'])})
