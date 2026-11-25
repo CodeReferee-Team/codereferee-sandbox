@@ -49,6 +49,7 @@ def main() -> int:
     pod_diagnostics = None
     group_state: dict[str, Any] = {}
     started = time.monotonic()
+    configuration_input = None
     try:
         repository = workspace / "repository"
         clone(args.repository_url, args.branch, repository)
@@ -57,6 +58,12 @@ def main() -> int:
                 raise ConfigurationRequired('commitSha must be a full 40-character SHA.')
             run(['git', 'fetch', '--depth', '1', 'origin', args.commit_sha], cwd=repository)
             run(['git', 'checkout', '--detach', args.commit_sha], cwd=repository)
+        stage = 'detect'
+        if getattr(args, 'validation_file', None):
+            from validation_configuration import apply_configuration
+            if args.profile:
+                raise ConfigurationRequired('Uploaded validation configuration cannot be combined with a profile.')
+            configuration_input = apply_configuration(repository, args.validation_file.read_text(encoding='utf-8'))
         stage = 'patch'
         config_only = False
         patches = {}
@@ -88,6 +95,9 @@ def main() -> int:
                     raise ConfigurationRequired('repositoryPatches requires a version 3 repository group.')
                 plan = resolve_plan(repository)
             payload = deploy_service_group(repository, workspace, request, namespace, commit_sha, plan, args, group_state)
+            if configuration_input:
+                from validation_configuration import effective_configuration
+                payload['configurationInput'] = effective_configuration(repository, configuration_input)
             payload.update(repository={'url': args.repository_url, 'branch': args.branch, 'commitSha': commit_sha},
                            workspaceCleanup=cleanup_workspace(workspace))
             print(json.dumps(payload))
@@ -150,6 +160,9 @@ def main() -> int:
         for dependency in deployments_in(rendered):
             if dependency != target['deployment']:
                 wait_rollout(namespace, dependency, args.rollout_timeout_seconds)
+        if configuration_input:
+            from validation_configuration import effective_configuration
+            configuration_input = effective_configuration(repository, configuration_input)
         workspace_cleanup = cleanup_workspace(workspace)
         print(json.dumps({
             "repository": {"url": args.repository_url, "branch": args.branch, "commitSha": commit_sha},
@@ -158,11 +171,18 @@ def main() -> int:
             "deploymentProfile": profile_name,
             'sandboxReport': checks,
             'workspaceCleanup': workspace_cleanup,
+            **({'configurationInput': configuration_input} if configuration_input else {}),
             'executionPlan': {'source': plan['source'], 'dockerfile': 'generated' if profile.get('generatedDockerfile') else profile.get('dockerfile', 'Dockerfile'),
                               'warnings': plan.get('warnings', []), 'servicePort': target['servicePort']},
         }))
         return 0
     except Exception as exc:
+        if configuration_input:
+            try:
+                from validation_configuration import effective_configuration
+                configuration_input = effective_configuration(repository, configuration_input)
+            except (ValueError, OSError):
+                pass  # Preserve evidence that the original upload was applied, without hiding the failure.
         begin_cleanup()
         if group_state:
             stage = group_state.get('stage', stage)
@@ -231,6 +251,7 @@ def main() -> int:
             'browserCheckAttempted': False, 'requestId': args.request_id,
             'sandboxReport': report,
             'source': {'artifact_cleanup': cleanup, 'workspace_cleanup': cleanup['workspace_cleanup'],
+                       **({'configuration_input': configuration_input} if configuration_input else {}),
                        **({'service_repositories': group_state['service_repositories']}
                           if group_state.get('service_repositories') else {}),
                        **({'repositories': group_state['repositories']} if group_state.get('repositories') else {}),
@@ -368,6 +389,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-id", required=True)
     parser.add_argument("--profile", help="Optional checked-in Sandbox deployment profile override.")
     parser.add_argument("--patch-file", type=Path)
+    parser.add_argument('--validation-file', type=Path, help='Request-scoped validation YAML; applied before refinement patches.')
     parser.add_argument('--repository-patches-file', type=Path)
     parser.add_argument('--repository-commits-file', type=Path)
     parser.add_argument("--rollout-timeout-seconds", type=int, default=240)
