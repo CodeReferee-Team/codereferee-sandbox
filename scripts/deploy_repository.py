@@ -23,6 +23,7 @@ from collect_baseline import kubectl_command, kubectl_environment, load_image_in
 from artifact_cleanup import cleanup_request_image
 from execution_plan import OVERRIDE_FIELDS, ConfigurationRequired, inside, read_yaml, render_plan, resolve_plan
 from local_databases import blank_configuration
+from network_isolation import external_egress_state
 from repository_checks import CheckFailure, verify_repository
 from pod_diagnostics import collect_pod_diagnostics, manifest_redaction_values
 from execution_control import begin_cleanup, record_phase, record_resource, remaining_timeout
@@ -140,6 +141,10 @@ def main() -> int:
             rendered, target = render_plan(plan, namespace, image)
         namespace_may_exist = True
         stage = 'run'
+        # 무엇을 끊고 측정했는지 남긴다. 외부를 쓰는 앱은 그 기능이 죽은 채로 도는데,
+        # 그 사실이 리포트에 없으면 카오스 중의 500 을 레포 탓으로 읽게 된다.
+        if isinstance(checks, dict):
+            checks['network_isolation'] = external_egress_state()
         apply(rendered)
         target["namespace"] = namespace
         try:
