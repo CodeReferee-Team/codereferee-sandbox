@@ -105,15 +105,15 @@ def main() -> int:
             return 0
         if patches or repository_commits:
             raise ConfigurationRequired('repositoryPatches requires a version 3 group without an explicit profile.')
+        stage = 'detect'
+        plan = resolve_plan(repository, args.profile)
+        profile_name = plan.get('profile')
+        profile = load_profile(profile_name) if profile_name else plan
         stage = 'verify'
         if config_only:
             checks = skipped_checks(before)
         else:
             checks = verify_repository(repository, workspace / 'check-cache', request)
-        stage = 'detect'
-        plan = resolve_plan(repository, args.profile)
-        profile_name = plan.get('profile')
-        profile = load_profile(profile_name) if profile_name else plan
         image = f"codereferee/{request}:{commit_sha[:12]}"
         record_resource('images', image)
         dockerfile = inside(repository, profile.get('dockerfile', 'Dockerfile'))
