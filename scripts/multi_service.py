@@ -22,7 +22,7 @@ def resolve_services(repository: Path, data: dict, *, repository_roots: dict | N
     services = data.get('services')
     if not isinstance(services, dict) or not 2 <= len(services) <= 5:
         raise ConfigurationRequired('version 2 requires 2..5 named services.')
-    dependencies = normalize_dependencies(data.get('dependencies', {}))
+    dependencies = normalize_dependencies(data.get('dependencies', {}), repository)
     normalized = {}
     declared_routes = {}
     for name, declaration in services.items():
