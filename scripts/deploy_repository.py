@@ -153,7 +153,7 @@ def main() -> int:
                                                           include_text=not unresolved)
             except Exception:
                 pod_diagnostics = {'pods': [], 'collection_errors': ['diagnostics_collection_failed']}
-            blank = blank_configuration(repository)
+            blank = blank_configuration(repository, supplied=plan.get('env', {}))
             if blank and container_exited(pod_diagnostics):
                 # 앱이 떴다가 죽었고, 레포가 비워 둔 설정 키가 있다. 그 키는 남의 서비스
                 # 자격증명이라 우리가 띄워 줄 수도, 지어낼 수도 없다. 레포의 코드 결함으로
