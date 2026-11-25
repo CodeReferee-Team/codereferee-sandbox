@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from scripts.business_probe import validate_probe_spec
 from scripts.browser_probe import BrowserProbeRunner, validate_browser_probe
 from app.scenarios import ALIASES, SCENARIOS, SUITES, resolve_scenarios
@@ -116,6 +116,7 @@ class RepositoryValidationRequest(BaseModel):
     chaos_target: ChaosTarget | None = Field(default=None, alias="chaosTarget")
     deployment_profile: str | None = Field(default=None, alias="deploymentProfile")
     patch_diff: str | None = Field(default=None, alias="patchDiff")
+    validation_yaml: str | None = Field(default=None, alias='validationYaml', max_length=65536)
     repository_patches: dict[str, dict[str, str]] = Field(default_factory=dict, alias='repositoryPatches')
     repository_commits: dict[str, str] = Field(default_factory=dict, alias='repositoryCommits')
     pods_affected_count: int | None = Field(default=None, alias="podsAffectedCount", strict=True, ge=1, le=16)
@@ -128,6 +129,20 @@ class RepositoryValidationRequest(BaseModel):
     preparation_retries: int = Field(default=0, alias='maxPreparationRetries', ge=0, le=1)
     retry_downloads: bool = Field(default=False, alias='retryDownloads')
     phase_timeouts: dict[str, int] = Field(default_factory=dict, alias='phaseTimeouts')
+
+    @field_validator('validation_yaml')
+    @classmethod
+    def valid_validation_yaml(cls, value):
+        if value is None:
+            return None
+        from scripts.validation_configuration import validate_configuration
+        return validate_configuration(value)
+
+    @model_validator(mode='after')
+    def uploaded_configuration_target(self):
+        if self.validation_yaml is not None and (self.deployment_profile or self.chaos_target is not None or self.chaos_mode == 'fixture'):
+            raise ValueError('validationYaml cannot be combined with a deployment profile, fixture, or pre-deployed target.')
+        return self
 
     @field_validator('repository_patches', mode='before')
     @classmethod
@@ -493,6 +508,8 @@ def strip_private_probe_specs(value):
 
 def attach_repository_checks(result: dict, deployed: dict) -> None:
     """Preserve actual build/test evidence without changing AI judgement policy."""
+    if deployed.get('configurationInput'):
+        result.setdefault('source', {})['configuration_input'] = deployed['configurationInput']
     if 'workspaceCleanup' in deployed:
         result.setdefault('source', {})['workspace_cleanup'] = deployed['workspaceCleanup']
     plan = deployed.get('executionPlan', {})
@@ -752,6 +769,7 @@ def deploy_repository(request: RepositoryValidationRequest, budget: Budget | Non
     patch_path: Path | None = None
     repository_patches_path: Path | None = None
     repository_commits_path: Path | None = None
+    validation_path: Path | None = None
     combined_patch_bytes = len((request.patch_diff or '').encode('utf-8')) + sum(
         len(item['patchDiff'].encode('utf-8')) for item in request.repository_patches.values())
     if combined_patch_bytes > 1_000_000:
@@ -768,6 +786,12 @@ def deploy_repository(request: RepositoryValidationRequest, budget: Budget | Non
         patch_path.write_text(request.patch_diff, encoding="utf-8", newline="\n")
         command.extend(["--patch-file", str(patch_path)])
     try:
+        if request.validation_yaml is not None:
+            runtime = PROJECT_ROOT / '.runtime'
+            runtime.mkdir(exist_ok=True)
+            validation_path = runtime / f'validation-{uuid4().hex}.yaml'
+            validation_path.write_text(request.validation_yaml, encoding='utf-8', newline='\n')
+            command.extend(['--validation-file', str(validation_path)])
         if request.repository_patches:
             runtime = PROJECT_ROOT / '.runtime'
             runtime.mkdir(exist_ok=True)
@@ -799,6 +823,8 @@ def deploy_repository(request: RepositoryValidationRequest, budget: Budget | Non
             repository_patches_path.unlink(missing_ok=True)
         if repository_commits_path:
             repository_commits_path.unlink(missing_ok=True)
+        if validation_path:
+            validation_path.unlink(missing_ok=True)
     try:
         payload = json.loads(completed.stdout)
     except json.JSONDecodeError:

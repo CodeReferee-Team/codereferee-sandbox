@@ -73,7 +73,7 @@ class ExecutionStore:
     def identity(request) -> str:
         payload = request.model_dump(mode='json')
         # Preserve pre-extension replay identities for requests without group patches.
-        for key in ('repository_patches', 'repository_commits'):
+        for key in ('repository_patches', 'repository_commits', 'validation_yaml'):
             if not payload.get(key):
                 payload.pop(key, None)
         canonical = json.dumps(payload, sort_keys=True, separators=(',', ':'))
